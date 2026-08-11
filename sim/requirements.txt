@@ -1,0 +1,7 @@
+# Run this adapter with the parent workspace environment:
+# ../.venv/bin/python sim/mosslight_sim.py
+#
+# The parent environment already contains editable extro-torx and thrml installs.
+jax
+extro-torx
+thrml

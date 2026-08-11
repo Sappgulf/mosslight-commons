@@ -1,0 +1,26 @@
+{
+  "id": "mosslight-commons-prototype",
+  "title": "Mosslight Commons",
+  "grid": { "width": 32, "height": 24, "tileSize": 32 },
+  "startingResources": {
+    "food": 40,
+    "water": 40,
+    "warmth": 28,
+    "light": 18
+  },
+  "species": ["brambleback", "glowtail", "mireling"],
+  "buildings": ["burrow-home", "reed-farm", "lantern-grove", "commons-market"],
+  "events": ["empty-shelves", "lantern-festival", "reed-blight", "unmapped-burrow", "night-caravan"],
+  "palette": {
+    "ink": "#08151B",
+    "deepMoss": "#12352F",
+    "wetlandTeal": "#2D8C84",
+    "mosslightCyan": "#63E6D4",
+    "lanternGold": "#F4B85B",
+    "glowViolet": "#9C7BFF",
+    "brambleRust": "#C96E4A",
+    "reedGreen": "#8DBB72",
+    "paperCream": "#F5E6C8",
+    "warningCoral": "#E87968"
+  }
+}
