@@ -13,7 +13,17 @@ let worldScene: WorldScene | undefined;
 const hudElement = document.querySelector<HTMLElement>("#hud");
 if (!hudElement) throw new Error("Missing #hud element");
 
-const hud = new HUD(hudElement, simulation, () => worldScene?.renderNow());
+const hud = new HUD(
+  hudElement,
+  simulation,
+  () => worldScene?.renderNow(),
+  (action) => {
+    if (action === "in") return worldScene?.zoomIn() ?? 100;
+    if (action === "out") return worldScene?.zoomOut() ?? 100;
+    return worldScene?.resetZoom() ?? 100;
+  },
+  () => worldScene?.getZoomPercent() ?? 100,
+);
 worldScene = new WorldScene(simulation, () => hud.render());
 
 const game = new Phaser.Game({
@@ -109,6 +119,7 @@ window.render_game_to_text = () => {
       source: state.forecastSource,
     },
     buildMode: state.buildMode,
+    zoomPercent: worldScene?.getZoomPercent() ?? 100,
   });
 };
 
@@ -140,6 +151,27 @@ window.addEventListener("keydown", (event) => {
 
   if (event.key === "1" || event.key === "2" || event.key === "4") {
     simulation.setSpeed(Number(event.key) as 1 | 2 | 4);
+    hud.render();
+    return;
+  }
+
+  if (event.key === "+" || event.key === "=") {
+    event.preventDefault();
+    worldScene?.zoomIn();
+    hud.render();
+    return;
+  }
+
+  if (event.key === "-" || event.key === "_") {
+    event.preventDefault();
+    worldScene?.zoomOut();
+    hud.render();
+    return;
+  }
+
+  if (event.key === "0") {
+    event.preventDefault();
+    worldScene?.resetZoom();
     hud.render();
     return;
   }

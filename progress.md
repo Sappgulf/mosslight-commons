@@ -76,6 +76,7 @@ Original prompt: Keep improving the Mosslight Commons creature-city simulation u
 - [x] Generate and normalize transparent building, resident, and gathering-node runtime sprites.
 - [x] Wire runtime sprites into Phaser with vector fallback and smooth painterly filtering.
 - [x] Remove baked reference-board UI texture from live panels and close the debug grid gaps between map tiles.
+- [x] Add camera-aware stepped map zoom from 80% to 130% with HUD controls, keyboard shortcuts, and reset.
 
 ## HUD and asset verification
 
@@ -84,6 +85,7 @@ Original prompt: Keep improving the Mosslight Commons creature-city simulation u
 - Full deterministic gameplay chain still passes after the scene-scale change: gather five nodes, build Root Workshop, dispatch expedition, craft Root Bridge, reveal both zones, and complete all related objectives.
 - Browser network audit returned HTTP 200 for all six building/resident texture families and four node sprites.
 - Torx/THRML bridge restarted successfully; `/health` returns JAX 0.11.0, Torx 0.0.1, and THRML 0.1.4.
+- Zoom QA verified 100% → 110% → 120% button changes, keyboard `+` and `0` reset synchronization, and a successful gather click at 110% zoom.
 
 ## Handoff notes
 

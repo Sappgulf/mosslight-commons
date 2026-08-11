@@ -7,6 +7,9 @@ import type { BuildingType, ItemKey, ResidentGoal, ResourceKey, Species, TileKin
 const TILE_SIZE = 22;
 const OFFSET_X = 52;
 const OFFSET_Y = 60;
+const ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.2, 1.3] as const;
+const DEFAULT_ZOOM_INDEX = 2;
+const CAMERA_FOCUS = { x: 404, y: 324 };
 
 const TILE_COLORS: Record<TileKind, number> = {
   grass: 0x173e35,
@@ -112,6 +115,7 @@ export class WorldScene extends Phaser.Scene {
   private heartbeatLayer!: Phaser.GameObjects.Container;
   private heartbeatGraphic!: Phaser.GameObjects.Graphics;
   private hoverCell: Vec2 | null = null;
+  private zoomIndex = DEFAULT_ZOOM_INDEX;
 
   constructor(simulation: MosslightSimulation, onStateChange: () => void) {
     super({ key: "world" });
@@ -133,6 +137,7 @@ export class WorldScene extends Phaser.Scene {
 
   create(): void {
     this.cameras.main.setBackgroundColor(INK);
+    this.applyZoom();
     this.worldLayer = this.add.container(0, 0);
     this.heartbeatLayer = this.add.container(0, 0).setDepth(3);
     this.heartbeatGraphic = this.add.graphics();
@@ -215,6 +220,34 @@ export class WorldScene extends Phaser.Scene {
     this.drawFogOfWar();
     this.drawMapLabel();
     this.updateHeartbeat();
+  }
+
+  public zoomIn(): number {
+    this.zoomIndex = Math.min(ZOOM_STEPS.length - 1, this.zoomIndex + 1);
+    this.applyZoom();
+    return this.getZoomPercent();
+  }
+
+  public zoomOut(): number {
+    this.zoomIndex = Math.max(0, this.zoomIndex - 1);
+    this.applyZoom();
+    return this.getZoomPercent();
+  }
+
+  public resetZoom(): number {
+    this.zoomIndex = DEFAULT_ZOOM_INDEX;
+    this.applyZoom();
+    return this.getZoomPercent();
+  }
+
+  public getZoomPercent(): number {
+    return Math.round(ZOOM_STEPS[this.zoomIndex] * 100);
+  }
+
+  private applyZoom(): void {
+    const camera = this.cameras.main;
+    camera.setZoom(ZOOM_STEPS[this.zoomIndex]);
+    camera.centerOn(CAMERA_FOCUS.x, CAMERA_FOCUS.y);
   }
 
   private drawTiles(): void {
@@ -721,8 +754,9 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private pointerToCell(pointer: Phaser.Input.Pointer): Vec2 | null {
-    const x = Math.floor((pointer.x - OFFSET_X) / TILE_SIZE);
-    const y = Math.floor((pointer.y - OFFSET_Y) / TILE_SIZE);
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    const x = Math.floor((worldPoint.x - OFFSET_X) / TILE_SIZE);
+    const y = Math.floor((worldPoint.y - OFFSET_Y) / TILE_SIZE);
     if (x < 0 || y < 0 || x >= 32 || y >= 24) return null;
     return { x, y };
   }

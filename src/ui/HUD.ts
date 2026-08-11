@@ -22,6 +22,7 @@ const districtOrder: DistrictType[] = ["meadow", "wetland", "lantern", "market",
 const recipeOrder: RecipeKey[] = ["lantern-kit", "bridge-kit", "comfort-kit"];
 
 type BuildChoice = Exclude<BuildingType, "root-heart">;
+type ZoomAction = "in" | "out" | "reset";
 type MissingCost =
   | { resource: ResourceKey; amount: number }
   | { item: ItemKey; amount: number };
@@ -32,12 +33,23 @@ export class HUD {
   private readonly root: HTMLElement;
   private readonly simulation: MosslightSimulation;
   private readonly onChange: () => void;
+  private readonly onZoomChange: (action: ZoomAction) => number;
+  private readonly getZoomPercent: () => number;
   private activeFieldTab: "field" | "civic" = "field";
+  private zoomPercent = 100;
 
-  constructor(root: HTMLElement, simulation: MosslightSimulation, onChange: () => void) {
+  constructor(
+    root: HTMLElement,
+    simulation: MosslightSimulation,
+    onChange: () => void,
+    onZoomChange: (action: ZoomAction) => number,
+    getZoomPercent: () => number,
+  ) {
     this.root = root;
     this.simulation = simulation;
     this.onChange = onChange;
+    this.onZoomChange = onZoomChange;
+    this.getZoomPercent = getZoomPercent;
     this.root.innerHTML = this.template();
     this.root.addEventListener("click", (event) => this.handleClick(event));
     this.root.addEventListener("keydown", (event) => this.handleKeydown(event));
@@ -54,6 +66,8 @@ export class HUD {
     this.setText("[data-phase]", state.phase.toUpperCase());
     this.setText("[data-status]", state.paused ? "PAUSED" : "LIVE");
     this.setText("[data-provider]", state.forecastSource === "torx-thrml" ? "TORX+THRML" : "LOCAL MODEL");
+    this.zoomPercent = this.getZoomPercent();
+    this.setText("[data-zoom-value]", `${this.zoomPercent}%`);
     this.root.querySelectorAll<HTMLButtonElement>("[data-field-tab]").forEach((button) => {
       const active = button.dataset.fieldTab === this.activeFieldTab;
       button.classList.toggle("is-active", active);
@@ -313,6 +327,13 @@ export class HUD {
       return;
     }
 
+    const zoomButton = target.closest<HTMLButtonElement>("[data-zoom]");
+    if (zoomButton?.dataset.zoom === "in" || zoomButton?.dataset.zoom === "out" || zoomButton?.dataset.zoom === "reset") {
+      this.onZoomChange(zoomButton.dataset.zoom);
+      this.render();
+      return;
+    }
+
     const actionButton = target.closest<HTMLButtonElement>("[data-action]");
     if (actionButton?.dataset.action === "pause") {
       this.simulation.togglePause();
@@ -531,7 +552,14 @@ export class HUD {
     <section class="control-dock panel" aria-label="Simulation controls">
       <button class="control-button control-button--pause" type="button" data-action="pause" aria-pressed="false" aria-keyshortcuts="Space P" title="Pause simulation (Space or P)"><span class="control-icon" data-pause-icon aria-hidden="true">Ⅱ</span><span class="control-label" data-pause-label>PAUSE</span></button>
       <div class="speed-group" role="group" aria-label="Simulation speed"><button type="button" data-speed="1" class="is-active" aria-pressed="true" aria-keyshortcuts="1">1×</button><button type="button" data-speed="2" aria-pressed="false" aria-keyshortcuts="2">2×</button><button type="button" data-speed="4" aria-pressed="false" aria-keyshortcuts="4">4×</button></div>
-      <span class="control-hint">SPACE pause · 1/2/4 speed</span>
+      <div class="zoom-group" role="group" aria-label="Map zoom">
+        <span class="zoom-label">VIEW</span>
+        <button class="zoom-button" type="button" data-zoom="out" aria-label="Zoom map out" title="Zoom map out (minus)">−</button>
+        <span class="zoom-value" data-zoom-value aria-live="polite">100%</span>
+        <button class="zoom-button" type="button" data-zoom="in" aria-label="Zoom map in" title="Zoom map in (plus)">+</button>
+        <button class="zoom-reset" type="button" data-zoom="reset" aria-label="Reset map zoom" title="Reset map zoom (0)">RESET</button>
+      </div>
+      <span class="control-hint">SPACE pause · 1/2/4 speed · −/+ zoom</span>
     </section>
 
     <section class="message-log panel" aria-labelledby="ledger-heading"><div class="panel-eyebrow"><span id="ledger-heading">LEDGER NOTES</span><span data-message-count>1 RECENT</span></div><div class="latest-feedback" data-feedback-panel role="status" aria-live="polite" aria-atomic="true"><span class="feedback-kicker">LATEST</span><p data-feedback>No new notes from the Commons.</p></div><ul data-messages aria-label="Previous ledger notes"></ul></section>`;

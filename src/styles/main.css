@@ -200,6 +200,13 @@ kbd {
 .control-label { font-size: 9px; font-weight: 800; letter-spacing: 0.08em; }
 .speed-group { display: flex; gap: 3px; }
 .speed-group button { min-width: 31px; min-height: 38px; border-radius: 7px; font-size: 10px; }
+.zoom-group { display: flex; align-items: center; gap: 2px; border-left: 1px solid rgba(245, 230, 200, 0.14); }
+.zoom-label { color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: 0.1em; }
+.zoom-button, .zoom-reset { appearance: none; min-height: 38px; border: 1px solid rgba(245, 230, 200, 0.13); border-radius: 7px; color: var(--paper); background: rgba(8, 21, 27, 0.7); cursor: pointer; }
+.zoom-button { width: 26px; font-size: 17px; line-height: 1; }
+.zoom-value { min-width: 30px; color: var(--gold); font-size: 9px; font-weight: 800; text-align: center; }
+.zoom-reset { min-width: 32px; padding: 0 2px; color: var(--muted); font-size: 7px; font-weight: 800; letter-spacing: 0.04em; }
+.zoom-button:hover, .zoom-button:focus-visible, .zoom-reset:hover, .zoom-reset:focus-visible { border-color: var(--teal); color: var(--paper); background: rgba(99, 230, 212, 0.13); }
 .control-hint { display: none; align-self: center; color: var(--muted); font-size: 8px; letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap; }
 
 .message-log { position: absolute; bottom: 18px; left: 20px; width: 270px; max-height: 94px; overflow: hidden; padding: 12px; border-radius: 14px; }
@@ -226,6 +233,12 @@ kbd {
   .right-stack { width: 245px; }
   .field-panel { width: 225px; }
   .message-log { width: 225px; }
+}
+
+@media (min-width: 901px) and (max-width: 1100px) {
+  .right-stack { height: calc(100vh - 250px); }
+  .control-dock { display: grid; grid-template-columns: auto auto; grid-template-rows: auto auto; gap: 6px; }
+  .zoom-group { grid-column: 1 / -1; justify-content: center; padding-top: 5px; border-top: 1px solid rgba(245, 230, 200, 0.12); border-left: 0; }
 }
 
 /* Compact windows use one scrollable HUD column so fixed docks never cover the board. */
@@ -289,6 +302,11 @@ kbd {
   .control-dock { order: 6; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; padding: 7px; border-radius: 12px; }
   .control-button { min-width: 0; min-height: 44px; }
   .speed-group button { min-width: 44px; min-height: 44px; }
+  .zoom-group { grid-column: 1 / -1; justify-content: center; padding: 5px 0 0; border-top: 1px solid rgba(245, 230, 200, 0.12); border-left: 0; }
+  .zoom-button, .zoom-reset { min-height: 38px; }
+  .zoom-button { width: 44px; }
+  .zoom-value { min-width: 44px; }
+  .zoom-reset { min-width: 52px; padding-inline: 8px; }
   .control-hint { display: block; grid-column: 1 / -1; text-align: right; }
 
   .message-log { order: 7; max-height: none; overflow: visible; padding: 11px; border-radius: 13px; }

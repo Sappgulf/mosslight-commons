@@ -42,7 +42,7 @@ The browser prototype works without the second process by using its deterministi
 
 The running page exposes two deterministic inspection hooks:
 
-- `window.render_game_to_text()` returns the current day, phase, resources, buildings, selected resident, forecast, and build mode as JSON.
+- `window.render_game_to_text()` returns the current day, phase, resources, buildings, selected resident, forecast, build mode, and zoom level as JSON.
 - `window.advanceTime(milliseconds)` advances fixed 520ms simulation ticks and refreshes the scene and HUD.
 
-Keyboard shortcuts: Space/P pauses, 1/2/4 changes speed, Escape cancels build mode, and F toggles fullscreen.
+Keyboard shortcuts: Space/P pauses, 1/2/4 changes speed, +/- zooms the map, 0 resets zoom, Escape cancels build mode, and F toggles fullscreen.
