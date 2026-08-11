@@ -429,6 +429,18 @@ export class HUD {
     this.setText("[data-resident-glyph]", resident.species === "glowtail" ? "✧" : resident.species === "mireling" ? "◌" : "●");
     this.setText("[data-resident-stage]", `${resident.stage.toUpperCase()} · ${resident.age}d`);
 
+    // A resident's personal request is the most player-actionable thing about
+    // them, so it sits above the generic decision note.
+    const wantNote = this.root.querySelector<HTMLElement>("[data-resident-want]");
+    if (wantNote) {
+      wantNote.hidden = !resident.want;
+      if (resident.want) {
+        const waited = state.day - resident.want.createdDay;
+        wantNote.textContent = `${resident.want.description}${waited > 6 ? " They have been waiting a while." : ""}`;
+        wantNote.classList.toggle("is-impatient", waited > 6);
+      }
+    }
+
     // Skills panel, added alongside the resident lifecycle.
     const skillList = this.root.querySelector<HTMLElement>("[data-skills]");
     if (skillList) {
@@ -882,6 +894,7 @@ export class HUD {
           <div class="panel-eyebrow"><span>SOCIAL CIRCLE</span><span>NEARBY BONDS</span></div>
           <ul class="relationship-list" data-relationships aria-label="Resident relationships"></ul>
         </div>
+        <p class="want-note" data-resident-want hidden></p>
         <p class="decision-note" data-resident-explanation></p>
       </section>
     </aside>

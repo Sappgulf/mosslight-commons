@@ -431,6 +431,11 @@ export class WorldScene extends Phaser.Scene {
         if (!position) return;
         this.effects.ring(position.x, position.y, 0x8dbb72, 30);
         break;
+      case "want":
+        if (!position) return;
+        this.effects.burst(position.x, position.y, "upgrade", 10);
+        this.effects.floatText(position.x, position.y - 12, "♥", "#ffb9c8");
+        break;
       case "departure":
         if (!position) return;
         this.effects.burst(position.x, position.y, "warn", 8);

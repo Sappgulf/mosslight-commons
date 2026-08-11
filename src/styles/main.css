@@ -558,3 +558,16 @@ kbd {
      row of save controls. Give it room for both rows. */
   .brand-card { min-height: 148px; padding-bottom: 14px; }
 }
+
+/* A resident's personal request — the most actionable thing about them. */
+.want-note {
+  margin: 9px 0 0;
+  padding: 7px 9px;
+  border-left: 2px solid var(--gold);
+  border-radius: 0 6px 6px 0;
+  background: rgba(244, 184, 91, 0.1);
+  color: #f0d9ab;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.want-note.is-impatient { border-left-color: var(--warning); background: rgba(232, 121, 104, 0.12); color: #f0c4bb; }

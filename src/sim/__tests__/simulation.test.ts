@@ -412,3 +412,61 @@ describe("MosslightSimulation", () => {
     });
   });
 });
+
+describe("MosslightSimulation · personal wants", () => {
+  it("gives residents named requests as the settlement runs", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 200);
+    const withWants = simulation.state.residents.filter((resident) => resident.want);
+    expect(withWants.length).toBeGreaterThan(0);
+    for (const resident of withWants) {
+      expect(resident.want!.description).toContain(resident.name);
+      expect(typeof resident.want!.createdDay).toBe("number");
+    }
+  });
+
+  it("never issues a request the resident already has satisfied", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 300);
+    for (const resident of simulation.state.residents) {
+      const want = resident.want;
+      if (!want) continue;
+      // A live want must, by definition, still be unmet on the tick it is read.
+      expect(want.fulfilled).toBe(false);
+    }
+  });
+
+  it("clears a request once the world satisfies it and rewards belonging", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 60);
+    const resident = simulation.state.residents[0]!;
+    // Plant a request that a single build will answer.
+    resident.want = {
+      kind: "lantern",
+      description: `${resident.name} would like a Lantern Grove nearby.`,
+      createdDay: simulation.state.day,
+      fulfilled: false,
+    };
+    resident.needs.belonging = 40;
+
+    const home = simulation.state.buildings.find((b) => b.id === resident.homeId)!;
+    simulation.state.resources = { food: 100, water: 100, warmth: 100, light: 100 };
+    // Place a grove within the want's radius of the resident's home.
+    let placed = false;
+    for (let radius = 1; radius <= 4 && !placed; radius += 1) {
+      for (let dy = -radius; dy <= radius && !placed; dy += 1) {
+        for (let dx = -radius; dx <= radius && !placed; dx += 1) {
+          const cell = { x: home.position.x + dx, y: home.position.y + dy };
+          if (simulation.state.grid[cell.y]?.[cell.x] !== "grass") continue;
+          placed = simulation.build("lantern-grove", cell);
+        }
+      }
+    }
+    expect(placed).toBe(true);
+
+    const before = resident.needs.belonging;
+    advance(simulation, 2);
+    expect(resident.want).toBeUndefined();
+    expect(resident.needs.belonging).toBeGreaterThan(before);
+  });
+});

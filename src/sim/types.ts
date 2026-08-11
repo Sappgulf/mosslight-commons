@@ -40,6 +40,21 @@ export type ObjectiveKind = "collect" | "build" | "expedition" | "craft" | "upgr
 
 export type LifeStage = "sprout" | "adult" | "elder";
 
+export type WantKind = "lantern" | "neighbour" | "market" | "quiet" | "company";
+
+/**
+ * A named personal desire. Wants are what stop forty residents from being forty
+ * copies of the same four need bars — they give individuals something the
+ * player can actually do for them, and they generate the settlement's stories.
+ */
+export interface Want {
+  kind: WantKind;
+  description: string;
+  /** Day the want appeared, used for patience and for ledger copy. */
+  createdDay: number;
+  fulfilled: boolean;
+}
+
 export interface Vec2 {
   x: number;
   y: number;
@@ -86,6 +101,8 @@ export interface Resident {
   stage: LifeStage;
   /** Consecutive ticks with a critical need. At the threshold the resident leaves. */
   distress: number;
+  /** The resident's current personal request, if any. */
+  want?: Want;
 }
 
 export interface Building {

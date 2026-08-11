@@ -38,6 +38,8 @@ import type {
   Species,
   TileKind,
   Vec2,
+  Want,
+  WantKind,
   WorldState,
 } from "./types";
 
@@ -60,6 +62,10 @@ const DEPARTURE_THRESHOLD = 26;
 const COLLAPSE_THRESHOLD = TICKS_PER_DAY * 4;
 const ADULT_AGE = 6;
 const ELDER_AGE = 42;
+/** How often a resident without a want may develop one. */
+const WANT_INTERVAL = TICKS_PER_DAY;
+/** Days a resident will wait before an unmet want starts to weigh on them. */
+const WANT_PATIENCE = 6;
 
 const ZONE_BOUNDS: Record<MapZoneKey, { xMin: number; xMax: number; yMin: number; yMax: number }> = {
   "sunken-reach": { xMin: 24, xMax: 31, yMin: 13, yMax: 20 },
@@ -89,7 +95,7 @@ const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max,
  * of text in a panel.
  */
 export interface SimEvent {
-  type: "gather" | "build" | "upgrade" | "craft" | "objective" | "arrival" | "departure" | "regrowth" | "collapse";
+  type: "gather" | "build" | "upgrade" | "craft" | "objective" | "arrival" | "departure" | "regrowth" | "want" | "collapse";
   position?: Vec2;
   label?: string;
   tone?: "good" | "warning";
@@ -948,6 +954,8 @@ export class MosslightSimulation {
     this.updateMetrics();
     this.updateResidents(dayRolled);
     this.updateRelationships();
+    this.maybeAssignWant();
+    this.updateWants();
     this.maybeWelcomeResident();
     // Everything that could change population, needs, or buildings has now run.
     this.updateMetrics();
@@ -1430,6 +1438,107 @@ export class MosslightSimulation {
         this.addMessage("RECOVERY · The worst has passed, but the Commons is still strained.", "info");
       } else if (status === "thriving" && previous !== "thriving") {
         this.addMessage("RECOVERY · The Commons is thriving again.", "good");
+      }
+    }
+  }
+
+  // --- Personal wants -----------------------------------------------------
+
+  /**
+   * Occasionally gives a resident a specific, nameable request. This is what
+   * makes a particular creature worth caring about: forty identical need bars
+   * become forty neighbours, one of whom would like a lantern near her burrow.
+   */
+  private maybeAssignWant(): void {
+    if (this.state.tick % WANT_INTERVAL !== 0) return;
+    const candidates = this.state.residents.filter((resident) => !resident.want && resident.stage !== "sprout");
+    if (candidates.length === 0) return;
+
+    const resident = this.rng.pick(candidates);
+    const kind = this.pickWantFor(resident);
+    if (!kind) return;
+
+    const home = this.buildingIndex.get(resident.homeId);
+    const where = home ? `plot ${home.position.x + 1}:${home.position.y + 1}` : "the Commons";
+    const descriptions: Record<WantKind, string> = {
+      lantern: `${resident.name} would like a Lantern Grove near ${where}.`,
+      neighbour: `${resident.name} would like another Burrow Home raised nearby.`,
+      market: `${resident.name} wants the market within easy walking distance.`,
+      quiet: `${resident.name} wants the workshop noise away from ${where}.`,
+      company: `${resident.name} is hoping for a closer friendship.`,
+    };
+
+    resident.want = {
+      kind,
+      description: descriptions[kind],
+      createdDay: this.state.day,
+      fulfilled: false,
+    };
+    this.addMessage(`REQUEST · ${descriptions[kind]}`, "info");
+  }
+
+  /** Only offer a want the resident does not already have satisfied. */
+  private pickWantFor(resident: Resident): WantKind | null {
+    const options = (["lantern", "neighbour", "market", "quiet", "company"] as WantKind[])
+      .filter((kind) => !this.isWantSatisfied(resident, kind));
+    return options.length === 0 ? null : this.rng.pick(options);
+  }
+
+  private isWantSatisfied(resident: Resident, kind: WantKind): boolean {
+    const home = this.buildingIndex.get(resident.homeId);
+    const near = (type: BuildingType, radius: number): boolean => {
+      if (!home) return false;
+      return this.state.buildings.some(
+        (building) => building.type === type && manhattan(building.position, home.position) <= radius,
+      );
+    };
+
+    switch (kind) {
+      case "lantern":
+        return near("lantern-grove", 5);
+      case "neighbour":
+        return this.state.buildings.filter(
+          (building) => building.type === "burrow-home" && home && manhattan(building.position, home.position) <= 6,
+        ).length > 1;
+      case "market":
+        return near("commons-market", 7);
+      case "quiet":
+        return !near("root-workshop", 3);
+      case "company":
+        return this.state.relationships.some(
+          (relationship) =>
+            (relationship.aId === resident.id || relationship.bId === resident.id)
+            && relationship.kind !== "rivalry"
+            && relationship.strength >= 72,
+        );
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Resolves outstanding wants. Meeting one is a small, visible reward; letting
+   * one sit unanswered slowly costs belonging, which is the pressure that makes
+   * the request worth reading in the first place.
+   */
+  private updateWants(): void {
+    for (const resident of this.state.residents) {
+      const want = resident.want;
+      if (!want || want.fulfilled) continue;
+
+      if (this.isWantSatisfied(resident, want.kind)) {
+        want.fulfilled = true;
+        resident.needs.belonging = clamp(resident.needs.belonging + 18);
+        this.metricsDirty = true;
+        this.addMessage(`REQUEST MET · ${resident.name} got their wish. The Commons feels a little kinder.`, "good");
+        this.emit({ type: "want", position: resident.position, label: "♥", tone: "good" });
+        // Clear it so the resident can want something else later.
+        resident.want = undefined;
+        continue;
+      }
+
+      if (this.state.day - want.createdDay > WANT_PATIENCE) {
+        resident.needs.belonging = clamp(resident.needs.belonging - 0.06);
       }
     }
   }
