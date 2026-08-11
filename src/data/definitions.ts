@@ -1,4 +1,42 @@
-import type { BuildingType, DistrictType, ItemKey, RecipeKey, ResourceKey, Season, Species } from "../sim/types";
+import type {
+  BuildingType,
+  CollectibleTile,
+  DistrictType,
+  ItemKey,
+  RecipeKey,
+  ResourceKey,
+  Season,
+  Species,
+} from "../sim/types";
+
+/**
+ * Ticks a depleted wild node takes to regrow, and the season in which it
+ * regrows fastest. Regrowth is what turns fieldwork from a one-time strip-mine
+ * into a renewable loop.
+ */
+export const REGROWTH_DEFINITIONS: Record<
+  CollectibleTile,
+  { ticks: number; favouredSeason: Season; label: string }
+> = {
+  fern: { ticks: 42, favouredSeason: "mosswake", label: "Fern Patch" },
+  mushroom: { ticks: 58, favouredSeason: "emberfall", label: "Ember Mushroom" },
+  crystal: { ticks: 76, favouredSeason: "longshade", label: "Moon Crystal" },
+  ruin: { ticks: 96, favouredSeason: "suncrest", label: "Root Ruin" },
+};
+
+export const MAX_BUILDING_LEVEL = 3;
+
+/**
+ * Upgrade cost per target level. Level 2 and 3 multiply a building's output by
+ * `OUTPUT_MULTIPLIER[level]`, which is what gives the mid game somewhere to go
+ * once the map runs out of good plots.
+ */
+export const UPGRADE_COSTS: Record<number, { cost: Partial<Record<ResourceKey, number>>; itemCost: Partial<Record<ItemKey, number>>; duration: number }> = {
+  2: { cost: { food: 12, warmth: 10 }, itemCost: { "seed-pod": 2 }, duration: 8 },
+  3: { cost: { food: 20, warmth: 16, light: 10 }, itemCost: { resin: 2, moonwater: 2 }, duration: 14 },
+};
+
+export const OUTPUT_MULTIPLIER: Record<number, number> = { 1: 1, 2: 1.6, 3: 2.3 };
 
 export const RESOURCE_DEFINITIONS: Record<
   ResourceKey,
@@ -236,6 +274,35 @@ export const BUILDING_DEFINITIONS: Record<BuildingType, BuildingDefinition> = {
     itemCost: { resin: 2, "map-fragment": 1 },
   },
 };
+
+/** Copy shown by the first-run onboarding walkthrough. */
+export const ONBOARDING_STEPS: Array<{ title: string; body: string; hint: string }> = [
+  {
+    title: "Welcome to the Commons",
+    body: "You tend a basin, not an empire. Residents make their own choices; you shape the ground they choose from.",
+    hint: "The map is live. Click any creature to follow what it is thinking.",
+  },
+  {
+    title: "Gather the wild",
+    body: "Fern patches, ember mushrooms, moon crystals, and root ruins hold the materials every civic project needs.",
+    hint: "Click a wild node on the map to gather it. Nodes regrow with the seasons.",
+  },
+  {
+    title: "Raise what they need",
+    body: "Food, water, warmth, and light all drain with population. Buildings are how you keep ahead of that drain.",
+    hint: "Pick a tool from the BUILD dock, then click a valid tile to place it.",
+  },
+  {
+    title: "Refine and explore",
+    body: "A Root Workshop turns found materials into kits. A Root Bridge opens routes past the mapped basin.",
+    hint: "Use the CIVIC TOOLS tab to craft, set a district focus, and dispatch scouts.",
+  },
+  {
+    title: "Watch the forecast",
+    body: "The outlook panel reads the settlement's state and names what is coming. Warnings are worth acting on early.",
+    hint: "Space pauses, 1/2/4 change speed, and −/+ zoom the map. Have a good season.",
+  },
+];
 
 export const EVENT_COPY = {
   emptyShelves: {

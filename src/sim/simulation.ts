@@ -3,21 +3,29 @@ import {
   DISTRICT_DEFINITIONS,
   EVENT_COPY,
   ITEM_DEFINITIONS,
+  MAX_BUILDING_LEVEL,
+  OUTPUT_MULTIPLIER,
   RECIPE_DEFINITIONS,
+  REGROWTH_DEFINITIONS,
   SEASONAL_EVENT_DEFINITIONS,
+  UPGRADE_COSTS,
 } from "../data/definitions";
+import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
 import type {
   Building,
   BuildingType,
+  CollectibleTile,
   District,
   DistrictType,
   Expedition,
   Forecast,
   ItemKey,
+  LifeStage,
   MapZoneKey,
   Message,
   Objective,
   RecipeKey,
+  Regrowth,
   Resident,
   ResidentGoal,
   Relationship,
@@ -25,24 +33,32 @@ import type {
   ResourceKey,
   Season,
   SettlementMetrics,
+  SettlementStatus,
   Species,
   TileKind,
   Vec2,
   WorldState,
 } from "./types";
 
-const GRID_WIDTH = 32;
-const GRID_HEIGHT = 24;
+export const GRID_WIDTH = 32;
+export const GRID_HEIGHT = 24;
 const MAX_RESOURCE = 100;
 const START_DAY = 8;
 const TICKS_PER_DAY = 12;
 const DAYS_PER_SEASON = 7;
 const BASE_HOUSING_CAPACITY = 24;
 const HOME_HOUSING_CAPACITY = 18;
-const MAX_POPULATION = 50;
+const MAX_POPULATION = 60;
 const ARRIVAL_INTERVAL = TICKS_PER_DAY * 3;
+const HISTORY_LIMIT = 240;
 const SEASONS: Season[] = ["mosswake", "suncrest", "emberfall", "longshade"];
-type CollectibleTile = "fern" | "mushroom" | "crystal" | "ruin";
+
+/** Ticks of sustained critical need before a resident leaves the Commons. */
+const DEPARTURE_THRESHOLD = 26;
+/** Ticks the settlement may sit in a failing state before it collapses. */
+const COLLAPSE_THRESHOLD = TICKS_PER_DAY * 4;
+const ADULT_AGE = 6;
+const ELDER_AGE = 42;
 
 const ZONE_BOUNDS: Record<MapZoneKey, { xMin: number; xMax: number; yMin: number; yMax: number }> = {
   "sunken-reach": { xMin: 24, xMax: 31, yMin: 13, yMax: 20 },
@@ -66,7 +82,7 @@ const COLLECTIBLE_REWARDS: Record<
 
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
 
-class SeededRandom {
+export class SeededRandom {
   private value: number;
 
   constructor(seed: number) {
@@ -89,6 +105,14 @@ class SeededRandom {
   pick<T>(items: T[]): T {
     return items[Math.floor(this.next() * items.length)]!;
   }
+
+  getState(): number {
+    return this.value;
+  }
+
+  setState(value: number): void {
+    this.value = value >>> 0;
+  }
 }
 
 const speciesOrder: Species[] = ["brambleback", "glowtail", "mireling"];
@@ -103,13 +127,13 @@ const manhattan = (a: Vec2, b: Vec2) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y
 const sameCell = (a: Vec2, b: Vec2) => a.x === b.x && a.y === b.y;
 
 export class MosslightSimulation {
-  readonly state: WorldState;
-  private readonly rng: SeededRandom;
+  state: WorldState;
+  private rng: SeededRandom;
   private nextMessageId = 1;
   private nextResidentId = 1;
   private nextBuildingId = 1;
   private localForecast: Forecast | undefined;
-  private readonly resourceWarningLevels: Record<ResourceKey, number> = {
+  private resourceWarningLevels: Record<ResourceKey, number> = {
     food: 0,
     water: 0,
     warmth: 0,
@@ -117,9 +141,23 @@ export class MosslightSimulation {
   };
   private housingMessageBand = 0;
 
+  /**
+   * Metrics are expensive relative to how often they actually change, so they
+   * are recomputed at most once per tick and only when something marked them
+   * stale. `updateMetrics()` used to run four times a tick.
+   */
+  private metricsDirty = true;
+  /** id -> building, rebuilt whenever the building list changes. */
+  private buildingIndex = new Map<string, Building>();
+  /** type -> first building of that type, for the common "find the market" lookup. */
+  private buildingByType = new Map<BuildingType, Building>();
+  /** Packed cells occupied by a building, for pathfinding. */
+  private occupiedCells = new Set<number>();
+
   constructor(seed = 20260811) {
     this.rng = new SeededRandom(seed);
     this.state = this.createInitialState(seed);
+    this.reindexBuildings();
     this.localForecast = this.state.forecast;
     for (const resource of Object.keys(this.state.resources) as ResourceKey[]) {
       this.resourceWarningLevels[resource] = this.getResourceWarningLevel(this.state.resources[resource]);
@@ -128,7 +166,7 @@ export class MosslightSimulation {
   }
 
   public advance(): void {
-    if (this.state.paused) return;
+    if (this.state.paused || this.state.status === "collapsed") return;
     for (let index = 0; index < this.state.speed; index += 1) {
       this.tickOnce();
     }
@@ -155,9 +193,91 @@ export class MosslightSimulation {
     this.state.districtFocus = type;
     const district = this.state.districts.find((candidate) => candidate.type === type);
     this.addMessage(`DISTRICT · ${district?.label ?? type} is now the Commons focus.`, "info");
+    this.metricsDirty = true;
     this.updateMetrics();
     this.updateForecast();
   }
+
+  public advanceOnboarding(): void {
+    this.state.onboardingStep += 1;
+  }
+
+  public dismissOnboarding(): void {
+    this.state.onboardingDismissed = true;
+  }
+
+  // --- Building upgrades -------------------------------------------------
+
+  public canUpgrade(buildingId: string): { ok: boolean; reason: string } {
+    const building = this.buildingIndex.get(buildingId);
+    if (!building) return { ok: false, reason: "NO SUCH BUILDING" };
+    if (building.type === "root-heart") return { ok: false, reason: "THE ROOT CANNOT BE REBUILT" };
+    if (building.upgrading) return { ok: false, reason: "ALREADY UNDER WORK" };
+    if (building.level >= MAX_BUILDING_LEVEL) return { ok: false, reason: "FULLY GROWN" };
+
+    const plan = UPGRADE_COSTS[building.level + 1]!;
+    for (const [resource, amount] of Object.entries(plan.cost) as Array<[ResourceKey, number]>) {
+      if (this.state.resources[resource] < amount) {
+        return { ok: false, reason: `NEEDS ${amount} ${this.formatResource(resource).toUpperCase()}` };
+      }
+    }
+    for (const [item, amount] of Object.entries(plan.itemCost) as Array<[ItemKey, number]>) {
+      if (this.state.items[item] < amount) {
+        return { ok: false, reason: `NEEDS ${amount} ${this.formatItem(item).toUpperCase()}` };
+      }
+    }
+    return { ok: true, reason: "READY" };
+  }
+
+  public startUpgrade(buildingId: string): boolean {
+    const check = this.canUpgrade(buildingId);
+    const building = this.buildingIndex.get(buildingId);
+    if (!building) return false;
+    if (!check.ok) {
+      this.addMessage(`UPGRADE BLOCKED · ${BUILDING_DEFINITIONS[building.type].label} · ${check.reason}.`, "warning");
+      return false;
+    }
+
+    const plan = UPGRADE_COSTS[building.level + 1]!;
+    for (const [resource, amount] of Object.entries(plan.cost) as Array<[ResourceKey, number]>) {
+      this.state.resources[resource] -= amount;
+    }
+    for (const [item, amount] of Object.entries(plan.itemCost) as Array<[ItemKey, number]>) {
+      this.state.items[item] -= amount;
+    }
+    building.upgrading = true;
+    building.upgradeProgress = 0;
+    this.addMessage(
+      `UPGRADE · ${BUILDING_DEFINITIONS[building.type].label} is being raised to level ${building.level + 1}.`,
+      "good",
+    );
+    return true;
+  }
+
+  private updateUpgrades(): void {
+    for (const building of this.state.buildings) {
+      if (!building.upgrading) continue;
+      const plan = UPGRADE_COSTS[building.level + 1];
+      if (!plan) {
+        building.upgrading = false;
+        continue;
+      }
+      building.upgradeProgress += 1;
+      if (building.upgradeProgress < plan.duration) continue;
+
+      building.level += 1;
+      building.upgrading = false;
+      building.upgradeProgress = 0;
+      this.metricsDirty = true;
+      this.advanceObjectives("upgrade", undefined, building.type);
+      this.addMessage(
+        `UPGRADE · ${BUILDING_DEFINITIONS[building.type].label} is now level ${building.level}. Output rises to ${Math.round(OUTPUT_MULTIPLIER[building.level]! * 100)}%.`,
+        "good",
+      );
+    }
+  }
+
+  // --- Expeditions and crafting ------------------------------------------
 
   public dispatchExpedition(): boolean {
     if (this.state.expeditions.some((expedition) => expedition.status === "active")) {
@@ -174,7 +294,9 @@ export class MosslightSimulation {
       return false;
     }
 
-    const duration = Math.max(4, 6 - (this.state.districtFocus === "ruin" ? 1 : 0));
+    // A practised scout shortens the route, as does staging from the ruins.
+    const skillBonus = Math.floor(leader.skills.scouting / 40);
+    const duration = Math.max(3, 6 - (this.state.districtFocus === "ruin" ? 1 : 0) - skillBonus);
     const expedition: Expedition = {
       id: `expedition-${this.state.expeditions.length + 1}`,
       leaderId: leader.id,
@@ -189,7 +311,7 @@ export class MosslightSimulation {
     };
     this.state.expeditions.push(expedition);
     leader.goal = "explore";
-    leader.target = expedition.target;
+    this.setResidentTarget(leader, expedition.target);
     leader.lastDecisionExplanation = `I am leading the ${expedition.title.toLowerCase()} for the Commons.`;
     this.addMessage(`EXPEDITION · ${leader.name} left for the ${this.formatZone(zone)}.`, "good");
     return true;
@@ -221,11 +343,20 @@ export class MosslightSimulation {
       const key = item as ItemKey;
       this.state.items[key] = Math.max(0, this.state.items[key] - (amount ?? 0));
     }
+
+    // A skilled workshop crew shortens the bench time.
+    const workshop = this.buildingByType.get("root-workshop");
+    const crafters = this.state.residents.filter((resident) => resident.workplaceId === workshop?.id);
+    const averageCrafting = crafters.length
+      ? crafters.reduce((sum, resident) => sum + resident.skills.crafting, 0) / crafters.length
+      : 0;
+    const duration = Math.max(2, definition.duration - Math.floor(averageCrafting / 45));
+
     this.state.crafting = {
       id: `craft-${this.state.tick}-${recipe}`,
       recipe,
       progress: 0,
-      duration: definition.duration,
+      duration,
     };
     this.addMessage(`CRAFT · ${definition.label} is on the Root Workshop bench.`, "good");
     return true;
@@ -243,6 +374,10 @@ export class MosslightSimulation {
       .filter((relationship) => relationship.aId === residentId || relationship.bId === residentId)
       .sort((first, second) => second.strength - first.strength)
       .slice(0, 4);
+  }
+
+  public getBuildingAt(position: Vec2): Building | undefined {
+    return this.state.buildings.find((building) => sameCell(building.position, position));
   }
 
   public build(type: Exclude<BuildingType, "root-heart">, position: Vec2): boolean {
@@ -279,7 +414,7 @@ export class MosslightSimulation {
 
     const definition = BUILDING_DEFINITIONS[type];
     for (const [resource, amount] of Object.entries(definition.cost)) {
-      if ((this.state.resources[resource as keyof typeof this.state.resources] ?? 0) < (amount ?? 0)) {
+      if ((this.state.resources[resource as ResourceKey] ?? 0) < (amount ?? 0)) {
         const key = resource as ResourceKey;
         const available = Math.floor(this.state.resources[key]);
         this.addMessage(
@@ -303,8 +438,7 @@ export class MosslightSimulation {
     }
 
     for (const [resource, amount] of Object.entries(definition.cost)) {
-      const key = resource as keyof typeof this.state.resources;
-      this.state.resources[key] -= amount ?? 0;
+      this.state.resources[resource as ResourceKey] -= amount ?? 0;
     }
     for (const [item, amount] of Object.entries(definition.itemCost ?? {})) {
       const key = item as ItemKey;
@@ -316,11 +450,17 @@ export class MosslightSimulation {
       type,
       position,
       level: 1,
+      upgradeProgress: 0,
+      upgrading: false,
     };
     this.state.buildings.push(building);
+    this.reindexBuildings();
     this.state.buildMode = null;
+    this.metricsDirty = true;
     this.advanceObjectives("build", undefined, type);
     this.updateMetrics();
+    // A new building changes the walkable graph, so every in-flight route is stale.
+    this.invalidateAllPaths();
     const capacityNote = type === "burrow-home"
       ? ` · housing ${this.state.metrics.population}/${this.state.metrics.housingCapacity}`
       : "";
@@ -338,12 +478,26 @@ export class MosslightSimulation {
     const reward = COLLECTIBLE_REWARDS[tile];
     const itemAmount = reward.amount + (tile === "fern" && this.state.districtFocus === "meadow" ? 1 : 0);
     this.state.grid[position.y]![position.x] = "grass";
+
+    // Queue the node to regrow rather than losing it from the world forever.
+    const regrowth = REGROWTH_DEFINITIONS[tile];
+    const seasonFactor = this.state.season === regrowth.favouredSeason ? 0.6 : 1;
+    const totalTicks = Math.round(regrowth.ticks * seasonFactor);
+    this.state.regrowth.push({
+      x: position.x,
+      y: position.y,
+      tile,
+      ticksRemaining: totalTicks,
+      totalTicks,
+    });
+
     this.state.items[reward.item] += itemAmount;
     if (reward.resource && reward.resourceAmount) {
       this.state.resources[reward.resource] = clamp(
         this.state.resources[reward.resource] + reward.resourceAmount,
       );
     }
+    this.metricsDirty = true;
     this.advanceObjectives("collect", tile);
     this.updateMetrics();
     this.addMessage(
@@ -373,11 +527,10 @@ export class MosslightSimulation {
 
   public applyForecast(forecast: Forecast, source: WorldState["forecastSource"]): void {
     const previousTitle = this.state.forecast.title;
-    const isLocalFallback = source === "local"
-      && this.state.forecastSource === "torx-thrml"
-      && forecast === this.state.forecast;
-    this.state.forecast = isLocalFallback && this.localForecast ? this.localForecast : forecast;
     this.state.forecastSource = source;
+    // When the bridge drops out, fall back to the most recent locally computed
+    // forecast rather than freezing on a stale remote one.
+    this.state.forecast = source === "local" ? (this.localForecast ?? forecast) : forecast;
     if (source === "torx-thrml" && this.state.forecast.title !== previousTitle) {
       this.addMessage(
         `FORECAST · TORX+THRML sees ${this.state.forecast.title} at ${Math.round(this.state.forecast.probability * 100)}% for ${this.state.forecast.window}.`,
@@ -386,14 +539,53 @@ export class MosslightSimulation {
     }
   }
 
+  // --- Serialization ------------------------------------------------------
+
+  public serialize(): string {
+    return JSON.stringify({
+      version: SAVE_VERSION,
+      rngState: this.rng.getState(),
+      nextMessageId: this.nextMessageId,
+      nextResidentId: this.nextResidentId,
+      nextBuildingId: this.nextBuildingId,
+      resourceWarningLevels: this.resourceWarningLevels,
+      housingMessageBand: this.housingMessageBand,
+      state: this.state,
+    });
+  }
+
+  public restore(payload: SavePayload): void {
+    this.rng.setState(payload.rngState);
+    this.nextMessageId = payload.nextMessageId;
+    this.nextResidentId = payload.nextResidentId;
+    this.nextBuildingId = payload.nextBuildingId;
+    this.resourceWarningLevels = payload.resourceWarningLevels;
+    this.housingMessageBand = payload.housingMessageBand;
+    this.state = payload.state;
+    this.reindexBuildings();
+    this.metricsDirty = true;
+    this.updateMetrics();
+    this.localForecast = this.state.forecast;
+  }
+
+  // --- World construction -------------------------------------------------
+
   private createInitialState(seed: number): WorldState {
     const grid = this.createGrid();
+    const makeBuilding = (id: string, type: BuildingType, position: Vec2): Building => ({
+      id,
+      type,
+      position,
+      level: 1,
+      upgradeProgress: 0,
+      upgrading: false,
+    });
     const buildings: Building[] = [
-      { id: "root-heart", type: "root-heart", position: { x: 16, y: 6 }, level: 1 },
-      { id: "burrow-home-0", type: "burrow-home", position: { x: 11, y: 10 }, level: 1 },
-      { id: "reed-farm-0", type: "reed-farm", position: { x: 7, y: 17 }, level: 1 },
-      { id: "lantern-grove-0", type: "lantern-grove", position: { x: 23, y: 9 }, level: 1 },
-      { id: "commons-market-0", type: "commons-market", position: { x: 17, y: 12 }, level: 1 },
+      makeBuilding("root-heart", "root-heart", { x: 16, y: 6 }),
+      makeBuilding("burrow-home-0", "burrow-home", { x: 11, y: 10 }),
+      makeBuilding("reed-farm-0", "reed-farm", { x: 7, y: 17 }),
+      makeBuilding("lantern-grove-0", "lantern-grove", { x: 23, y: 9 }),
+      makeBuilding("commons-market-0", "commons-market", { x: 17, y: 12 }),
     ];
 
     const residents = this.createResidents(buildings);
@@ -410,6 +602,7 @@ export class MosslightSimulation {
       items: { "seed-pod": 0, resin: 0, moonwater: 0, "map-fragment": 0 },
       revealed: this.createRevealedGrid(),
       revealedAreas: [],
+      regrowth: [],
       buildings,
       residents,
       districts,
@@ -419,67 +612,8 @@ export class MosslightSimulation {
       seasonalEvent: this.createSeasonalEvent("mosswake"),
       crafting: null,
       crafted: { "lantern-kit": 0, "bridge-kit": 0, "comfort-kit": 0 },
-      objectives: [
-        {
-          id: "survey-basin",
-          title: "Survey the Basin",
-          description: "Gather three wild nodes from the Commons.",
-          kind: "collect",
-          target: 3,
-          progress: 0,
-          completed: false,
-          rewardItem: "map-fragment",
-          rewardAmount: 2,
-        },
-        {
-          id: "seed-the-commons",
-          title: "Seed the Commons",
-          description: "Gather two Fern Patches for future growth.",
-          kind: "collect",
-          tile: "fern",
-          target: 2,
-          progress: 0,
-          completed: false,
-          rewardItem: "seed-pod",
-          rewardAmount: 3,
-        },
-        {
-          id: "raise-workshop",
-          title: "Raise a Root Workshop",
-          description: "Build a workshop with resin and a recovered map.",
-          kind: "build",
-          building: "root-workshop",
-          target: 1,
-          progress: 0,
-          completed: false,
-          rewardItem: "moonwater",
-          rewardAmount: 3,
-        },
-        {
-          id: "scout-sunken-reach",
-          title: "Scout the Sunken Reach",
-          description: "Dispatch a resident to reveal the first hidden route.",
-          kind: "expedition",
-          zone: "sunken-reach",
-          target: 1,
-          progress: 0,
-          completed: false,
-          rewardItem: "moonwater",
-          rewardAmount: 2,
-        },
-        {
-          id: "craft-root-bridge",
-          title: "Craft a Root Bridge",
-          description: "Use a Map Fragment and Seed Pod at the workshop.",
-          kind: "craft",
-          recipe: "bridge-kit",
-          target: 1,
-          progress: 0,
-          completed: false,
-          rewardItem: "map-fragment",
-          rewardAmount: 1,
-        },
-      ],
+      objectives: createObjectives(),
+      chapter: 0,
       metrics: {
         population: 0,
         housingCapacity: 0,
@@ -500,10 +634,16 @@ export class MosslightSimulation {
       },
       forecastSource: "local",
       messages: [],
+      history: [],
       selectedResidentId: residents[0]?.id ?? "",
       buildMode: null,
       paused: false,
       speed: 1,
+      status: "thriving",
+      collapseTimer: 0,
+      departures: 0,
+      onboardingStep: 0,
+      onboardingDismissed: false,
     };
 
     state.metrics = this.calculateMetrics(state);
@@ -594,13 +734,20 @@ export class MosslightSimulation {
 
   private createRelationships(residents: Resident[]): Relationship[] {
     const relationships: Relationship[] = [];
-    for (let index = 0; index < residents.length - 1; index += 3) {
+    // Every resident gets at least one bond, so the social layer is real rather
+    // than decorative. Pairing with a neighbour two seats along avoids giving
+    // everyone the same partner.
+    for (let index = 0; index < residents.length; index += 1) {
       const first = residents[index];
-      const second = residents[index + 1];
-      if (!first || !second) continue;
+      const second = residents[(index + 2) % residents.length];
+      if (!first || !second || first.id === second.id) continue;
+      if (relationships.some((existing) =>
+        (existing.aId === first.id && existing.bId === second.id)
+        || (existing.aId === second.id && existing.bId === first.id))) continue;
+
       const kind: RelationshipKind = first.species === second.species
-        ? "kinship"
-        : this.rng.next() > 0.18 ? "friendship" : "rivalry";
+        ? this.rng.next() > 0.7 ? "family" : "kinship"
+        : this.rng.next() > 0.2 ? "friendship" : "rivalry";
       relationships.push({
         id: `relationship-${relationships.length + 1}`,
         aId: first.id,
@@ -643,6 +790,7 @@ export class MosslightSimulation {
     const species = speciesOrder[index % speciesOrder.length]!;
     const work = species === "brambleback" ? home : species === "glowtail" ? grove : farm;
     const offset = { x: (index % 5) - 2, y: Math.floor(index / 5) % 3 - 1 };
+    const age = this.rng.int(ADULT_AGE, 30);
     return {
       id: `resident-${this.nextResidentId++}`,
       name: `${names[index % names.length]!} ${Math.floor(index / names.length) + 1}`,
@@ -665,14 +813,26 @@ export class MosslightSimulation {
         routine: this.rng.next(),
         resilience: this.rng.next(),
       },
+      skills: {
+        farming: this.rng.range(4, 22),
+        crafting: this.rng.range(4, 22),
+        scouting: this.rng.range(4, 22),
+      },
       goal: index % 3 === 0 ? "work" : "socialize",
       target: index % 3 === 0 ? work.position : market.position,
+      path: [],
       lastDecisionExplanation: "Settling into a new neighborhood.",
+      age,
+      stage: stageForAge(age),
+      distress: 0,
     };
   }
 
+  // --- Tick ---------------------------------------------------------------
+
   private tickOnce(): void {
     this.state.tick += 1;
+    const previousDay = this.state.day;
     this.state.day = START_DAY + Math.floor(this.state.tick / TICKS_PER_DAY);
     const elapsedSeasonDays = this.state.day - START_DAY;
     const previousSeason = this.state.season;
@@ -680,19 +840,26 @@ export class MosslightSimulation {
     this.state.seasonDay = (elapsedSeasonDays % DAYS_PER_SEASON) + 1;
     const phaseIndex = this.state.tick % TICKS_PER_DAY;
     this.state.phase = phaseIndex < 2 ? "dawn" : phaseIndex < 7 ? "day" : phaseIndex < 10 ? "dusk" : "night";
+    const dayRolled = this.state.day !== previousDay;
 
     this.updateSeasonalEvent(previousSeason);
+    this.updateRegrowth();
     this.updateExpeditions();
     this.updateCrafting();
+    this.updateUpgrades();
     this.updateResources();
+    // Residents read metrics (housing pressure), so refresh once before they act.
     this.updateMetrics();
-    this.updateResidents();
-    this.updateMetrics();
+    this.updateResidents(dayRolled);
     this.updateRelationships();
     this.maybeWelcomeResident();
+    // Everything that could change population, needs, or buildings has now run.
     this.updateMetrics();
     this.checkResourceWarnings();
     this.checkHousingPressure();
+    this.updateSettlementStatus();
+    this.checkThresholdObjectives();
+    this.updateChapter();
     this.updateForecast();
 
     if (this.state.tick % TICKS_PER_DAY === 0) {
@@ -721,12 +888,40 @@ export class MosslightSimulation {
     this.state.seasonalEvent.daysRemaining = DAYS_PER_SEASON - this.state.seasonDay + 1;
   }
 
+  /** Wild nodes return on a timer, faster in their favoured season. */
+  private updateRegrowth(): void {
+    if (this.state.regrowth.length === 0) return;
+    const remaining: Regrowth[] = [];
+    for (const entry of this.state.regrowth) {
+      const favoured = REGROWTH_DEFINITIONS[entry.tile].favouredSeason === this.state.season;
+      entry.ticksRemaining -= favoured ? 2 : 1;
+      if (entry.ticksRemaining > 0) {
+        remaining.push(entry);
+        continue;
+      }
+      // Only regrow onto ground that is still clear.
+      const current = this.state.grid[entry.y]?.[entry.x];
+      const occupied = this.isOccupied({ x: entry.x, y: entry.y });
+      if (current === "grass" && !occupied) {
+        this.state.grid[entry.y]![entry.x] = entry.tile;
+        this.addMessage(
+          `REGROWTH · A ${REGROWTH_DEFINITIONS[entry.tile].label} has returned at plot ${entry.x + 1}:${entry.y + 1}.`,
+          "good",
+        );
+      }
+    }
+    this.state.regrowth = remaining;
+  }
+
   private updateExpeditions(): void {
     for (const expedition of this.state.expeditions) {
       if (expedition.status !== "active") continue;
       expedition.progress = Math.min(expedition.duration, expedition.progress + 1);
-      const leader = this.state.residents.find((resident) => resident.id === expedition.leaderId);
-      if (leader) this.moveOneStep(leader, expedition.target);
+      const leader = this.buildingIndexResident(expedition.leaderId);
+      if (leader) {
+        leader.skills.scouting = clamp(leader.skills.scouting + 0.6);
+        this.stepAlongPath(leader);
+      }
       if (expedition.progress < expedition.duration) continue;
 
       expedition.status = "complete";
@@ -760,25 +955,56 @@ export class MosslightSimulation {
     } else {
       this.revealZone("old-hollow");
     }
+    // Workshop crews learn from every completed order.
+    const workshop = this.buildingByType.get("root-workshop");
+    for (const resident of this.state.residents) {
+      if (resident.workplaceId === workshop?.id) {
+        resident.skills.crafting = clamp(resident.skills.crafting + 3);
+      }
+    }
+    this.metricsDirty = true;
     this.advanceObjectives("craft", undefined, undefined, undefined, order.recipe);
     this.addMessage(`CRAFT · ${definition.label} is complete. ${definition.description}`, "good");
   }
 
+  /**
+   * Bonds grow when residents share ground and decay when they do not.
+   * Rivalries invert that, and family bonds are stickier than the rest.
+   */
   private updateRelationships(): void {
     if (this.state.tick % 4 !== 0) return;
+    const byId = new Map(this.state.residents.map((resident) => [resident.id, resident]));
     for (const relationship of this.state.relationships) {
-      const first = this.state.residents.find((resident) => resident.id === relationship.aId);
-      const second = this.state.residents.find((resident) => resident.id === relationship.bId);
+      const first = byId.get(relationship.aId);
+      const second = byId.get(relationship.bId);
       if (!first || !second) continue;
       const nearby = manhattan(first.position, second.position) <= 3;
       const focusBonus = this.state.districtFocus === "market" && nearby ? 1.4 : 0;
-      const delta = nearby ? 1.2 + focusBonus : -0.08;
+      const decay = relationship.kind === "family" ? -0.03 : -0.08;
+      const delta = nearby ? 1.2 + focusBonus : decay;
       relationship.strength = clamp(
         relationship.strength + (relationship.kind === "rivalry" ? -delta : delta),
         8,
         96,
       );
-      if (nearby) relationship.sharedDays += 1;
+      if (nearby) {
+        relationship.sharedDays += 1;
+        // Close company is how belonging actually recovers.
+        if (relationship.kind !== "rivalry") {
+          const boost = relationship.strength > 70 ? 0.5 : 0.25;
+          first.needs.belonging = clamp(first.needs.belonging + boost);
+          second.needs.belonging = clamp(second.needs.belonging + boost);
+        } else {
+          first.needs.belonging = clamp(first.needs.belonging - 0.3);
+          second.needs.belonging = clamp(second.needs.belonging - 0.3);
+        }
+      }
+
+      // A long, strong friendship between different species becomes family.
+      if (relationship.kind === "friendship" && relationship.strength > 90 && relationship.sharedDays > 40) {
+        relationship.kind = "family";
+        this.addMessage(`COMMONS · ${first.name} and ${second.name} are family now.`, "good");
+      }
     }
   }
 
@@ -791,54 +1017,128 @@ export class MosslightSimulation {
       }
     }
     this.state.revealedAreas.push(zone);
+    this.invalidateAllPaths();
   }
 
+  /**
+   * Production scales with building level and with the skill of the residents
+   * assigned to each workplace, so upgrades and experienced crews both matter.
+   */
   private updateResources(): void {
-    const farms = this.countBuildings("reed-farm");
-    const homes = this.countBuildings("burrow-home");
-    const groves = this.countBuildings("lantern-grove");
-    const markets = this.countBuildings("commons-market");
-    const workshops = this.countBuildings("root-workshop");
+    const farmOutput = this.weightedOutput("reed-farm", "farming");
+    const homeOutput = this.weightedOutput("burrow-home");
+    const groveOutput = this.weightedOutput("lantern-grove");
+    const marketOutput = this.weightedOutput("commons-market");
+    const workshops = this.weightedOutput("root-workshop", "crafting");
     const population = this.state.residents.length;
-    const craftedResin = Math.min(workshops, this.state.items.resin);
+    const craftedResin = Math.min(Math.ceil(workshops), this.state.items.resin);
     const farmFactor = this.state.districtFocus === "wetland" ? 1.2 : 1;
     const groveFactor = this.state.districtFocus === "lantern" ? 1.2 : 1;
     const marketFactor = this.state.seasonalEvent.effect === "festival" ? 0.16 : 0.06;
     const seasonalWarmth = this.state.seasonalEvent.effect === "bloom" ? 0.25 : 0;
     const seasonalDrain = this.state.seasonalEvent.effect === "watch" ? 0.18 : 0;
 
-    this.state.resources.food = clamp(this.state.resources.food + farms * 1.0 * farmFactor - population * 0.022);
-    this.state.resources.water = clamp(this.state.resources.water + farms * 0.58 * farmFactor - population * 0.014);
-    this.state.resources.warmth = clamp(this.state.resources.warmth + homes * 0.55 - population * 0.012 + craftedResin * 0.18 + seasonalWarmth - seasonalDrain);
-    this.state.resources.light = clamp(this.state.resources.light + groves * 0.72 * groveFactor - population * 0.009 + markets * marketFactor + craftedResin * 0.12 - seasonalDrain);
+    // Rivalries in the settlement drag on every workplace.
+    const rivalryDrag = clamp(
+      1 - this.state.relationships.filter((relationship) => relationship.kind === "rivalry" && relationship.strength > 60).length * 0.015,
+      0.75,
+      1,
+    );
+
+    this.state.resources.food = clamp(
+      this.state.resources.food + farmOutput * 1.0 * farmFactor * rivalryDrag - population * 0.022,
+    );
+    this.state.resources.water = clamp(
+      this.state.resources.water + farmOutput * 0.58 * farmFactor * rivalryDrag - population * 0.014,
+    );
+    this.state.resources.warmth = clamp(
+      this.state.resources.warmth + homeOutput * 0.55 - population * 0.012 + craftedResin * 0.18 + seasonalWarmth - seasonalDrain,
+    );
+    this.state.resources.light = clamp(
+      this.state.resources.light + groveOutput * 0.72 * groveFactor - population * 0.009 + marketOutput * marketFactor + craftedResin * 0.12 - seasonalDrain,
+    );
     this.state.items.resin = Math.max(0, this.state.items.resin - craftedResin);
+    // Resource security feeds metrics, and resources move every single tick.
+    this.metricsDirty = true;
   }
 
-  private updateResidents(): void {
-    const market = this.findBuilding("commons-market");
-    const farm = this.findBuilding("reed-farm");
-    const grove = this.findBuilding("lantern-grove");
+  /**
+   * Effective count of a building type: each building contributes its level
+   * multiplier, scaled by the average relevant skill of its workers.
+   */
+  private weightedOutput(type: BuildingType, skill?: keyof Resident["skills"]): number {
+    let total = 0;
+    for (const building of this.state.buildings) {
+      if (building.type !== type) continue;
+      let contribution = OUTPUT_MULTIPLIER[building.level] ?? 1;
+      if (skill) {
+        const workers = this.state.residents.filter((resident) => resident.workplaceId === building.id);
+        if (workers.length > 0) {
+          const average = workers.reduce((sum, resident) => sum + resident.skills[skill], 0) / workers.length;
+          // Skill swings output between 85% and 130%.
+          contribution *= 0.85 + (average / 100) * 0.45;
+        }
+      }
+      total += contribution;
+    }
+    return total;
+  }
+
+  private updateResidents(dayRolled: boolean): void {
+    const market = this.buildingByType.get("commons-market");
+    const farm = this.buildingByType.get("reed-farm");
+    const grove = this.buildingByType.get("lantern-grove");
     const overcrowding = Math.max(0, this.state.metrics.housingPressure - 0.9);
+    const departed: Resident[] = [];
 
     for (const resident of this.state.residents) {
-      resident.needs.food = clamp(resident.needs.food - (this.state.resources.food < 25 ? 1.1 : 0.55));
-      resident.needs.shelter = clamp(resident.needs.shelter - (this.state.resources.warmth < 20 ? 0.9 : 0.3) - overcrowding * 0.8);
-      resident.needs.safety = clamp(resident.needs.safety - (this.state.resources.light < 20 ? 0.7 : 0.2));
-      resident.needs.belonging = clamp(resident.needs.belonging - (this.state.phase === "night" ? 0.25 : 0.1) - overcrowding * 0.2);
+      if (dayRolled) {
+        resident.age += 1;
+        const nextStage = stageForAge(resident.age);
+        if (nextStage !== resident.stage) {
+          resident.stage = nextStage;
+          if (nextStage === "elder") {
+            this.addMessage(`COMMONS · ${resident.name} is an elder now and works a shorter day.`, "info");
+          }
+        }
+      }
+
+      // Elders are more resilient to hardship but produce less; sprouts learn fast.
+      const stageDrain = resident.stage === "elder" ? 0.85 : resident.stage === "sprout" ? 1.15 : 1;
+      const resilience = 1 - resident.traits.resilience * 0.25;
+      const drainScale = stageDrain * resilience;
+
+      resident.needs.food = clamp(resident.needs.food - (this.state.resources.food < 25 ? 1.1 : 0.55) * drainScale);
+      resident.needs.shelter = clamp(resident.needs.shelter - ((this.state.resources.warmth < 20 ? 0.9 : 0.3) + overcrowding * 0.8) * drainScale);
+      resident.needs.safety = clamp(resident.needs.safety - (this.state.resources.light < 20 ? 0.7 : 0.2) * drainScale);
+      resident.needs.belonging = clamp(resident.needs.belonging - ((this.state.phase === "night" ? 0.25 : 0.1) + overcrowding * 0.2) * drainScale);
+
+      // Sustained hardship eventually drives a resident out. This is the
+      // settlement's real fail pressure — the population can shrink.
+      const worstNeed = Math.min(...Object.values(resident.needs));
+      if (worstNeed < 12) {
+        resident.distress += 1;
+      } else if (resident.distress > 0) {
+        resident.distress -= 1;
+      }
+      if (resident.distress >= DEPARTURE_THRESHOLD) {
+        departed.push(resident);
+        continue;
+      }
 
       const activeExpedition = this.state.expeditions.find(
         (expedition) => expedition.status === "active" && expedition.leaderId === resident.id,
       );
       if (activeExpedition) {
         resident.goal = "explore";
-        resident.target = activeExpedition.target;
+        this.setResidentTarget(resident, activeExpedition.target);
         resident.lastDecisionExplanation = `Leading ${activeExpedition.title.toLowerCase()} · ${activeExpedition.progress}/${activeExpedition.duration} route steps.`;
         continue;
       }
 
       const mostPressing = this.getMostPressingNeed(resident);
       let goal: ResidentGoal = "work";
-      let target: Vec2 | undefined = this.findBuilding(resident.workplaceId)?.position;
+      let target: Vec2 | undefined = this.buildingIndex.get(resident.workplaceId)?.position;
       let explanation = "Following a familiar routine.";
 
       if (mostPressing === "food" && market) {
@@ -851,38 +1151,100 @@ export class MosslightSimulation {
         explanation = "The lanterns are bright enough to make a safe night route.";
       } else if (mostPressing === "shelter") {
         goal = "rest";
-        target = this.findBuilding(resident.homeId)?.position;
+        target = this.buildingIndex.get(resident.homeId)?.position;
         explanation = "Warmth is low; home is the best place to recover.";
-      } else if (mostPressing === "belonging" && market) {
-        goal = "socialize";
-        target = market.position;
-        explanation = "I have been alone too long; the Commons Market is where neighbors meet.";
+      } else if (mostPressing === "belonging") {
+        // Seek out the strongest friend rather than defaulting to the market,
+        // so the social graph actually steers movement.
+        const friend = this.findClosestFriend(resident);
+        if (friend) {
+          goal = "socialize";
+          target = friend.position;
+          explanation = `I have been alone too long; ${friend.name} is good company.`;
+        } else if (market) {
+          goal = "socialize";
+          target = market.position;
+          explanation = "I have been alone too long; the Commons Market is where neighbors meet.";
+        }
       } else if (resident.species === "mireling" && farm) {
         goal = "work";
         target = farm.position;
         explanation = "The reeds need tending before the water changes.";
       } else if (resident.traits.curiosity > 0.7 && this.rng.next() > resident.traits.routine) {
         goal = "explore";
-        target = { x: this.rng.int(4, 28), y: this.rng.int(5, 20) };
+        target = this.findWalkableNear({ x: this.rng.int(4, 28), y: this.rng.int(5, 20) });
         explanation = "A new path appeared on the edge of the neighborhood.";
       }
 
       resident.goal = goal;
-      resident.target = target;
       resident.lastDecisionExplanation = explanation;
-      if (target) this.moveOneStep(resident, target);
+      if (target) this.setResidentTarget(resident, target);
+      this.stepAlongPath(resident);
 
       if (target && sameCell(resident.position, target)) {
         if (goal === "forage") resident.needs.food = clamp(resident.needs.food + 5);
         if (goal === "rest") resident.needs.shelter = clamp(resident.needs.shelter + 6);
         if (goal === "socialize") resident.needs.belonging = clamp(resident.needs.belonging + 7);
-        if (goal === "explore") resident.needs.safety = clamp(resident.needs.safety + 3);
+        if (goal === "explore") {
+          resident.needs.safety = clamp(resident.needs.safety + 3);
+          resident.skills.scouting = clamp(resident.skills.scouting + 0.25);
+        }
         if (goal === "work") {
           resident.needs.food = clamp(resident.needs.food + 1.5);
           resident.needs.belonging = clamp(resident.needs.belonging + 1);
+          // Time on the job is how skill accrues.
+          const workplace = this.buildingIndex.get(resident.workplaceId);
+          const rate = resident.stage === "sprout" ? 0.4 : resident.stage === "elder" ? 0.12 : 0.22;
+          if (workplace?.type === "reed-farm") resident.skills.farming = clamp(resident.skills.farming + rate);
+          else if (workplace?.type === "root-workshop") resident.skills.crafting = clamp(resident.skills.crafting + rate);
+          else resident.skills.scouting = clamp(resident.skills.scouting + rate * 0.5);
         }
       }
     }
+
+    for (const resident of departed) {
+      this.removeResident(resident);
+    }
+    // Average wellbeing is derived from needs, which just moved for everyone.
+    this.metricsDirty = true;
+  }
+
+  private removeResident(resident: Resident): void {
+    this.state.residents = this.state.residents.filter((candidate) => candidate.id !== resident.id);
+    this.state.relationships = this.state.relationships.filter(
+      (relationship) => relationship.aId !== resident.id && relationship.bId !== resident.id,
+    );
+    this.state.expeditions = this.state.expeditions.filter(
+      (expedition) => !(expedition.status === "active" && expedition.leaderId === resident.id),
+    );
+    if (this.state.selectedResidentId === resident.id) {
+      this.state.selectedResidentId = this.state.residents[0]?.id ?? "";
+    }
+    this.state.departures += 1;
+    this.metricsDirty = true;
+    this.addMessage(
+      `DEPARTURE · ${resident.name} left the Commons after too long without care. ${this.state.residents.length} remain.`,
+      "warning",
+    );
+  }
+
+  private findClosestFriend(resident: Resident): Resident | undefined {
+    let best: Resident | undefined;
+    let bestScore = -Infinity;
+    for (const relationship of this.state.relationships) {
+      if (relationship.kind === "rivalry") continue;
+      if (relationship.aId !== resident.id && relationship.bId !== resident.id) continue;
+      const partnerId = relationship.aId === resident.id ? relationship.bId : relationship.aId;
+      const partner = this.state.residents.find((candidate) => candidate.id === partnerId);
+      if (!partner) continue;
+      // Prefer strong bonds that are not far away.
+      const score = relationship.strength - manhattan(resident.position, partner.position) * 1.5;
+      if (score > bestScore) {
+        bestScore = score;
+        best = partner;
+      }
+    }
+    return best;
   }
 
   private maybeWelcomeResident(): void {
@@ -894,6 +1256,10 @@ export class MosslightSimulation {
 
     const resident = this.createResident(this.state.residents.length, this.state.buildings);
     if (!resident) return;
+    // New arrivals start young and unskilled; they grow into the settlement.
+    resident.age = 1;
+    resident.stage = "sprout";
+    resident.skills = { farming: 5, crafting: 5, scouting: 5 };
     this.state.residents.push(resident);
     const neighbor = this.state.residents.find((candidate) => candidate.id !== resident.id);
     if (neighbor) {
@@ -906,6 +1272,7 @@ export class MosslightSimulation {
         sharedDays: 0,
       });
     }
+    this.metricsDirty = true;
     this.updateMetrics();
     this.addMessage(
       `ARRIVAL · ${resident.name} joined the Commons · ${this.state.metrics.population}/${this.state.metrics.housingCapacity} housed.`,
@@ -913,28 +1280,87 @@ export class MosslightSimulation {
     );
   }
 
+  /**
+   * Tracks the settlement between thriving and collapsed. Sitting in a failing
+   * state long enough ends the run — the game can now be lost.
+   */
+  private updateSettlementStatus(): void {
+    if (this.state.status === "collapsed") return;
+
+    const { averageWellbeing, resourceSecurity, population } = this.state.metrics;
+    const starving = Object.values(this.state.resources).filter((value) => value < 12).length;
+    const previous = this.state.status;
+
+    let status: SettlementStatus;
+    if (population === 0) {
+      status = "collapsed";
+    } else if (starving >= 2 || averageWellbeing < 28) {
+      status = "failing";
+    } else if (starving >= 1 || averageWellbeing < 48 || resourceSecurity < 35) {
+      status = "strained";
+    } else {
+      status = "thriving";
+    }
+
+    if (status === "failing") {
+      this.state.collapseTimer += 1;
+      if (this.state.collapseTimer >= COLLAPSE_THRESHOLD) status = "collapsed";
+    } else {
+      this.state.collapseTimer = Math.max(0, this.state.collapseTimer - 2);
+    }
+
+    this.state.status = status;
+
+    if (status !== previous) {
+      if (status === "collapsed") {
+        this.state.paused = true;
+        this.addMessage(
+          `COLLAPSE · The Commons could not hold. ${this.state.departures} residents left and the Mosslight has gone dark on day ${this.state.day}.`,
+          "warning",
+        );
+      } else if (status === "failing") {
+        this.addMessage(
+          "CRISIS · The Commons is failing. Restore food, water, warmth, and light within four days or it will empty.",
+          "warning",
+        );
+      } else if (status === "strained" && previous === "failing") {
+        this.addMessage("RECOVERY · The worst has passed, but the Commons is still strained.", "info");
+      } else if (status === "thriving" && previous !== "thriving") {
+        this.addMessage("RECOVERY · The Commons is thriving again.", "good");
+      }
+    }
+  }
+
+  // --- Metrics ------------------------------------------------------------
+
   private updateMetrics(): void {
+    if (!this.metricsDirty) return;
     this.state.metrics = this.calculateMetrics(this.state);
+    this.metricsDirty = false;
   }
 
   private calculateMetrics(state: WorldState): SettlementMetrics {
     const population = state.residents.length;
     const housingCapacity = this.getHousingCapacity(state.buildings);
     const housingPressure = population / Math.max(1, housingCapacity);
-    const averageWellbeing = state.residents.reduce((sum, resident) => {
-      return sum + Object.values(resident.needs).reduce((inner, need) => inner + need, 0) / 4;
-    }, 0) / Math.max(1, population);
-    const resourceSecurity = Object.values(state.resources).reduce((sum, resource) => sum + resource, 0) / 4;
-    const speciesCounts = speciesOrder.map((species) => state.residents.filter((resident) => resident.species === species).length);
-    const largestSpeciesShare = Math.max(...speciesCounts, 0) / Math.max(1, population);
+    let needsTotal = 0;
+    const speciesCounts: Record<Species, number> = { brambleback: 0, glowtail: 0, mireling: 0 };
+    for (const resident of state.residents) {
+      needsTotal += (resident.needs.shelter + resident.needs.food + resident.needs.safety + resident.needs.belonging) / 4;
+      speciesCounts[resident.species] += 1;
+    }
+    const averageWellbeing = needsTotal / Math.max(1, population);
+    const resourceSecurity = (state.resources.food + state.resources.water + state.resources.warmth + state.resources.light) / 4;
+    const largestSpeciesShare = Math.max(speciesCounts.brambleback, speciesCounts.glowtail, speciesCounts.mireling, 0) / Math.max(1, population);
     const speciesMix = clamp(1 - largestSpeciesShare, 0, 1);
     const housingHealth = clamp(1 - Math.max(0, housingPressure - 0.75) / 0.5, 0, 1);
     const marketBonus = this.countBuildings("commons-market", state) > 0 ? 5 : 0;
     const districtBonus = state.districtFocus === "market" ? 3 : 0;
     const relationshipBalance = state.relationships.reduce((sum, relationship) => {
-      return sum + (relationship.kind === "rivalry" ? -relationship.strength : relationship.strength);
+      const weight = relationship.kind === "rivalry" ? -1 : relationship.kind === "family" ? 1.3 : 1;
+      return sum + weight * relationship.strength;
     }, 0) / Math.max(1, state.relationships.length);
-    const relationshipBonus = clamp(relationshipBalance / 25, -3, 3);
+    const relationshipBonus = clamp(relationshipBalance / 25, -4, 4);
     const harmony = clamp(
       averageWellbeing * 0.55
       + resourceSecurity * 0.15
@@ -1011,18 +1437,95 @@ export class MosslightSimulation {
   }
 
   private getMostPressingNeed(resident: Resident): keyof Resident["needs"] {
-    return (Object.entries(resident.needs).sort(([, first], [, second]) => first - second)[0]?.[0] ?? "food") as keyof Resident["needs"];
+    const { shelter, food, safety, belonging } = resident.needs;
+    let key: keyof Resident["needs"] = "food";
+    let lowest = food;
+    if (shelter < lowest) { lowest = shelter; key = "shelter"; }
+    if (safety < lowest) { lowest = safety; key = "safety"; }
+    if (belonging < lowest) { key = "belonging"; }
+    return key;
   }
 
-  private moveOneStep(resident: Resident, target: Vec2): void {
-    const dx = Math.sign(target.x - resident.position.x);
-    const dy = Math.sign(target.y - resident.position.y);
-    if (Math.abs(target.x - resident.position.x) >= Math.abs(target.y - resident.position.y)) {
-      resident.position.x = clampCell(resident.position.x + dx, 1, GRID_WIDTH - 2);
-    } else {
-      resident.position.y = clampCell(resident.position.y + dy, 1, GRID_HEIGHT - 2);
+  // --- Movement -----------------------------------------------------------
+
+  private pathContext(): PathContext {
+    return {
+      grid: this.state.grid,
+      revealed: this.state.revealed,
+      blocked: this.occupiedCells,
+    };
+  }
+
+  /** Sets a target and recomputes the route only when the destination changed. */
+  private setResidentTarget(resident: Resident, target: Vec2): void {
+    if (resident.target && sameCell(resident.target, target) && resident.path.length > 0) return;
+    resident.target = { x: target.x, y: target.y };
+    if (sameCell(resident.position, target)) {
+      resident.path = [];
+      return;
+    }
+    resident.path = findPath(this.pathContext(), resident.position, target) ?? [];
+  }
+
+  /** Advances one tile along the resident's route, repathing if it has gone stale. */
+  private stepAlongPath(resident: Resident): void {
+    if (!resident.target) return;
+    if (resident.path.length === 0) {
+      if (sameCell(resident.position, resident.target)) return;
+      resident.path = findPath(this.pathContext(), resident.position, resident.target) ?? [];
+      if (resident.path.length === 0) return;
+    }
+
+    const next = resident.path[0]!;
+    const tile = this.state.grid[next.y]?.[next.x];
+    const isDestination = sameCell(next, resident.target);
+    // The world can change under a resident mid-route (a new building, a
+    // regrown node); repath rather than walking into it.
+    if (!isDestination && (!isWalkable(tile) || this.occupiedCells.has(packCell(next.x, next.y, GRID_WIDTH)))) {
+      resident.path = findPath(this.pathContext(), resident.position, resident.target) ?? [];
+      return;
+    }
+
+    resident.path.shift();
+    resident.position = { x: next.x, y: next.y };
+  }
+
+  private findWalkableNear(position: Vec2): Vec2 {
+    if (isWalkable(this.state.grid[position.y]?.[position.x]) && this.isRevealed(position)) return position;
+    for (let radius = 1; radius <= 4; radius += 1) {
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const candidate = { x: position.x + dx, y: position.y + dy };
+          if (!this.isInside(candidate)) continue;
+          if (!this.isRevealed(candidate)) continue;
+          if (isWalkable(this.state.grid[candidate.y]?.[candidate.x])) return candidate;
+        }
+      }
+    }
+    return position;
+  }
+
+  private invalidateAllPaths(): void {
+    for (const resident of this.state.residents) {
+      resident.path = [];
     }
   }
+
+  private reindexBuildings(): void {
+    this.buildingIndex = new Map(this.state.buildings.map((building) => [building.id, building]));
+    this.buildingByType = new Map();
+    this.occupiedCells = new Set();
+    for (const building of this.state.buildings) {
+      if (!this.buildingByType.has(building.type)) this.buildingByType.set(building.type, building);
+      this.occupiedCells.add(packCell(building.position.x, building.position.y, GRID_WIDTH));
+    }
+  }
+
+  private buildingIndexResident(id: string): Resident | undefined {
+    return this.state.residents.find((resident) => resident.id === id);
+  }
+
+  // --- Forecast -----------------------------------------------------------
 
   private updateForecast(): void {
     const localForecast = this.calculateLocalForecast();
@@ -1046,7 +1549,7 @@ export class MosslightSimulation {
     const foodPressure = clamp(1 - state.resources.food / MAX_RESOURCE, 0, 1);
     const waterPressure = clamp(1 - state.resources.water / MAX_RESOURCE, 0, 1);
     const lightStrength = clamp(state.resources.light / MAX_RESOURCE, 0, 1);
-    const harmony = this.calculateHarmony(state);
+    const harmony = state.metrics.harmony / 100;
     const housingPressure = Math.max(0, state.metrics.housingPressure - 0.9);
     const seasonNote = `${this.formatSeason(state.season)} ${state.seasonDay}/${DAYS_PER_SEASON}`;
     const housingNote = `${state.metrics.population}/${state.metrics.housingCapacity} housed`;
@@ -1101,14 +1604,34 @@ export class MosslightSimulation {
     };
   }
 
-  private calculateHarmony(state: WorldState = this.state): number {
-    const metrics = state === this.state ? state.metrics : this.calculateMetrics(state);
-    return metrics.harmony / 100;
-  }
+  // --- Ledger and objectives ---------------------------------------------
 
   private addMessage(text: string, tone: Message["tone"], state = this.state): void {
-    state.messages.unshift({ id: this.nextMessageId++, text, tone });
+    const message: Message = { id: this.nextMessageId++, text, tone, day: state.day };
+    state.messages.unshift(message);
     state.messages = state.messages.slice(0, 5);
+    // The full ledger is kept separately so the log panel has real scrollback.
+    state.history.unshift(message);
+    if (state.history.length > HISTORY_LIMIT) state.history.length = HISTORY_LIMIT;
+  }
+
+  /** Objectives unlock one chapter at a time as the previous chapter completes. */
+  private updateChapter(): void {
+    const current = this.state.chapter;
+    const chapterObjectives = this.state.objectives.filter((objective) => objective.chapter === current);
+    if (chapterObjectives.length === 0) return;
+    if (!chapterObjectives.every((objective) => objective.completed)) return;
+
+    const nextChapter = current + 1;
+    const hasNext = this.state.objectives.some((objective) => objective.chapter === nextChapter);
+    if (!hasNext) return;
+
+    this.state.chapter = nextChapter;
+    this.addMessage(`CHAPTER · New work is open in the Commons ledger.`, "good");
+  }
+
+  public getActiveObjectives(): Objective[] {
+    return this.state.objectives.filter((objective) => objective.chapter <= this.state.chapter);
   }
 
   private advanceObjectives(
@@ -1120,22 +1643,43 @@ export class MosslightSimulation {
   ): void {
     for (const objective of this.state.objectives) {
       if (objective.completed || objective.kind !== kind) continue;
+      if (objective.chapter > this.state.chapter) continue;
       if (kind === "collect" && objective.tile && objective.tile !== tile) continue;
       if (kind === "build" && objective.building !== building) continue;
+      if (kind === "upgrade" && objective.building && objective.building !== building) continue;
       if (kind === "expedition" && objective.zone !== zone) continue;
       if (kind === "craft" && objective.recipe !== recipe) continue;
 
       objective.progress = Math.min(objective.target, objective.progress + 1);
       if (objective.progress < objective.target) continue;
 
-      objective.completed = true;
-      const rewardText = objective.rewardItem && objective.rewardAmount
-        ? ` · reward +${objective.rewardAmount} ${ITEM_DEFINITIONS[objective.rewardItem].label}`
-        : "";
-      if (objective.rewardItem && objective.rewardAmount) {
-        this.state.items[objective.rewardItem] += objective.rewardAmount;
+      this.completeObjective(objective);
+    }
+  }
+
+  private completeObjective(objective: Objective): void {
+    objective.completed = true;
+    const rewardText = objective.rewardItem && objective.rewardAmount
+      ? ` · reward +${objective.rewardAmount} ${ITEM_DEFINITIONS[objective.rewardItem].label}`
+      : "";
+    if (objective.rewardItem && objective.rewardAmount) {
+      this.state.items[objective.rewardItem] += objective.rewardAmount;
+    }
+    this.addMessage(`OBJECTIVE · ${objective.title} complete${rewardText}.`, "good");
+  }
+
+  /** Threshold objectives are checked against live metrics rather than events. */
+  private checkThresholdObjectives(): void {
+    for (const objective of this.state.objectives) {
+      if (objective.completed || objective.chapter > this.state.chapter) continue;
+      if (objective.kind === "population") {
+        objective.progress = Math.min(objective.target, this.state.metrics.population);
+      } else if (objective.kind === "harmony") {
+        objective.progress = Math.min(objective.target, Math.round(this.state.metrics.harmony));
+      } else {
+        continue;
       }
-      this.addMessage(`OBJECTIVE · ${objective.title} complete${rewardText}.`, "good");
+      if (objective.progress >= objective.target) this.completeObjective(objective);
     }
   }
 
@@ -1143,14 +1687,15 @@ export class MosslightSimulation {
     return state.buildings.filter((building) => building.type === type).length;
   }
 
-  private findBuilding(idOrType: string): Building | undefined {
-    return this.state.buildings.find((building) => building.id === idOrType || building.type === idOrType);
-  }
-
   private getHousingCapacity(buildings: Building[]): number {
-    const roots = buildings.filter((building) => building.type === "root-heart").length;
-    const homes = buildings.filter((building) => building.type === "burrow-home").length;
-    return roots * BASE_HOUSING_CAPACITY + homes * HOME_HOUSING_CAPACITY;
+    let capacity = 0;
+    for (const building of buildings) {
+      // Upgraded homes house more; the Root scales too.
+      const multiplier = OUTPUT_MULTIPLIER[building.level] ?? 1;
+      if (building.type === "root-heart") capacity += BASE_HOUSING_CAPACITY * multiplier;
+      else if (building.type === "burrow-home") capacity += HOME_HOUSING_CAPACITY * multiplier;
+    }
+    return Math.floor(capacity);
   }
 
   private formatResource(resource: ResourceKey): string {
@@ -1162,12 +1707,7 @@ export class MosslightSimulation {
   }
 
   private formatCollectibleTile(tile: CollectibleTile): string {
-    return {
-      fern: "Fern Patch",
-      mushroom: "Ember Mushroom",
-      crystal: "Moon Crystal",
-      ruin: "Root Ruin",
-    }[tile];
+    return REGROWTH_DEFINITIONS[tile].label;
   }
 
   private formatZone(zone: MapZoneKey): string {
@@ -1188,7 +1728,7 @@ export class MosslightSimulation {
   }
 
   private isOccupied(position: Vec2): boolean {
-    return this.state.buildings.some((building) => sameCell(building.position, position));
+    return this.occupiedCells.has(packCell(position.x, position.y, GRID_WIDTH));
   }
 
   private isRevealed(position: Vec2): boolean {
@@ -1200,6 +1740,172 @@ export class MosslightSimulation {
   }
 }
 
+function stageForAge(age: number): LifeStage {
+  return age < ADULT_AGE ? "sprout" : age < ELDER_AGE ? "adult" : "elder";
+}
+
 function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+export const SAVE_VERSION = 2;
+
+export interface SavePayload {
+  version: number;
+  rngState: number;
+  nextMessageId: number;
+  nextResidentId: number;
+  nextBuildingId: number;
+  resourceWarningLevels: Record<ResourceKey, number>;
+  housingMessageBand: number;
+  state: WorldState;
+}
+
+/**
+ * Objectives are grouped into chapters. Chapter 0 is the tutorial arc that
+ * shipped before; later chapters give the mid and late game somewhere to go.
+ */
+function createObjectives(): Objective[] {
+  return [
+    {
+      id: "survey-basin",
+      title: "Survey the Basin",
+      description: "Gather three wild nodes from the Commons.",
+      kind: "collect",
+      target: 3,
+      progress: 0,
+      completed: false,
+      rewardItem: "map-fragment",
+      rewardAmount: 2,
+      chapter: 0,
+    },
+    {
+      id: "seed-the-commons",
+      title: "Seed the Commons",
+      description: "Gather two Fern Patches for future growth.",
+      kind: "collect",
+      tile: "fern",
+      target: 2,
+      progress: 0,
+      completed: false,
+      rewardItem: "seed-pod",
+      rewardAmount: 3,
+      chapter: 0,
+    },
+    {
+      id: "raise-workshop",
+      title: "Raise a Root Workshop",
+      description: "Build a workshop with resin and a recovered map.",
+      kind: "build",
+      building: "root-workshop",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "moonwater",
+      rewardAmount: 3,
+      chapter: 0,
+    },
+    {
+      id: "scout-sunken-reach",
+      title: "Scout the Sunken Reach",
+      description: "Dispatch a resident to reveal the first hidden route.",
+      kind: "expedition",
+      zone: "sunken-reach",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "moonwater",
+      rewardAmount: 2,
+      chapter: 0,
+    },
+    {
+      id: "craft-root-bridge",
+      title: "Craft a Root Bridge",
+      description: "Use a Map Fragment and Seed Pod at the workshop.",
+      kind: "craft",
+      recipe: "bridge-kit",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "map-fragment",
+      rewardAmount: 1,
+      chapter: 0,
+    },
+    // Chapter 1 — consolidate and grow.
+    {
+      id: "raise-a-home",
+      title: "Deepen the Burrows",
+      description: "Upgrade any building to level 2.",
+      kind: "upgrade",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "seed-pod",
+      rewardAmount: 4,
+      chapter: 1,
+    },
+    {
+      id: "forty-strong",
+      title: "Forty Strong",
+      description: "Grow the Commons to forty residents.",
+      kind: "population",
+      target: 40,
+      progress: 0,
+      completed: false,
+      rewardItem: "resin",
+      rewardAmount: 3,
+      chapter: 1,
+    },
+    {
+      id: "light-the-paths",
+      title: "Light the Paths",
+      description: "Craft two Glow Kits for the night routes.",
+      kind: "craft",
+      recipe: "lantern-kit",
+      target: 2,
+      progress: 0,
+      completed: false,
+      rewardItem: "moonwater",
+      rewardAmount: 3,
+      chapter: 1,
+    },
+    // Chapter 2 — the settled Commons.
+    {
+      id: "open-old-hollow",
+      title: "Open the Old Hollow",
+      description: "Chart the second hidden zone beyond the basin.",
+      kind: "expedition",
+      zone: "old-hollow",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "map-fragment",
+      rewardAmount: 3,
+      chapter: 2,
+    },
+    {
+      id: "a-harmonious-commons",
+      title: "A Harmonious Commons",
+      description: "Hold settlement harmony at 80% or above.",
+      kind: "harmony",
+      target: 80,
+      progress: 0,
+      completed: false,
+      rewardItem: "resin",
+      rewardAmount: 4,
+      chapter: 2,
+    },
+    {
+      id: "fully-grown",
+      title: "Fully Grown",
+      description: "Complete three more building upgrades.",
+      kind: "upgrade",
+      target: 3,
+      progress: 0,
+      completed: false,
+      rewardItem: "moonwater",
+      rewardAmount: 5,
+      chapter: 2,
+    },
+  ];
 }

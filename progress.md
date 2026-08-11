@@ -93,3 +93,73 @@ Original prompt: Keep improving the Mosslight Commons creature-city simulation u
 - Keep text-heavy interface elements in the DOM.
 - Preserve the Mosslight palette: ink, deep moss, teal, paper, gold, and warning coral.
 - Do not discard unrelated untracked Torx/THRML work in the parent repository.
+
+## Systems overhaul pass
+
+Addressed the fourteen findings from the codebase audit.
+
+### Foundation
+
+- [x] Replace the immediate-mode renderer with a retained-mode one. Terrain, fog,
+      districts, buildings, and residents are pooled per entity and redrawn only
+      when their inputs change. A pointer move now touches one small hover layer
+      instead of rebuilding ~800 tiles plus every sprite.
+- [x] Move the simulation clock out of the Phaser scene into a fixed-step
+      accumulator (`src/sim/clock.ts`) with tab-visibility handling, so a
+      stalled frame or backgrounded tab cannot desynchronise the world.
+- [x] Add save/load: versioned localStorage autosave, manual save/load, file
+      export/import, and a "new Commons" reset.
+- [x] Add Vitest with 41 deterministic simulation and pathfinding tests, wired
+      into `npm run build`.
+- [x] Cache settlement metrics behind a dirty flag; the tick loop recomputed
+      them four times per tick.
+- [x] Rework the Torx bridge: AbortController, exponential backoff, a trimmed
+      request payload, and a hard stand-down on non-local hosts.
+- [x] Upgrade Phaser 3 → 4, Vite 7 → 8, TypeScript 5 → 7, `@types/node` 22 → 26,
+      and split Phaser into its own long-lived chunk.
+- [x] Repo hygiene: screenshots moved under `docs/screenshots`, Playwright
+      session artifacts and build output gitignored.
+
+### Gameplay
+
+- [x] A* pathfinding over the tile grid with per-tile movement costs. Residents
+      no longer walk through water, stone, or buildings, and prefer roads.
+- [x] Wild nodes regrow on a season-weighted timer instead of being consumed
+      permanently.
+- [x] Building levels 1–3 with a cost, a build time, larger art, and higher
+      output; housing capacity scales with home level.
+- [x] Resident lifecycle: ageing, life stages, skills that grow with work and
+      feed production, and departure after sustained hardship.
+- [x] Relationships drive behaviour — residents seek out friends, rivalries drag
+      on output, and long friendships become family.
+- [x] Settlement status (thriving/strained/failing/collapsed) with a real fail
+      state and an end-of-run screen.
+- [x] Full ledger with day-stamped scrollback and tone filtering, replacing the
+      five-line cap.
+- [x] Synthesised audio (phase-dependent ambient bed plus event cues) and a
+      five-step first-run walkthrough.
+- [x] Objectives split into three chapters that unlock in sequence.
+
+### Verification
+
+- `npm run build` runs `tsc --noEmit`, 41 Vitest tests, and `vite build`; all pass.
+- Live browser checks confirmed: gather → item → regrowth queue → objective →
+  ledger; a full L1→L2 upgrade raising housing capacity 42 → 52; expedition
+  completion revealing the Sunken Reach; district focus; save → drift → load
+  restoring the exact tick and resources; state surviving a page reload; and a
+  fern regrowing on schedule.
+- Full re-render measured at 1.38ms per tick.
+- Desktop (1280×720) and mobile (375×812) layouts inspected; no horizontal
+  overflow, and the right rail scrolls with the building inspector open.
+- Console is clean apart from the optional sidecar, which is now disabled off
+  localhost.
+
+### Bugs found and fixed during this pass
+
+- Metrics cache was never invalidated by per-tick resource changes, so
+  `resourceSecurity` went stale. Caught by a test.
+- `setScale` on building art discarded `setDisplaySize`, rendering sprites at
+  native texture size.
+- A CSS `display: grid` rule silently defeated the `hidden` attribute on the
+  building inspector.
+- `Scene.events` was accessed before the scene had booted inside a Game.

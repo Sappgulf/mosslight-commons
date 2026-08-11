@@ -36,7 +36,18 @@ cd /Users/austinbeatty/Documents/ChatGPT/torx/creaturecity
 ../.venv/bin/python sim/mosslight_sim.py
 ```
 
-The browser prototype works without the second process by using its deterministic local forecast. When the bridge is running, the HUD changes to `TORX+THRML`.
+The browser prototype works without the second process by using its deterministic local forecast. When the bridge is running, the HUD changes to `TORX+THRML`. The bridge is only polled when the page is served from localhost, or when `VITE_TORX_ENDPOINT` is set.
+
+## Tests
+
+```bash
+npm test
+```
+
+`npm run build` type-checks, runs the test suite, and then builds. The suite covers
+simulation determinism, long-run invariants, gathering and regrowth, building and
+upgrades, expeditions and crafting, objectives and chapters, the fail state,
+save serialization, and A* pathfinding.
 
 ## Browser QA hooks
 
@@ -45,4 +56,10 @@ The running page exposes two deterministic inspection hooks:
 - `window.render_game_to_text()` returns the current day, phase, resources, buildings, selected resident, forecast, build mode, and zoom level as JSON.
 - `window.advanceTime(milliseconds)` advances fixed 520ms simulation ticks and refreshes the scene and HUD.
 
-Keyboard shortcuts: Space/P pauses, 1/2/4 changes speed, +/- zooms the map, 0 resets zoom, Escape cancels build mode, and F toggles fullscreen.
+Keyboard shortcuts: Space/P pauses, 1/2/4 changes speed, +/- zooms the map, 0 resets zoom, Escape cancels build mode, M mutes audio, Ctrl/Cmd+S saves, and F toggles fullscreen.
+
+## Saves
+
+The world autosaves to `localStorage` every 20 seconds and on page hide, and resumes
+on load. The brand panel exposes SAVE, LOAD, EXPORT, IMPORT, and NEW; EXPORT writes a
+JSON file that IMPORT reads back.

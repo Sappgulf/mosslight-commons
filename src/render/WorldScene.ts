@@ -7,6 +7,8 @@ import type { BuildingType, ItemKey, ResidentGoal, ResourceKey, Species, TileKin
 const TILE_SIZE = 22;
 const OFFSET_X = 52;
 const OFFSET_Y = 60;
+const GRID_W = 32;
+const GRID_H = 24;
 const ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.2, 1.3] as const;
 const DEFAULT_ZOOM_INDEX = 2;
 const CAMERA_FOCUS = { x: 404, y: 324 };
@@ -34,6 +36,15 @@ const PHASE_COLORS = {
   dusk: 0xf4b85b,
   night: 0xc8a9ff,
 } as const;
+
+/** Ambient tint laid over the whole board, giving night a real look. */
+const PHASE_OVERLAY: Record<keyof typeof PHASE_COLORS, { color: number; alpha: number }> = {
+  dawn: { color: 0xffb46b, alpha: 0.07 },
+  day: { color: 0x63e6d4, alpha: 0 },
+  dusk: { color: 0xf4834b, alpha: 0.09 },
+  // Night reads as night without burying the terrain palette underneath it.
+  night: { color: 0x2a2f6b, alpha: 0.17 },
+};
 
 const GOAL_COLORS: Record<ResidentGoal, number> = {
   rest: 0xf4b85b,
@@ -108,38 +119,149 @@ interface BuildPreviewState {
   reason: string;
 }
 
+/** Per-resident retained display objects, reused across frames. */
+interface ResidentView {
+  container: Phaser.GameObjects.Container;
+  marker: Phaser.GameObjects.Graphics;
+  sprite: Phaser.GameObjects.Image | null;
+  label: Phaser.GameObjects.Text;
+  lastGoal: ResidentGoal | null;
+  lastSelected: boolean | null;
+}
+
+/** Per-building retained display objects. */
+interface BuildingView {
+  container: Phaser.GameObjects.Container;
+  art: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
+  /** Base display size for image art, so level scaling never falls back to the native texture size. */
+  baseSize: { width: number; height: number } | null;
+  levelPips: Phaser.GameObjects.Graphics;
+  label: Phaser.GameObjects.Text;
+  lastLevel: number;
+  lastUpgrading: boolean;
+}
+
+/**
+ * Retained-mode renderer.
+ *
+ * The previous implementation tore down and rebuilt the entire scene graph on
+ * every pointer move and every simulation tick — roughly 800 tile rects plus
+ * every building, resident, and fog cell, several times a second. Here each
+ * layer owns persistent display objects and is redrawn only when the state it
+ * depends on actually changes:
+ *
+ * - terrain and fog: only when the grid or revealed mask changes (`terrainRevision`)
+ * - buildings and residents: pooled per entity, transformed rather than recreated
+ * - hover and build preview: their own small layer, the only thing a mouse move touches
+ */
 export class WorldScene extends Phaser.Scene {
   private readonly simulation: MosslightSimulation;
   private readonly onStateChange: () => void;
-  private worldLayer!: Phaser.GameObjects.Container;
+
+  private terrainLayer!: Phaser.GameObjects.Graphics;
+  private nodeLayer!: Phaser.GameObjects.Container;
+  private districtLayer!: Phaser.GameObjects.Container;
+  private staticLayer!: Phaser.GameObjects.Graphics;
+  private buildingLayer!: Phaser.GameObjects.Container;
+  private residentLayer!: Phaser.GameObjects.Container;
+  private intentLayer!: Phaser.GameObjects.Graphics;
+  private intentLabel!: Phaser.GameObjects.Text;
+  private expeditionLayer!: Phaser.GameObjects.Container;
+  private hoverLayer!: Phaser.GameObjects.Graphics;
+  private previewLabel!: Phaser.GameObjects.Text;
+  private phaseOverlay!: Phaser.GameObjects.Rectangle;
+  private titleText!: Phaser.GameObjects.Text;
+  private hintText!: Phaser.GameObjects.Text;
   private heartbeatLayer!: Phaser.GameObjects.Container;
   private heartbeatGraphic!: Phaser.GameObjects.Graphics;
+
+  private readonly residentViews = new Map<string, ResidentView>();
+  private readonly buildingViews = new Map<string, BuildingView>();
+
   private hoverCell: Vec2 | null = null;
   private zoomIndex = DEFAULT_ZOOM_INDEX;
+  private ready = false;
 
-  constructor(simulation: MosslightSimulation, onStateChange: () => void) {
+  /** Cheap change detectors, so each layer redraws only when it must. */
+  private terrainSignature = "";
+  private districtSignature = "";
+  private lastPhase: string | null = null;
+  private lastHintText = "";
+
+  private readonly onBuildingSelected: (buildingId: string) => void;
+
+  constructor(
+    simulation: MosslightSimulation,
+    onStateChange: () => void,
+    onBuildingSelected: (buildingId: string) => void,
+  ) {
     super({ key: "world" });
     this.simulation = simulation;
     this.onStateChange = onStateChange;
+    this.onBuildingSelected = onBuildingSelected;
   }
 
   preload(): void {
     for (const [key, fileName] of Object.entries(BUILDING_TEXTURE_KEYS)) {
-      if (fileName) this.load.image(fileName, `/assets/runtime/buildings/${key}.png`);
+      if (fileName) this.load.image(fileName, `assets/runtime/buildings/${key}.png`);
     }
     for (const [species, fileName] of Object.entries(RESIDENT_TEXTURE_KEYS)) {
-      this.load.image(fileName, `/assets/runtime/residents/${species}.png`);
+      this.load.image(fileName, `assets/runtime/residents/${species}.png`);
     }
     for (const [kind, fileName] of Object.entries(NODE_TEXTURE_KEYS)) {
-      if (fileName) this.load.image(fileName, `/assets/runtime/nodes/${kind}.png`);
+      if (fileName) this.load.image(fileName, `assets/runtime/nodes/${kind}.png`);
     }
   }
 
   create(): void {
     this.cameras.main.setBackgroundColor(INK);
     this.applyZoom();
-    this.worldLayer = this.add.container(0, 0);
-    this.heartbeatLayer = this.add.container(0, 0).setDepth(3);
+
+    // Board frame — drawn once, never again.
+    const board = this.add.graphics().setDepth(0);
+    board.fillStyle(0x0d2727, 1);
+    board.fillRoundedRect(OFFSET_X - 12, OFFSET_Y - 12, TILE_SIZE * GRID_W + 24, TILE_SIZE * GRID_H + 24, 18);
+    board.lineStyle(2, 0x2d8c84, 0.55);
+    board.strokeRoundedRect(OFFSET_X - 12, OFFSET_Y - 12, TILE_SIZE * GRID_W + 24, TILE_SIZE * GRID_H + 24, 18);
+
+    this.terrainLayer = this.add.graphics().setDepth(1);
+    this.nodeLayer = this.add.container(0, 0).setDepth(2);
+    this.districtLayer = this.add.container(0, 0).setDepth(3);
+    this.staticLayer = this.add.graphics().setDepth(3);
+    this.hoverLayer = this.add.graphics().setDepth(4);
+    this.intentLayer = this.add.graphics().setDepth(5);
+    this.buildingLayer = this.add.container(0, 0).setDepth(6);
+    this.residentLayer = this.add.container(0, 0).setDepth(7);
+    this.expeditionLayer = this.add.container(0, 0).setDepth(8);
+
+    this.intentLabel = this.add.text(0, 0, "", {
+      fontFamily: "system-ui, sans-serif",
+      fontSize: "8px",
+      fontStyle: "bold",
+      backgroundColor: "#08151be6",
+      padding: { x: 4, y: 2 },
+    }).setOrigin(0.5, 1).setDepth(9).setVisible(false);
+
+    this.previewLabel = this.add.text(0, 0, "", {
+      fontFamily: "system-ui, sans-serif",
+      fontSize: "8px",
+      fontStyle: "bold",
+      padding: { x: 5, y: 3 },
+      stroke: "#08151b",
+      strokeThickness: 2,
+    }).setOrigin(0.5, 1).setDepth(10).setVisible(false);
+
+    // Day/night tint over the board, under the UI text.
+    this.phaseOverlay = this.add.rectangle(
+      OFFSET_X + (TILE_SIZE * GRID_W) / 2,
+      OFFSET_Y + (TILE_SIZE * GRID_H) / 2,
+      TILE_SIZE * GRID_W,
+      TILE_SIZE * GRID_H,
+      0x000000,
+      0,
+    ).setDepth(9).setVisible(false);
+
+    this.heartbeatLayer = this.add.container(0, 0).setDepth(5);
     this.heartbeatGraphic = this.add.graphics();
     this.heartbeatLayer.add(this.heartbeatGraphic);
     this.tweens.add({
@@ -153,6 +275,17 @@ export class WorldScene extends Phaser.Scene {
       yoyo: true,
     });
 
+    this.titleText = this.add.text(OFFSET_X, 23, "M O S S L I G H T   B A S I N", {
+      color: "#63e6d4",
+      fontFamily: "Georgia, serif",
+      fontSize: "13px",
+    }).setDepth(11);
+    this.hintText = this.add.text(OFFSET_X + 1, 41, "", {
+      color: "#9eb9ad",
+      fontFamily: "system-ui, sans-serif",
+      fontSize: "10px",
+    }).setDepth(11);
+
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       const cell = this.pointerToCell(pointer);
       if (!cell) return;
@@ -161,64 +294,53 @@ export class WorldScene extends Phaser.Scene {
       const buildMode = this.simulation.state.buildMode;
       if (buildMode) {
         this.simulation.build(buildMode, cell);
-      } else {
-        if (!this.simulation.collectAt(cell)) this.simulation.selectAt(cell);
+      } else if (!this.simulation.collectAt(cell)) {
+        // Clicking a building selects it for upgrade; otherwise pick a resident.
+        const building = this.simulation.getBuildingAt(cell);
+        if (building) this.onBuildingSelected(building.id);
+        else this.simulation.selectAt(cell);
       }
       this.renderNow();
       this.onStateChange();
     });
 
+    // A pointer move now only redraws the hover layer, not the world.
     this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
       const nextCell = this.pointerToCell(pointer);
       const changed = nextCell?.x !== this.hoverCell?.x || nextCell?.y !== this.hoverCell?.y;
+      if (!changed) return;
       this.hoverCell = nextCell;
-      if (changed) this.renderNow();
+      this.drawHoverLayer();
+      this.drawHeader();
+      this.updateBuildingLabels();
     });
 
     this.input.on("pointerout", () => {
       if (!this.hoverCell) return;
       this.hoverCell = null;
-      this.renderNow();
+      this.drawHoverLayer();
+      this.drawHeader();
+      this.updateBuildingLabels();
     });
 
-    this.time.addEvent({
-      delay: 520,
-      loop: true,
-      callback: () => {
-        this.simulation.advance();
-        this.renderNow();
-        this.onStateChange();
-      },
-    });
-
+    this.ready = true;
     this.renderNow();
   }
 
+  /** Full refresh. Each sub-step early-outs when its inputs are unchanged. */
   public renderNow(): void {
-    if (!this.worldLayer) return;
+    if (!this.ready) return;
     this.input.setDefaultCursor(this.simulation.state.buildMode ? "crosshair" : "pointer");
-    this.worldLayer.removeAll(true);
-
-    const board = this.add.graphics();
-    board.fillStyle(0x0d2727, 1);
-    board.fillRoundedRect(OFFSET_X - 12, OFFSET_Y - 12, TILE_SIZE * 32 + 24, TILE_SIZE * 24 + 24, 18);
-    board.lineStyle(2, 0x2d8c84, 0.55);
-    board.strokeRoundedRect(OFFSET_X - 12, OFFSET_Y - 12, TILE_SIZE * 32 + 24, TILE_SIZE * 24 + 24, 18);
-    this.worldLayer.add(board);
-
-    this.drawTiles();
-    this.drawNodeSprites();
-    this.drawDistricts();
-    this.drawHoverCell();
-    this.drawRootNetwork();
-    this.drawSelectedIntentPath();
-    this.drawBuildings();
-    this.drawResidents();
-    this.drawSelectedIntentTarget();
-    this.drawExpeditions();
-    this.drawBuildPreview();
-    this.drawFogOfWar();
-    this.drawMapLabel();
+    this.drawTerrainIfChanged();
+    this.drawDistrictsIfChanged();
+    this.drawStaticOverlays();
+    this.syncBuildings();
+    this.syncResidents();
+    this.syncExpeditions();
+    this.drawIntent();
+    this.drawHoverLayer();
+    this.drawPhaseOverlay();
+    this.drawHeader();
     this.updateHeartbeat();
   }
 
@@ -250,21 +372,51 @@ export class WorldScene extends Phaser.Scene {
     camera.centerOn(CAMERA_FOCUS.x, CAMERA_FOCUS.y);
   }
 
-  private drawTiles(): void {
-    const graphics = this.add.graphics();
-    const { grid } = this.simulation.state;
+  // --- Terrain ------------------------------------------------------------
+
+  /**
+   * The grid and fog mask change only on gather, regrowth, and zone reveal, so
+   * a cheap signature is enough to skip the 768-cell redraw on most frames.
+   */
+  private terrainKey(): string {
+    const { grid, revealed, revealedAreas, regrowth } = this.simulation.state;
+    let nodeHash = 0;
+    for (let y = 0; y < grid.length; y += 1) {
+      const row = grid[y]!;
+      for (let x = 0; x < row.length; x += 1) {
+        const kind = row[x]!;
+        if (kind === "fern" || kind === "mushroom" || kind === "crystal" || kind === "ruin") {
+          nodeHash = (nodeHash * 31 + (y * GRID_W + x)) | 0;
+        }
+      }
+    }
+    return `${nodeHash}:${revealedAreas.join(",")}:${revealed.length}:${regrowth.length}`;
+  }
+
+  private drawTerrainIfChanged(): void {
+    const key = this.terrainKey();
+    if (key === this.terrainSignature) return;
+    this.terrainSignature = key;
+
+    const graphics = this.terrainLayer;
+    graphics.clear();
+    const { grid, revealed } = this.simulation.state;
+
     for (let y = 0; y < grid.length; y += 1) {
       for (let x = 0; x < grid[y]!.length; x += 1) {
         const kind = grid[y]![x]!;
         const px = OFFSET_X + x * TILE_SIZE;
         const py = OFFSET_Y + y * TILE_SIZE;
-        if (!this.simulation.state.revealed[y]?.[x]) {
-          graphics.fillStyle(0x0a2528, 1);
+
+        if (!revealed[y]?.[x]) {
+          // Fog is drawn here rather than as a separate full-grid pass.
+          graphics.fillStyle(0x07181c, 1);
           graphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-          graphics.lineStyle(1, 0x2d8c84, 0.15);
-          graphics.lineBetween(px + 3, py + TILE_SIZE - 4, px + TILE_SIZE - 4, py + 3);
+          graphics.lineStyle(1, 0x63e6d4, 0.12);
+          graphics.lineBetween(px + 3, py + 4, px + TILE_SIZE - 4, py + TILE_SIZE - 3);
           continue;
         }
+
         graphics.fillStyle(TILE_COLORS[kind], 1);
         graphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
 
@@ -280,32 +432,43 @@ export class WorldScene extends Phaser.Scene {
           graphics.fillStyle(0x51605a, 0.65);
           graphics.fillCircle(px + TILE_SIZE / 2, py + TILE_SIZE / 2, 4);
         }
-        if ((kind === "fern" || kind === "mushroom" || kind === "crystal" || kind === "ruin")
-          && !this.textures.exists(NODE_TEXTURE_KEYS[kind] ?? "")) {
+        if (NODE_TEXTURE_KEYS[kind] && !this.textures.exists(NODE_TEXTURE_KEYS[kind]!)) {
           this.drawFeature(graphics, kind, px, py);
         }
       }
     }
-    this.worldLayer.add(graphics);
+
+    this.syncNodeSprites();
   }
 
-  private drawNodeSprites(): void {
+  /** Node sprites are pooled by cell so regrowth does not rebuild the layer. */
+  private syncNodeSprites(): void {
+    this.nodeLayer.removeAll(true);
     const { grid, revealed } = this.simulation.state;
     for (let y = 0; y < grid.length; y += 1) {
       for (let x = 0; x < grid[y]!.length; x += 1) {
         const kind = grid[y]![x]!;
         const textureKey = NODE_TEXTURE_KEYS[kind];
         if (!textureKey || !revealed[y]?.[x] || !this.textures.exists(textureKey)) continue;
-        const sprite = this.add.image(OFFSET_X + x * TILE_SIZE + TILE_SIZE / 2, OFFSET_Y + y * TILE_SIZE + TILE_SIZE / 2 - 2, textureKey)
-          .setDisplaySize(29, 30)
-          .setDepth(2);
-        this.worldLayer.add(sprite);
+        this.nodeLayer.add(
+          this.add.image(
+            OFFSET_X + x * TILE_SIZE + TILE_SIZE / 2,
+            OFFSET_Y + y * TILE_SIZE + TILE_SIZE / 2 - 2,
+            textureKey,
+          ).setDisplaySize(29, 30),
+        );
       }
     }
   }
 
-  private drawDistricts(): void {
+  private drawDistrictsIfChanged(): void {
+    const key = this.simulation.state.districtFocus;
+    if (key === this.districtSignature) return;
+    this.districtSignature = key;
+
+    this.districtLayer.removeAll(true);
     const activeFocus = this.simulation.state.districtFocus;
+    const graphics = this.add.graphics();
     for (const district of this.simulation.state.districts) {
       const definition = DISTRICT_DEFINITIONS[district.type];
       const color = Phaser.Display.Color.HexStringToColor(definition.color).color;
@@ -313,27 +476,48 @@ export class WorldScene extends Phaser.Scene {
       const y = OFFSET_Y + district.bounds.yMin * TILE_SIZE;
       const width = (district.bounds.xMax - district.bounds.xMin + 1) * TILE_SIZE - 1;
       const height = (district.bounds.yMax - district.bounds.yMin + 1) * TILE_SIZE - 1;
-      const graphics = this.add.graphics();
-      graphics.lineStyle(district.type === activeFocus ? 2 : 1, color, district.type === activeFocus ? 0.42 : 0.16);
+      const active = district.type === activeFocus;
+      graphics.lineStyle(active ? 2 : 1, color, active ? 0.42 : 0.16);
       graphics.strokeRect(x + 1, y + 1, width - 2, height - 2);
-      this.worldLayer.add(graphics);
-      if (district.type === activeFocus) {
-        const label = this.add.text(OFFSET_X + district.center.x * TILE_SIZE + TILE_SIZE / 2, y + 4, definition.label.toUpperCase(), {
-          color: Phaser.Display.Color.IntegerToColor(color).rgba,
-          fontFamily: "system-ui, sans-serif",
-          fontSize: "8px",
-          fontStyle: "bold",
-          backgroundColor: "#08151bc2",
-          padding: { x: 3, y: 2 },
-        }).setOrigin(0.5, 0);
-        this.worldLayer.add(label);
+      if (active) {
+        this.districtLayer.add(
+          this.add.text(OFFSET_X + district.center.x * TILE_SIZE + TILE_SIZE / 2, y + 4, definition.label.toUpperCase(), {
+            color: Phaser.Display.Color.IntegerToColor(color).rgba,
+            fontFamily: "system-ui, sans-serif",
+            fontSize: "8px",
+            fontStyle: "bold",
+            backgroundColor: "#08151bc2",
+            padding: { x: 3, y: 2 },
+          }).setOrigin(0.5, 0),
+        );
       }
     }
+    this.districtLayer.add(graphics);
+  }
+
+  /** The root network lines — static geometry, redrawn only if the Root moves. */
+  private drawStaticOverlays(): void {
+    const root = this.simulation.state.buildings.find((building) => building.type === "root-heart");
+    if (!root) {
+      this.staticLayer.clear();
+      return;
+    }
+    if (this.staticLayer.getData("rootKey") === `${root.position.x}:${root.position.y}`) return;
+    this.staticLayer.setData("rootKey", `${root.position.x}:${root.position.y}`);
+
+    this.staticLayer.clear();
+    const center = this.cellCenter(root.position);
+    this.staticLayer.lineStyle(2, 0x63e6d4, 0.24);
+    this.staticLayer.beginPath();
+    for (const [x, y] of [[7, 17], [23, 9], [17, 12]] as const) {
+      this.staticLayer.moveTo(center.x, center.y);
+      this.staticLayer.lineTo(OFFSET_X + x * TILE_SIZE, OFFSET_Y + y * TILE_SIZE);
+    }
+    this.staticLayer.strokePath();
   }
 
   private drawFeature(graphics: Phaser.GameObjects.Graphics, kind: TileKind, px: number, py: number): void {
     const centerX = px + TILE_SIZE / 2;
-    const centerY = py + TILE_SIZE / 2;
     if (kind === "fern") {
       graphics.lineStyle(2, 0x8dbb72, 0.95);
       graphics.lineBetween(centerX, py + 18, centerX - 5, py + 5);
@@ -372,10 +556,342 @@ export class WorldScene extends Phaser.Scene {
     graphics.fillRect(px + 14, py + 8, 3, 5);
   }
 
-  private drawHoverCell(): void {
+  // --- Buildings ----------------------------------------------------------
+
+  private syncBuildings(): void {
+    const seen = new Set<string>();
+
+    for (const building of this.simulation.state.buildings) {
+      seen.add(building.id);
+      let view = this.buildingViews.get(building.id);
+
+      if (!view) {
+        const container = this.add.container(0, 0);
+        const definition = BUILDING_DEFINITIONS[building.type];
+        const textureKey = BUILDING_TEXTURE_KEYS[building.type];
+        const displaySize = BUILDING_DISPLAY_SIZES[building.type] ?? { width: 40, height: 40 };
+
+        let art: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
+        let baseSize: { width: number; height: number } | null = null;
+        if (textureKey && this.textures.exists(textureKey)) {
+          art = this.add.image(0, -4, textureKey).setDisplaySize(displaySize.width, displaySize.height);
+          baseSize = displaySize;
+        } else {
+          const graphics = this.add.graphics();
+          this.drawBuildingVector(graphics, building.type, definition.color);
+          art = graphics;
+        }
+
+        const levelPips = this.add.graphics();
+        const label = this.add.text(0, 14, definition.shortLabel, {
+          color: "#f5e6c8",
+          fontFamily: "Georgia, serif",
+          fontSize: "8px",
+          stroke: "#08151b",
+          strokeThickness: 3,
+        }).setOrigin(0.5).setVisible(false);
+
+        container.add([art, levelPips, label]);
+        this.buildingLayer.add(container);
+        view = { container, art, baseSize, levelPips, label, lastLevel: -1, lastUpgrading: false };
+        this.buildingViews.set(building.id, view);
+      }
+
+      const center = this.cellCenter(building.position);
+      view.container.setPosition(center.x, center.y);
+
+      // Level pips and the upgrade shimmer only redraw when they change.
+      if (view.lastLevel !== building.level || view.lastUpgrading !== building.upgrading) {
+        view.lastLevel = building.level;
+        view.lastUpgrading = building.upgrading;
+        view.levelPips.clear();
+        if (building.type !== "root-heart") {
+          for (let index = 0; index < building.level; index += 1) {
+            view.levelPips.fillStyle(0xf4b85b, 0.95);
+            view.levelPips.fillCircle(-6 + index * 6, 10, 1.8);
+          }
+        }
+        if (building.upgrading) {
+          view.levelPips.lineStyle(1.5, 0x63e6d4, 0.75);
+          view.levelPips.strokeCircle(0, -2, 17);
+        }
+        // Upgraded buildings read as physically larger. Image art must be
+        // resized via setDisplaySize — setScale would discard it and snap back
+        // to the texture's native pixel size.
+        const scale = 1 + (building.level - 1) * 0.12;
+        if (view.baseSize && view.art instanceof Phaser.GameObjects.Image) {
+          view.art.setDisplaySize(view.baseSize.width * scale, view.baseSize.height * scale);
+        } else {
+          view.art.setScale(scale);
+        }
+      }
+    }
+
+    for (const [id, view] of this.buildingViews) {
+      if (seen.has(id)) continue;
+      view.container.destroy(true);
+      this.buildingViews.delete(id);
+    }
+  }
+
+  private updateBuildingLabels(): void {
+    for (const building of this.simulation.state.buildings) {
+      const view = this.buildingViews.get(building.id);
+      if (!view) continue;
+      const hovered = this.hoverCell?.x === building.position.x && this.hoverCell?.y === building.position.y;
+      view.label.setVisible(hovered && building.type !== "root-heart");
+      if (hovered) {
+        view.label.setText(`${BUILDING_DEFINITIONS[building.type].shortLabel} · L${building.level}`);
+      }
+    }
+  }
+
+  private drawBuildingVector(graphics: Phaser.GameObjects.Graphics, type: BuildingType, colorHex: string): void {
+    const color = Phaser.Display.Color.HexStringToColor(colorHex).color;
+    if (type === "root-heart") {
+      graphics.fillStyle(0x63e6d4, 0.16);
+      graphics.fillCircle(0, 0, 24);
+      graphics.lineStyle(2, 0x63e6d4, 0.8);
+      graphics.strokeCircle(0, 0, 15);
+      graphics.fillStyle(0x63e6d4, 0.9);
+      graphics.fillCircle(0, 0, 8);
+      graphics.lineStyle(2, 0xb8fff4, 0.8);
+      graphics.lineBetween(-8, 0, 8, 0);
+      graphics.lineBetween(0, -8, 0, 8);
+      return;
+    }
+    if (type === "burrow-home") {
+      graphics.fillStyle(0x6e4938, 1);
+      graphics.fillRoundedRect(-10, -8, 20, 17, 6);
+      graphics.fillStyle(0xc96e4a, 1);
+      graphics.fillTriangle(-13, -6, 0, -16, 13, -6);
+      graphics.fillStyle(0xf4b85b, 0.9);
+      graphics.fillRect(-3, 1, 6, 7);
+      return;
+    }
+    if (type === "reed-farm") {
+      graphics.fillStyle(0x6f9f62, 1);
+      graphics.fillRoundedRect(-12, -9, 24, 18, 5);
+      graphics.lineStyle(2, 0xc5dd8c, 0.8);
+      for (let index = -6; index <= 6; index += 6) {
+        graphics.lineBetween(index, 6, index - 2, -8);
+      }
+      graphics.fillStyle(0xf4b85b, 0.9);
+      graphics.fillCircle(0, -4, 3);
+      return;
+    }
+    if (type === "lantern-grove") {
+      graphics.fillStyle(0x234d45, 1);
+      graphics.fillCircle(0, 3, 12);
+      graphics.fillStyle(0xf4b85b, 0.9);
+      graphics.fillCircle(0, -3, 7);
+      graphics.fillStyle(0xffe4a3, 1);
+      graphics.fillCircle(0, -3, 3);
+      graphics.lineStyle(2, 0x8dbb72, 0.9);
+      graphics.lineBetween(-8, 7, -5, -7);
+      graphics.lineBetween(8, 7, 5, -7);
+      return;
+    }
+    if (type === "commons-market") {
+      graphics.fillStyle(color, 0.9);
+      graphics.fillRoundedRect(-13, -8, 26, 16, 5);
+      graphics.fillStyle(0xf4b85b, 0.85);
+      graphics.fillTriangle(-15, -8, 0, -18, 15, -8);
+      graphics.fillStyle(0x08151b, 0.8);
+      graphics.fillCircle(-6, 1, 2);
+      graphics.fillCircle(6, 1, 2);
+      return;
+    }
+    graphics.fillStyle(0x4b3d62, 0.95);
+    graphics.fillRoundedRect(-13, -9, 26, 18, 4);
+    graphics.fillStyle(0xc8a9ff, 0.88);
+    graphics.fillTriangle(-14, -9, 0, -17, 14, -9);
+    graphics.lineStyle(2, 0xf5e6c8, 0.8);
+    graphics.lineBetween(-8, 5, 8, -4);
+    graphics.lineBetween(2, -8, 8, -2);
+  }
+
+  // --- Residents ----------------------------------------------------------
+
+  private syncResidents(): void {
+    const seen = new Set<string>();
+    const selectedId = this.simulation.state.selectedResidentId;
+
+    for (const resident of this.simulation.state.residents) {
+      seen.add(resident.id);
+      let view = this.residentViews.get(resident.id);
+
+      if (!view) {
+        const container = this.add.container(0, 0);
+        const marker = this.add.graphics();
+        const textureKey = RESIDENT_TEXTURE_KEYS[resident.species];
+        let sprite: Phaser.GameObjects.Image | null = null;
+        if (textureKey && this.textures.exists(textureKey)) {
+          sprite = this.add.image(0, -5, textureKey).setDisplaySize(22, 27);
+        } else {
+          this.drawResidentVector(marker, resident.species);
+        }
+        const label = this.add.text(0, -17, "", {
+          color: "#f5e6c8",
+          fontFamily: "system-ui, sans-serif",
+          fontSize: "9px",
+          fontStyle: "bold",
+          backgroundColor: "#08151bcc",
+          padding: { x: 4, y: 2 },
+        }).setOrigin(0.5, 1).setVisible(false);
+
+        container.add(sprite ? [marker, sprite, label] : [marker, label]);
+        this.residentLayer.add(container);
+        view = { container, marker, sprite, label, lastGoal: null, lastSelected: null };
+        this.residentViews.set(resident.id, view);
+      }
+
+      const center = this.cellCenter(resident.position);
+      // Tween the move so a 520ms tick reads as walking rather than teleporting.
+      const distance = Phaser.Math.Distance.Between(view.container.x, view.container.y, center.x, center.y);
+      if (distance > 0.5 && distance < TILE_SIZE * 2.5) {
+        this.tweens.add({
+          targets: view.container,
+          x: center.x,
+          y: center.y,
+          duration: 420,
+          ease: "Sine.easeInOut",
+        });
+      } else {
+        view.container.setPosition(center.x, center.y);
+      }
+
+      const selected = resident.id === selectedId;
+      // The marker only redraws when goal colour or selection actually change.
+      if (view.lastGoal !== resident.goal || view.lastSelected !== selected) {
+        view.lastGoal = resident.goal;
+        view.lastSelected = selected;
+        const intentColor = GOAL_COLORS[resident.goal];
+        view.marker.clear();
+        view.marker.fillStyle(0x08151b, 0.46);
+        view.marker.fillEllipse(0, 7, 17, 6);
+        if (selected) {
+          view.marker.fillStyle(intentColor, 0.12);
+          view.marker.fillCircle(0, 0, 14);
+          view.marker.lineStyle(1, intentColor, 0.95);
+          view.marker.strokeCircle(0, 0, 13);
+          view.marker.lineStyle(2, PAPER, 0.95);
+          view.marker.strokeCircle(0, 0, 10);
+        } else {
+          view.marker.fillStyle(intentColor, 0.68);
+          view.marker.fillTriangle(0, -11, 3, -7, -3, -7);
+        }
+        if (!view.sprite) this.drawResidentVector(view.marker, resident.species);
+        view.label.setVisible(selected);
+        if (selected) view.label.setText(`${resident.name}  ·  ${GOAL_LABELS[resident.goal]}`);
+      }
+
+      // Distressed residents dim, which reads at a glance across the board.
+      view.container.setAlpha(resident.distress > 8 ? 0.55 : 1);
+    }
+
+    for (const [id, view] of this.residentViews) {
+      if (seen.has(id)) continue;
+      view.container.destroy(true);
+      this.residentViews.delete(id);
+    }
+  }
+
+  private drawResidentVector(graphics: Phaser.GameObjects.Graphics, species: Species): void {
+    const color = Phaser.Display.Color.HexStringToColor(SPECIES_DEFINITIONS[species].color).color;
+    graphics.fillStyle(color, 1);
+    graphics.fillCircle(0, 0, 6);
+    graphics.fillStyle(0xf5e6c8, 0.9);
+    graphics.fillCircle(-2, -1, 1.2);
+    graphics.fillCircle(2, -1, 1.2);
+    if (species === "glowtail") {
+      graphics.lineStyle(3, 0x63e6d4, 0.85);
+      graphics.lineBetween(5, 2, 10, -4);
+    }
+    if (species === "mireling") {
+      graphics.lineStyle(2, 0xc8a9ff, 0.8);
+      graphics.lineBetween(-5, -5, -8, -9);
+      graphics.lineBetween(5, -5, 8, -9);
+    }
+  }
+
+  // --- Intent, expeditions, hover ----------------------------------------
+
+  private drawIntent(): void {
+    this.intentLayer.clear();
+    this.intentLabel.setVisible(false);
+
+    const resident = this.simulation.getSelectedResident();
+    if (!resident?.target) return;
+
+    const start = this.cellCenter(resident.position);
+    const target = this.cellCenter(resident.target);
+    if (start.x === target.x && start.y === target.y) return;
+
+    const color = GOAL_COLORS[resident.goal];
+
+    // Draw the actual A* route rather than a straight line — this is now a
+    // truthful picture of where the resident will walk.
+    this.intentLayer.lineStyle(2, color, 0.42);
+    let cursor = start;
+    for (const step of resident.path) {
+      const next = this.cellCenter(step);
+      this.drawDashedLine(this.intentLayer, cursor, next, 5, 4);
+      cursor = next;
+    }
+    if (resident.path.length === 0) this.drawDashedLine(this.intentLayer, start, target, 5, 4);
+
+    this.intentLayer.fillStyle(color, 0.13);
+    this.intentLayer.fillCircle(target.x, target.y, 8);
+    this.intentLayer.lineStyle(2, color, 0.82);
+    this.intentLayer.strokeCircle(target.x, target.y, 6);
+    this.intentLayer.lineBetween(target.x - 3, target.y, target.x + 3, target.y);
+    this.intentLayer.lineBetween(target.x, target.y - 3, target.x, target.y + 3);
+
+    this.intentLabel
+      .setText(`${GOAL_LABELS[resident.goal]} → ${this.targetLabel(resident.target)}`)
+      .setColor(Phaser.Display.Color.IntegerToColor(color).rgba)
+      .setVisible(true);
+    const minX = OFFSET_X + this.intentLabel.width / 2 + 2;
+    const maxX = OFFSET_X + GRID_W * TILE_SIZE - this.intentLabel.width / 2 - 2;
+    let labelY = target.y - 8;
+    if (labelY - this.intentLabel.height < OFFSET_Y + 2) labelY = target.y + TILE_SIZE / 2 + this.intentLabel.height + 3;
+    this.intentLabel.setPosition(this.clamp(target.x, minX, maxX), labelY);
+  }
+
+  private syncExpeditions(): void {
+    this.expeditionLayer.removeAll(true);
+    for (const expedition of this.simulation.state.expeditions) {
+      if (expedition.status !== "active") continue;
+      const target = this.cellCenter(expedition.target);
+      const marker = this.add.graphics();
+      marker.fillStyle(0xc8a9ff, 0.15);
+      marker.fillCircle(target.x, target.y, 10);
+      marker.lineStyle(2, 0xc8a9ff, 0.85);
+      marker.strokeCircle(target.x, target.y, 7);
+      marker.lineBetween(target.x - 4, target.y, target.x + 4, target.y);
+      marker.lineBetween(target.x, target.y - 4, target.x, target.y + 4);
+      this.expeditionLayer.add(marker);
+      this.expeditionLayer.add(
+        this.add.text(target.x, target.y + 10, `SCOUT ${expedition.progress}/${expedition.duration}`, {
+          color: "#c8a9ff",
+          fontFamily: "system-ui, sans-serif",
+          fontSize: "8px",
+          fontStyle: "bold",
+          backgroundColor: "#08151be6",
+          padding: { x: 3, y: 2 },
+        }).setOrigin(0.5, 0),
+      );
+    }
+  }
+
+  /** The only layer a mouse move touches. */
+  private drawHoverLayer(): void {
+    const graphics = this.hoverLayer;
+    graphics.clear();
+    this.previewLabel.setVisible(false);
     if (!this.hoverCell) return;
 
-    const graphics = this.add.graphics();
     const position = this.hoverCell;
     const px = OFFSET_X + position.x * TILE_SIZE;
     const py = OFFSET_Y + position.y * TILE_SIZE;
@@ -390,308 +906,26 @@ export class WorldScene extends Phaser.Scene {
     graphics.lineStyle(2, color, 0.82);
     const inset = 2;
     const length = 5;
-    graphics.lineBetween(px + inset, py + inset, px + inset + length, py + inset);
-    graphics.lineBetween(px + inset, py + inset, px + inset, py + inset + length);
-    graphics.lineBetween(px + TILE_SIZE - inset, py + inset, px + TILE_SIZE - inset - length, py + inset);
-    graphics.lineBetween(px + TILE_SIZE - inset, py + inset, px + TILE_SIZE - inset, py + inset + length);
-    graphics.lineBetween(px + inset, py + TILE_SIZE - inset, px + inset + length, py + TILE_SIZE - inset);
-    graphics.lineBetween(px + inset, py + TILE_SIZE - inset, px + inset, py + TILE_SIZE - inset - length);
-    graphics.lineBetween(px + TILE_SIZE - inset, py + TILE_SIZE - inset, px + TILE_SIZE - inset - length, py + TILE_SIZE - inset);
-    graphics.lineBetween(px + TILE_SIZE - inset, py + TILE_SIZE - inset, px + TILE_SIZE - inset, py + TILE_SIZE - inset - length);
-    this.worldLayer.add(graphics);
-  }
-
-  private drawRootNetwork(): void {
-    const graphics = this.add.graphics();
-    const root = this.simulation.state.buildings.find((building) => building.type === "root-heart");
-    if (!root) return;
-    const center = this.cellCenter(root.position);
-    graphics.lineStyle(2, 0x63e6d4, 0.24);
-    graphics.beginPath();
-    graphics.moveTo(center.x, center.y);
-    graphics.lineTo(OFFSET_X + 7 * TILE_SIZE, OFFSET_Y + 17 * TILE_SIZE);
-    graphics.moveTo(center.x, center.y);
-    graphics.lineTo(OFFSET_X + 23 * TILE_SIZE, OFFSET_Y + 9 * TILE_SIZE);
-    graphics.moveTo(center.x, center.y);
-    graphics.lineTo(OFFSET_X + 17 * TILE_SIZE, OFFSET_Y + 12 * TILE_SIZE);
-    graphics.strokePath();
-    this.worldLayer.add(graphics);
-  }
-
-  private drawBuildings(): void {
-    for (const building of this.simulation.state.buildings) {
-      const graphics = this.add.graphics();
-      const center = this.cellCenter(building.position);
-      const definition = BUILDING_DEFINITIONS[building.type];
-      const color = Phaser.Display.Color.HexStringToColor(definition.color).color;
-      const textureKey = BUILDING_TEXTURE_KEYS[building.type];
-      const displaySize = BUILDING_DISPLAY_SIZES[building.type] ?? { width: 40, height: 40 };
-
-      if (textureKey && this.textures.exists(textureKey)) {
-        const sprite = this.add.image(center.x, center.y - 4, textureKey)
-          .setDisplaySize(displaySize.width, displaySize.height)
-          .setDepth(4);
-        this.worldLayer.add(sprite);
-      } else if (building.type === "root-heart") {
-        graphics.fillStyle(0x63e6d4, 0.16);
-        graphics.fillCircle(center.x, center.y, 24);
-        graphics.lineStyle(2, 0x63e6d4, 0.8);
-        graphics.strokeCircle(center.x, center.y, 15);
-        graphics.fillStyle(0x63e6d4, 0.9);
-        graphics.fillCircle(center.x, center.y, 8);
-        graphics.lineStyle(2, 0xb8fff4, 0.8);
-        graphics.lineBetween(center.x - 8, center.y, center.x + 8, center.y);
-        graphics.lineBetween(center.x, center.y - 8, center.x, center.y + 8);
-        this.worldLayer.add(graphics);
-      } else if (building.type === "burrow-home") {
-        graphics.fillStyle(0x6e4938, 1);
-        graphics.fillRoundedRect(center.x - 10, center.y - 8, 20, 17, 6);
-        graphics.fillStyle(0xc96e4a, 1);
-        graphics.fillTriangle(center.x - 13, center.y - 6, center.x, center.y - 16, center.x + 13, center.y - 6);
-        graphics.fillStyle(0xf4b85b, 0.9);
-        graphics.fillRect(center.x - 3, center.y + 1, 6, 7);
-        this.worldLayer.add(graphics);
-      } else if (building.type === "reed-farm") {
-        graphics.fillStyle(0x6f9f62, 1);
-        graphics.fillRoundedRect(center.x - 12, center.y - 9, 24, 18, 5);
-        graphics.lineStyle(2, 0xc5dd8c, 0.8);
-        for (let index = -6; index <= 6; index += 6) {
-          graphics.lineBetween(center.x + index, center.y + 6, center.x + index - 2, center.y - 8);
-        }
-        graphics.fillStyle(0xf4b85b, 0.9);
-        graphics.fillCircle(center.x, center.y - 4, 3);
-        this.worldLayer.add(graphics);
-      } else if (building.type === "lantern-grove") {
-        graphics.fillStyle(0x234d45, 1);
-        graphics.fillCircle(center.x, center.y + 3, 12);
-        graphics.fillStyle(0xf4b85b, 0.9);
-        graphics.fillCircle(center.x, center.y - 3, 7);
-        graphics.fillStyle(0xffe4a3, 1);
-        graphics.fillCircle(center.x, center.y - 3, 3);
-        graphics.lineStyle(2, 0x8dbb72, 0.9);
-        graphics.lineBetween(center.x - 8, center.y + 7, center.x - 5, center.y - 7);
-        graphics.lineBetween(center.x + 8, center.y + 7, center.x + 5, center.y - 7);
-        this.worldLayer.add(graphics);
-      } else if (building.type === "commons-market") {
-        graphics.fillStyle(color, 0.9);
-        graphics.fillRoundedRect(center.x - 13, center.y - 8, 26, 16, 5);
-        graphics.fillStyle(0xf4b85b, 0.85);
-        graphics.fillTriangle(center.x - 15, center.y - 8, center.x, center.y - 18, center.x + 15, center.y - 8);
-        graphics.fillStyle(0x08151b, 0.8);
-        graphics.fillCircle(center.x - 6, center.y + 1, 2);
-        graphics.fillCircle(center.x + 6, center.y + 1, 2);
-        this.worldLayer.add(graphics);
-      } else if (building.type === "root-workshop") {
-        graphics.fillStyle(0x4b3d62, 0.95);
-        graphics.fillRoundedRect(center.x - 13, center.y - 9, 26, 18, 4);
-        graphics.fillStyle(0xc8a9ff, 0.88);
-        graphics.fillTriangle(center.x - 14, center.y - 9, center.x, center.y - 17, center.x + 14, center.y - 9);
-        graphics.lineStyle(2, 0xf5e6c8, 0.8);
-        graphics.lineBetween(center.x - 8, center.y + 5, center.x + 8, center.y - 4);
-        graphics.lineBetween(center.x + 2, center.y - 8, center.x + 8, center.y - 2);
-        this.worldLayer.add(graphics);
-      }
-
-      const hovered = this.hoverCell?.x === building.position.x && this.hoverCell?.y === building.position.y;
-      if (building.type !== "root-heart" && hovered) {
-        const label = this.add.text(center.x, center.y + 14, definition.shortLabel, {
-          color: "#f5e6c8",
-          fontFamily: "Georgia, serif",
-          fontSize: "8px",
-          stroke: "#08151b",
-          strokeThickness: 3,
-        }).setOrigin(0.5);
-        this.worldLayer.add(label);
-      }
+    for (const [cx, cy, sx, sy] of [
+      [px + inset, py + inset, 1, 1],
+      [px + TILE_SIZE - inset, py + inset, -1, 1],
+      [px + inset, py + TILE_SIZE - inset, 1, -1],
+      [px + TILE_SIZE - inset, py + TILE_SIZE - inset, -1, -1],
+    ] as const) {
+      graphics.lineBetween(cx, cy, cx + length * sx, cy);
+      graphics.lineBetween(cx, cy, cx, cy + length * sy);
     }
-  }
 
-  private drawResidents(): void {
-    for (const resident of this.simulation.state.residents) {
-      const center = this.cellCenter(resident.position);
-      const species = SPECIES_DEFINITIONS[resident.species];
-      const color = Phaser.Display.Color.HexStringToColor(species.color).color;
-      const intentColor = GOAL_COLORS[resident.goal];
-      const selected = resident.id === this.simulation.state.selectedResidentId;
-      const graphics = this.add.graphics();
+    if (!buildMode || !preview) return;
 
-      graphics.fillStyle(0x08151b, 0.46);
-      graphics.fillEllipse(center.x, center.y + 7, 17, 6);
-      if (selected) {
-        graphics.fillStyle(intentColor, 0.12);
-        graphics.fillCircle(center.x, center.y, 14);
-        graphics.lineStyle(1, intentColor, 0.95);
-        graphics.strokeCircle(center.x, center.y, 13);
-        graphics.lineStyle(2, PAPER, 0.95);
-        graphics.strokeCircle(center.x, center.y, 10);
-      } else {
-        graphics.fillStyle(intentColor, 0.68);
-        graphics.fillTriangle(center.x, center.y - 11, center.x + 3, center.y - 7, center.x - 3, center.y - 7);
-      }
-      this.worldLayer.add(graphics);
-
-      const textureKey = RESIDENT_TEXTURE_KEYS[resident.species];
-      if (textureKey && this.textures.exists(textureKey)) {
-        const sprite = this.add.image(center.x, center.y - 5, textureKey)
-          .setDisplaySize(22, 27)
-          .setDepth(5);
-        this.worldLayer.add(sprite);
-      } else {
-        graphics.fillStyle(color, 1);
-        graphics.fillCircle(center.x, center.y, 6);
-        graphics.fillStyle(0xf5e6c8, 0.9);
-        graphics.fillCircle(center.x - 2, center.y - 1, 1.2);
-        graphics.fillCircle(center.x + 2, center.y - 1, 1.2);
-
-        if (resident.species === "glowtail") {
-          graphics.lineStyle(3, 0x63e6d4, 0.85);
-          graphics.lineBetween(center.x + 5, center.y + 2, center.x + 10, center.y - 4);
-        }
-        if (resident.species === "mireling") {
-          graphics.lineStyle(2, 0xc8a9ff, 0.8);
-          graphics.lineBetween(center.x - 5, center.y - 5, center.x - 8, center.y - 9);
-          graphics.lineBetween(center.x + 5, center.y - 5, center.x + 8, center.y - 9);
-        }
-      }
-
-      if (selected) {
-        const label = this.add.text(center.x, center.y - 17, `${resident.name}  ·  ${GOAL_LABELS[resident.goal]}`, {
-          color: "#f5e6c8",
-          fontFamily: "system-ui, sans-serif",
-          fontSize: "9px",
-          fontStyle: "bold",
-          backgroundColor: "#08151bcc",
-          padding: { x: 4, y: 2 },
-        }).setOrigin(0.5, 1);
-        this.worldLayer.add(label);
-      }
-    }
-  }
-
-  private drawSelectedIntentPath(): void {
-    const resident = this.simulation.getSelectedResident();
-    if (!resident?.target) return;
-
-    const start = this.cellCenter(resident.position);
-    const target = this.cellCenter(resident.target);
-    if (start.x === target.x && start.y === target.y) return;
-
-    const color = GOAL_COLORS[resident.goal];
-    const graphics = this.add.graphics();
-    graphics.lineStyle(2, color, 0.42);
-    this.drawDashedLine(graphics, start, target, 5, 4);
-
-    const angle = Math.atan2(target.y - start.y, target.x - start.x);
-    const arrowSize = 5;
-    graphics.lineBetween(
-      target.x,
-      target.y,
-      target.x - Math.cos(angle - Math.PI / 6) * arrowSize,
-      target.y - Math.sin(angle - Math.PI / 6) * arrowSize,
-    );
-    graphics.lineBetween(
-      target.x,
-      target.y,
-      target.x - Math.cos(angle + Math.PI / 6) * arrowSize,
-      target.y - Math.sin(angle + Math.PI / 6) * arrowSize,
-    );
-    this.worldLayer.add(graphics);
-  }
-
-  private drawSelectedIntentTarget(): void {
-    const resident = this.simulation.getSelectedResident();
-    if (!resident?.target) return;
-
-    const target = this.cellCenter(resident.target);
-    const current = this.cellCenter(resident.position);
-    if (target.x === current.x && target.y === current.y) return;
-
-    const color = GOAL_COLORS[resident.goal];
-    const marker = this.add.graphics();
-    marker.fillStyle(color, 0.13);
-    marker.fillCircle(target.x, target.y, 8);
-    marker.lineStyle(2, color, 0.82);
-    marker.strokeCircle(target.x, target.y, 6);
-    marker.lineBetween(target.x - 3, target.y, target.x + 3, target.y);
-    marker.lineBetween(target.x, target.y - 3, target.x, target.y + 3);
-    this.worldLayer.add(marker);
-
-    const targetLabel = this.targetLabel(resident.target);
-    const label = this.add.text(target.x, target.y - 8, `${GOAL_LABELS[resident.goal]} → ${targetLabel}`, {
-      color: Phaser.Display.Color.IntegerToColor(color).rgba,
-      fontFamily: "system-ui, sans-serif",
-      fontSize: "8px",
-      fontStyle: "bold",
-      backgroundColor: "#08151be6",
-      padding: { x: 4, y: 2 },
-    }).setOrigin(0.5, 1);
-    const boardBottom = OFFSET_Y + 24 * TILE_SIZE;
-    const minX = OFFSET_X + label.width / 2 + 2;
-    const maxX = OFFSET_X + 32 * TILE_SIZE - label.width / 2 - 2;
-    let labelY = target.y - 8;
-    if (labelY - label.height < OFFSET_Y + 2) labelY = target.y + TILE_SIZE / 2 + label.height + 3;
-    if (labelY > boardBottom) labelY = target.y - 8;
-    label.setPosition(this.clamp(target.x, minX, maxX), labelY);
-    this.worldLayer.add(label);
-  }
-
-  private drawExpeditions(): void {
-    for (const expedition of this.simulation.state.expeditions) {
-      if (expedition.status !== "active") continue;
-      const target = this.cellCenter(expedition.target);
-      const marker = this.add.graphics();
-      marker.fillStyle(0xc8a9ff, 0.15);
-      marker.fillCircle(target.x, target.y, 10);
-      marker.lineStyle(2, 0xc8a9ff, 0.85);
-      marker.strokeCircle(target.x, target.y, 7);
-      marker.lineBetween(target.x - 4, target.y, target.x + 4, target.y);
-      marker.lineBetween(target.x, target.y - 4, target.x, target.y + 4);
-      this.worldLayer.add(marker);
-      const label = this.add.text(target.x, target.y + 10, `SCOUT ${expedition.progress}/${expedition.duration}`, {
-        color: "#c8a9ff",
-        fontFamily: "system-ui, sans-serif",
-        fontSize: "8px",
-        fontStyle: "bold",
-        backgroundColor: "#08151be6",
-        padding: { x: 3, y: 2 },
-      }).setOrigin(0.5, 0);
-      this.worldLayer.add(label);
-    }
-  }
-
-  private drawFogOfWar(): void {
-    const graphics = this.add.graphics();
-    for (let y = 0; y < this.simulation.state.revealed.length; y += 1) {
-      for (let x = 0; x < this.simulation.state.revealed[y]!.length; x += 1) {
-        if (this.simulation.state.revealed[y]![x]) continue;
-        const px = OFFSET_X + x * TILE_SIZE;
-        const py = OFFSET_Y + y * TILE_SIZE;
-        graphics.fillStyle(0x07181c, 0.9);
-        graphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-        graphics.lineStyle(1, 0x63e6d4, 0.12);
-        graphics.lineBetween(px + 3, py + 4, px + TILE_SIZE - 4, py + TILE_SIZE - 3);
-      }
-    }
-    this.worldLayer.add(graphics);
-  }
-
-  private drawBuildPreview(): void {
-    const buildMode = this.simulation.state.buildMode;
-    if (!buildMode || !this.hoverCell) return;
-    const graphics = this.add.graphics();
-    const position = this.hoverCell;
-    const px = OFFSET_X + position.x * TILE_SIZE;
-    const py = OFFSET_Y + position.y * TILE_SIZE;
     const definition = BUILDING_DEFINITIONS[buildMode];
-    const preview = this.getBuildPreview(buildMode, position);
-    const color = preview.valid
+    const previewColor = preview.valid
       ? Phaser.Display.Color.HexStringToColor(definition.color).color
       : INVALID_COLOR;
-    graphics.fillStyle(color, preview.valid ? 0.22 : 0.14);
+    graphics.fillStyle(previewColor, preview.valid ? 0.22 : 0.14);
     graphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-    graphics.lineStyle(2, color, 0.9);
+    graphics.lineStyle(2, previewColor, 0.9);
     graphics.strokeRect(px + 1, py + 1, TILE_SIZE - 3, TILE_SIZE - 3);
-    graphics.lineStyle(2, color, 0.9);
     if (preview.valid) {
       graphics.lineBetween(px + 5, py + 11, px + 9, py + 15);
       graphics.lineBetween(px + 9, py + 15, px + 17, py + 6);
@@ -699,65 +933,64 @@ export class WorldScene extends Phaser.Scene {
       graphics.lineBetween(px + 5, py + 5, px + 17, py + 17);
       graphics.lineBetween(px + 17, py + 5, px + 5, py + 17);
     }
-    this.worldLayer.add(graphics);
 
     const status = preview.valid ? "READY" : `BLOCKED · ${preview.reason}`;
-    const label = this.add.text(0, 0, `${definition.shortLabel} · ${status}\nCOST ${this.formatCost(definition)}`, {
-      color: preview.valid ? "#f5e6c8" : "#ffd0c6",
-      fontFamily: "system-ui, sans-serif",
-      fontSize: "8px",
-      fontStyle: "bold",
-      backgroundColor: preview.valid ? "#12352fee" : "#451d22ee",
-      padding: { x: 5, y: 3 },
-      stroke: "#08151b",
-      strokeThickness: 2,
-    }).setOrigin(0.5, 1);
-    const boardBottom = OFFSET_Y + 24 * TILE_SIZE;
+    this.previewLabel
+      .setText(`${definition.shortLabel} · ${status}\nCOST ${this.formatCost(definition)}`)
+      .setColor(preview.valid ? "#f5e6c8" : "#ffd0c6")
+      .setBackgroundColor(preview.valid ? "#12352fee" : "#451d22ee")
+      .setVisible(true);
     const center = this.cellCenter(position);
-    const minX = OFFSET_X + label.width / 2 + 2;
-    const maxX = OFFSET_X + 32 * TILE_SIZE - label.width / 2 - 2;
-    let labelY = position.y < 4 ? py + TILE_SIZE + label.height + 4 : py - 4;
-    if (labelY - label.height < OFFSET_Y + 2) labelY = py + TILE_SIZE + label.height + 4;
-    if (labelY > boardBottom) labelY = py - 4;
-    label.setPosition(this.clamp(center.x, minX, maxX), labelY);
-    this.worldLayer.add(label);
+    const minX = OFFSET_X + this.previewLabel.width / 2 + 2;
+    const maxX = OFFSET_X + GRID_W * TILE_SIZE - this.previewLabel.width / 2 - 2;
+    let labelY = position.y < 4 ? py + TILE_SIZE + this.previewLabel.height + 4 : py - 4;
+    if (labelY - this.previewLabel.height < OFFSET_Y + 2) labelY = py + TILE_SIZE + this.previewLabel.height + 4;
+    this.previewLabel.setPosition(this.clamp(center.x, minX, maxX), labelY);
   }
 
-  private drawMapLabel(): void {
-    const title = this.add.text(OFFSET_X, 23, "M O S S L I G H T   B A S I N", {
-      color: "#63e6d4",
-      fontFamily: "Georgia, serif",
-      fontSize: "13px",
-      letterSpacing: 2,
-    });
-    this.worldLayer.add(title);
+  private drawPhaseOverlay(): void {
+    const phase = this.simulation.state.phase;
+    if (phase === this.lastPhase) return;
+    this.lastPhase = phase;
+    const tint = PHASE_OVERLAY[phase];
+    // Transparency lives in the shape's own fill alpha rather than the game
+    // object's, which is what actually composites correctly here.
+    this.phaseOverlay.setFillStyle(tint.color, tint.alpha);
+    this.phaseOverlay.setVisible(tint.alpha > 0);
+  }
+
+  private drawHeader(): void {
     const buildMode = this.simulation.state.buildMode;
     const hoveredTile = this.hoverCell ? this.simulation.state.grid[this.hoverCell.y]?.[this.hoverCell.x] : undefined;
     const collectibleLabel = hoveredTile ? COLLECTIBLE_LABELS[hoveredTile] : undefined;
+    const hoveredBuilding = this.hoverCell ? this.simulation.getBuildingAt(this.hoverCell) : undefined;
     const hoveredDistrict = this.hoverCell ? this.simulation.getDistrictAt(this.hoverCell) : undefined;
     const activeExpedition = this.simulation.state.expeditions.find((expedition) => expedition.status === "active");
-    const hintText = buildMode
+
+    const hint = buildMode
       ? `hover to preview ${BUILDING_DEFINITIONS[buildMode].shortLabel} · click to place`
       : collectibleLabel
-        ? `${collectibleLabel} · click to gather · nodes reveal the Commons`
-        : activeExpedition
-          ? `${activeExpedition.title} · scout ${activeExpedition.progress}/${activeExpedition.duration}`
-          : hoveredDistrict
-            ? `${DISTRICT_DEFINITIONS[hoveredDistrict.type].label} · ${DISTRICT_DEFINITIONS[hoveredDistrict.type].bonus}`
-            : "hover a feature to gather · click a resident to follow intent";
-    const hint = this.add.text(OFFSET_X + 1, 41, hintText, {
-      color: "#9eb9ad",
-      fontFamily: "system-ui, sans-serif",
-      fontSize: "10px",
-    });
-    this.worldLayer.add(hint);
+        ? `${collectibleLabel} · click to gather · nodes regrow with the seasons`
+        : hoveredBuilding
+          ? `${BUILDING_DEFINITIONS[hoveredBuilding.type].label} · level ${hoveredBuilding.level} · click to inspect and upgrade`
+          : activeExpedition
+            ? `${activeExpedition.title} · scout ${activeExpedition.progress}/${activeExpedition.duration}`
+            : hoveredDistrict
+              ? `${DISTRICT_DEFINITIONS[hoveredDistrict.type].label} · ${DISTRICT_DEFINITIONS[hoveredDistrict.type].bonus}`
+              : "hover a feature to gather · click a resident to follow intent";
+
+    if (hint !== this.lastHintText) {
+      this.lastHintText = hint;
+      this.hintText.setText(hint);
+    }
+    this.titleText.setVisible(true);
   }
 
   private pointerToCell(pointer: Phaser.Input.Pointer): Vec2 | null {
     const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
     const x = Math.floor((worldPoint.x - OFFSET_X) / TILE_SIZE);
     const y = Math.floor((worldPoint.y - OFFSET_Y) / TILE_SIZE);
-    if (x < 0 || y < 0 || x >= 32 || y >= 24) return null;
+    if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) return null;
     return { x, y };
   }
 
@@ -812,9 +1045,7 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private targetLabel(position: Vec2): string {
-    const building = this.simulation.state.buildings.find(
-      (candidate) => candidate.position.x === position.x && candidate.position.y === position.y,
-    );
+    const building = this.simulation.getBuildingAt(position);
     return building ? BUILDING_DEFINITIONS[building.type].shortLabel : `PLOT ${position.x + 1}:${position.y + 1}`;
   }
 

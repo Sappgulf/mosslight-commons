@@ -8,11 +8,13 @@ export type DistrictType = "meadow" | "wetland" | "lantern" | "market" | "ruin";
 
 export type RecipeKey = "lantern-kit" | "bridge-kit" | "comfort-kit";
 
-export type RelationshipKind = "friendship" | "rivalry" | "kinship";
+export type RelationshipKind = "friendship" | "rivalry" | "kinship" | "family";
 
 export type ExpeditionStatus = "active" | "complete";
 
 export type MapZoneKey = "sunken-reach" | "old-hollow";
+
+export type CollectibleTile = "fern" | "mushroom" | "crystal" | "ruin";
 
 export type TileKind =
   | "grass"
@@ -20,10 +22,7 @@ export type TileKind =
   | "wetland"
   | "path"
   | "stone"
-  | "fern"
-  | "mushroom"
-  | "crystal"
-  | "ruin";
+  | CollectibleTile;
 
 export type BuildingType =
   | "root-heart"
@@ -37,7 +36,9 @@ export type ResidentGoal = "rest" | "forage" | "work" | "socialize" | "explore";
 
 export type Season = "mosswake" | "suncrest" | "emberfall" | "longshade";
 
-export type ObjectiveKind = "collect" | "build" | "expedition" | "craft";
+export type ObjectiveKind = "collect" | "build" | "expedition" | "craft" | "upgrade" | "population" | "harmony";
+
+export type LifeStage = "sprout" | "adult" | "elder";
 
 export interface Vec2 {
   x: number;
@@ -58,6 +59,13 @@ export interface Traits {
   resilience: number;
 }
 
+/** Work skill improves with time on the job and raises a resident's output. */
+export interface Skills {
+  farming: number;
+  crafting: number;
+  scouting: number;
+}
+
 export interface Resident {
   id: string;
   name: string;
@@ -67,9 +75,17 @@ export interface Resident {
   workplaceId: string;
   needs: Needs;
   traits: Traits;
+  skills: Skills;
   goal: ResidentGoal;
   target?: Vec2;
+  /** Remaining A* route to `target`, recomputed only when the target changes. */
+  path: Vec2[];
   lastDecisionExplanation: string;
+  /** Days lived in the Commons. Drives life stage. */
+  age: number;
+  stage: LifeStage;
+  /** Consecutive ticks with a critical need. At the threshold the resident leaves. */
+  distress: number;
 }
 
 export interface Building {
@@ -77,6 +93,9 @@ export interface Building {
   type: BuildingType;
   position: Vec2;
   level: number;
+  /** Accumulated ticks toward the next level, when an upgrade is in progress. */
+  upgradeProgress: number;
+  upgrading: boolean;
 }
 
 export interface Forecast {
@@ -92,6 +111,7 @@ export interface Message {
   id: number;
   text: string;
   tone: "info" | "good" | "warning";
+  day: number;
 }
 
 export interface SettlementMetrics {
@@ -113,12 +133,14 @@ export interface Objective {
   target: number;
   progress: number;
   completed: boolean;
-  tile?: "fern" | "mushroom" | "crystal" | "ruin";
+  tile?: CollectibleTile;
   building?: BuildingType;
   zone?: MapZoneKey;
   recipe?: RecipeKey;
   rewardItem?: ItemKey;
   rewardAmount?: number;
+  /** Chapter index; objectives unlock a chapter at a time. */
+  chapter: number;
 }
 
 export interface District {
@@ -170,6 +192,17 @@ export interface CraftingOrder {
   duration: number;
 }
 
+/** A depleted wild node regrowing on a timer. */
+export interface Regrowth {
+  x: number;
+  y: number;
+  tile: CollectibleTile;
+  ticksRemaining: number;
+  totalTicks: number;
+}
+
+export type SettlementStatus = "thriving" | "strained" | "failing" | "collapsed";
+
 export interface WorldState {
   seed: number;
   tick: number;
@@ -182,6 +215,7 @@ export interface WorldState {
   items: Record<ItemKey, number>;
   revealed: boolean[][];
   revealedAreas: MapZoneKey[];
+  regrowth: Regrowth[];
   buildings: Building[];
   residents: Resident[];
   districts: District[];
@@ -192,12 +226,21 @@ export interface WorldState {
   crafting: CraftingOrder | null;
   crafted: Record<RecipeKey, number>;
   objectives: Objective[];
+  chapter: number;
   metrics: SettlementMetrics;
   forecast: Forecast;
   forecastSource: "local" | "torx-thrml";
   messages: Message[];
+  /** Full ledger history, newest first, capped for memory. */
+  history: Message[];
   selectedResidentId: string;
   buildMode: Exclude<BuildingType, "root-heart"> | null;
   paused: boolean;
   speed: 1 | 2 | 4;
+  status: SettlementStatus;
+  /** Ticks spent in a failing state; at the limit the settlement collapses. */
+  collapseTimer: number;
+  departures: number;
+  onboardingStep: number;
+  onboardingDismissed: boolean;
 }

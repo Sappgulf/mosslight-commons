@@ -2,12 +2,16 @@ import {
   BUILDING_DEFINITIONS,
   DISTRICT_DEFINITIONS,
   ITEM_DEFINITIONS,
+  MAX_BUILDING_LEVEL,
+  ONBOARDING_STEPS,
+  OUTPUT_MULTIPLIER,
   RECIPE_DEFINITIONS,
   RESOURCE_DEFINITIONS,
   SPECIES_DEFINITIONS,
+  UPGRADE_COSTS,
 } from "../data/definitions";
 import { MosslightSimulation } from "../sim/simulation";
-import type { BuildingType, DistrictType, ItemKey, RecipeKey, ResourceKey } from "../sim/types";
+import type { BuildingType, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
 
 const resourceOrder: ResourceKey[] = ["food", "water", "warmth", "light"];
 const buildOrder: Exclude<BuildingType, "root-heart">[] = [
@@ -23,38 +27,52 @@ const recipeOrder: RecipeKey[] = ["lantern-kit", "bridge-kit", "comfort-kit"];
 
 type BuildChoice = Exclude<BuildingType, "root-heart">;
 type ZoomAction = "in" | "out" | "reset";
+type LedgerFilter = "all" | "good" | "warning" | "info";
 type MissingCost =
   | { resource: ResourceKey; amount: number }
   | { item: ItemKey; amount: number };
+
+export interface HUDCallbacks {
+  onChange: () => void;
+  onZoomChange: (action: ZoomAction) => number;
+  getZoomPercent: () => number;
+  onSave: () => void;
+  onLoad: () => void;
+  onReset: () => void;
+  onExport: () => void;
+  onImport: (file: File) => void;
+  onToggleMute: () => boolean;
+  isMuted: () => boolean;
+}
 
 const formatResourceName = (resource: ResourceKey): string => RESOURCE_DEFINITIONS[resource].label.toUpperCase();
 
 export class HUD {
   private readonly root: HTMLElement;
   private readonly simulation: MosslightSimulation;
-  private readonly onChange: () => void;
-  private readonly onZoomChange: (action: ZoomAction) => number;
-  private readonly getZoomPercent: () => number;
+  private readonly callbacks: HUDCallbacks;
   private activeFieldTab: "field" | "civic" = "field";
   private zoomPercent = 100;
+  private selectedBuildingId: string | null = null;
+  private ledgerOpen = false;
+  private ledgerFilter: LedgerFilter = "all";
 
-  constructor(
-    root: HTMLElement,
-    simulation: MosslightSimulation,
-    onChange: () => void,
-    onZoomChange: (action: ZoomAction) => number,
-    getZoomPercent: () => number,
-  ) {
+  constructor(root: HTMLElement, simulation: MosslightSimulation, callbacks: HUDCallbacks) {
     this.root = root;
     this.simulation = simulation;
-    this.onChange = onChange;
-    this.onZoomChange = onZoomChange;
-    this.getZoomPercent = getZoomPercent;
+    this.callbacks = callbacks;
     this.root.innerHTML = this.template();
     this.root.addEventListener("click", (event) => this.handleClick(event));
     this.root.addEventListener("keydown", (event) => this.handleKeydown(event));
     this.root.addEventListener("focusin", (event) => this.handleFocus(event));
     this.root.addEventListener("pointerover", (event) => this.handlePointerover(event));
+    this.root.addEventListener("change", (event) => this.handleChange(event));
+    this.render();
+  }
+
+  /** Called by the scene when the player clicks a building on the map. */
+  public selectBuilding(buildingId: string): void {
+    this.selectedBuildingId = buildingId;
     this.render();
   }
 
@@ -66,8 +84,27 @@ export class HUD {
     this.setText("[data-phase]", state.phase.toUpperCase());
     this.setText("[data-status]", state.paused ? "PAUSED" : "LIVE");
     this.setText("[data-provider]", state.forecastSource === "torx-thrml" ? "TORX+THRML" : "LOCAL MODEL");
-    this.zoomPercent = this.getZoomPercent();
+    this.zoomPercent = this.callbacks.getZoomPercent();
     this.setText("[data-zoom-value]", `${this.zoomPercent}%`);
+
+    // Settlement health banner — the visible face of the new fail state.
+    const statusBanner = this.root.querySelector<HTMLElement>("[data-settlement-status]");
+    if (statusBanner) {
+      statusBanner.dataset.state = state.status;
+      const copy: Record<typeof state.status, string> = {
+        thriving: "THRIVING · the Commons is steady",
+        strained: "STRAINED · stores or spirits are running low",
+        failing: `FAILING · restore the basin within ${Math.max(0, Math.ceil((48 - state.collapseTimer) / 12))} days`,
+        collapsed: "COLLAPSED · the Mosslight has gone dark",
+      };
+      statusBanner.textContent = copy[state.status];
+      statusBanner.hidden = state.status === "thriving";
+    }
+
+    const collapseOverlay = this.root.querySelector<HTMLElement>("[data-collapse-overlay]");
+    if (collapseOverlay) collapseOverlay.hidden = state.status !== "collapsed";
+    this.setText("[data-collapse-summary]", `The Commons held for ${state.day - 8} days. ${state.departures} residents left before the light failed.`);
+
     this.root.querySelectorAll<HTMLButtonElement>("[data-field-tab]").forEach((button) => {
       const active = button.dataset.fieldTab === this.activeFieldTab;
       button.classList.toggle("is-active", active);
@@ -102,35 +139,10 @@ export class HUD {
     for (const item of itemOrder) {
       this.setText(`[data-item-value="${item}"]`, String(state.items[item]));
     }
-    const objectiveList = this.root.querySelector<HTMLElement>("[data-objectives]");
-    if (objectiveList) {
-      objectiveList.replaceChildren(...state.objectives.map((objective) => {
-        const row = document.createElement("article");
-        row.className = `objective-row${objective.completed ? " is-complete" : ""}`;
 
-        const heading = document.createElement("div");
-        heading.className = "objective-heading";
-        const title = document.createElement("strong");
-        title.textContent = objective.title;
-        const progress = document.createElement("span");
-        progress.textContent = `${objective.progress}/${objective.target}`;
-        heading.append(title, progress);
-
-        const description = document.createElement("small");
-        description.textContent = objective.completed ? "Complete · the Commons remembers." : objective.description;
-        const meter = document.createElement("span");
-        meter.className = "objective-meter";
-        const fill = document.createElement("i");
-        fill.style.width = `${Math.round((objective.progress / objective.target) * 100)}%`;
-        meter.append(fill);
-        row.append(heading, description, meter);
-        return row;
-      }));
-    }
-    this.setText(
-      "[data-objective-count]",
-      `${state.objectives.filter((objective) => objective.completed).length}/${state.objectives.length} DONE`,
-    );
+    this.renderObjectives();
+    this.renderBuildingInspector();
+    this.renderLedger();
 
     const activeExpedition = state.expeditions.find((expedition) => expedition.status === "active");
     this.setText(
@@ -144,6 +156,7 @@ export class HUD {
       dispatchButton.disabled = Boolean(activeExpedition) || state.revealedAreas.length >= 2;
       dispatchButton.textContent = activeExpedition ? "SCOUTING" : state.revealedAreas.length >= 2 ? "MAPPED" : "DISPATCH SCOUT";
     }
+
     this.root.querySelectorAll<HTMLButtonElement>("[data-district]").forEach((button) => {
       const district = button.dataset.district as DistrictType;
       const active = district === state.districtFocus;
@@ -202,53 +215,9 @@ export class HUD {
       }));
     }
 
-    const resident = this.simulation.getSelectedResident();
-    if (resident) {
-      const species = SPECIES_DEFINITIONS[resident.species];
-      this.setText("[data-resident-name]", resident.name);
-      this.setText("[data-resident-species]", `${species.label} · ${species.role}`);
-      this.setText("[data-resident-goal]", resident.goal);
-      this.setText("[data-resident-explanation]", resident.lastDecisionExplanation);
-      this.setText("[data-resident-glyph]", resident.species === "glowtail" ? "✧" : resident.species === "mireling" ? "◌" : "●");
-      for (const need of Object.keys(resident.needs) as Array<keyof typeof resident.needs>) {
-        const fill = this.root.querySelector<HTMLElement>(`[data-need-fill="${need}"]`);
-        const value = Math.round(resident.needs[need]);
-        if (fill) fill.style.width = `${value}%`;
-        this.setText(`[data-need-value="${need}"]`, `${value}`);
-        const meter = this.root.querySelector<HTMLElement>(`[data-need-meter="${need}"]`);
-        if (meter) {
-          meter.setAttribute("aria-valuenow", String(value));
-          meter.setAttribute("aria-valuetext", `${value} percent ${need} need fulfilled`);
-        }
-      }
-      const relationshipList = this.root.querySelector<HTMLElement>("[data-relationships]");
-      if (relationshipList) {
-        relationshipList.replaceChildren(...this.simulation.getRelationshipsForResident(resident.id).map((relationship) => {
-          const partnerId = relationship.aId === resident.id ? relationship.bId : relationship.aId;
-          const partner = state.residents.find((candidate) => candidate.id === partnerId);
-          const item = document.createElement("li");
-          item.textContent = `${relationship.kind} · ${partner?.name ?? "neighbor"} · ${Math.round(relationship.strength)}%`;
-          item.className = `relationship relationship--${relationship.kind}`;
-          return item;
-        }));
-      }
-    }
-
-    const messageList = this.root.querySelector<HTMLElement>("[data-messages]");
-    const latestMessage = state.messages[0];
-    const feedback = this.root.querySelector<HTMLElement>("[data-feedback]");
-    const feedbackPanel = this.root.querySelector<HTMLElement>("[data-feedback-panel]");
-    if (feedbackPanel) feedbackPanel.className = `latest-feedback${latestMessage ? ` message--${latestMessage.tone}` : ""}`;
-    if (feedback) feedback.textContent = latestMessage?.text ?? "No new notes from the Commons.";
-    this.setText("[data-message-count]", `${Math.min(state.messages.length, 3)} RECENT`);
-    if (messageList) {
-      messageList.replaceChildren(...state.messages.slice(1, 3).map((message) => {
-        const item = document.createElement("li");
-        item.className = `message message--${message.tone}`;
-        item.textContent = message.text;
-        return item;
-      }));
-    }
+    this.renderResident();
+    this.renderMessages();
+    this.renderOnboarding();
 
     this.root.querySelectorAll<HTMLButtonElement>("[data-build]").forEach((button) => {
       const build = button.dataset.build as BuildChoice;
@@ -262,7 +231,6 @@ export class HUD {
       button.classList.toggle("is-unavailable", !affordable);
       button.setAttribute("aria-pressed", active ? "true" : "false");
       button.setAttribute("aria-label", definition.label);
-      button.setAttribute("aria-describedby", `build-${build}-description build-${build}-cost build-${build}-status`);
       this.setText(`[data-build-cost="${build}"]`, `COST · ${this.formatCost(definition)}`);
       this.setText(`[data-build-status="${build}"]`, status);
       this.setText(`[data-build-description="${build}"]`, definition.description);
@@ -283,23 +251,270 @@ export class HUD {
     }
     this.setText("[data-pause-icon]", state.paused ? "▶" : "Ⅱ");
     this.setText("[data-pause-label]", state.paused ? "RESUME" : "PAUSE");
+
+    const muteButton = this.root.querySelector<HTMLButtonElement>('[data-action="mute"]');
+    if (muteButton) {
+      const muted = this.callbacks.isMuted();
+      muteButton.textContent = muted ? "♪̸" : "♪";
+      muteButton.setAttribute("aria-pressed", muted ? "true" : "false");
+      muteButton.setAttribute("aria-label", muted ? "Unmute audio" : "Mute audio");
+      muteButton.title = muted ? "Unmute audio (M)" : "Mute audio (M)";
+    }
+
     this.updateBuildDetail();
+  }
+
+  private renderObjectives(): void {
+    const state = this.simulation.state;
+    const active = this.simulation.getActiveObjectives();
+    const objectiveList = this.root.querySelector<HTMLElement>("[data-objectives]");
+    if (objectiveList) {
+      objectiveList.replaceChildren(...active.map((objective) => {
+        const row = document.createElement("article");
+        row.className = `objective-row${objective.completed ? " is-complete" : ""}`;
+
+        const heading = document.createElement("div");
+        heading.className = "objective-heading";
+        const title = document.createElement("strong");
+        title.textContent = objective.title;
+        const progress = document.createElement("span");
+        progress.textContent = `${objective.progress}/${objective.target}`;
+        heading.append(title, progress);
+
+        const description = document.createElement("small");
+        description.textContent = objective.completed ? "Complete · the Commons remembers." : objective.description;
+        const meter = document.createElement("span");
+        meter.className = "objective-meter";
+        const fill = document.createElement("i");
+        fill.style.width = `${Math.round((objective.progress / objective.target) * 100)}%`;
+        meter.append(fill);
+        row.append(heading, description, meter);
+        return row;
+      }));
+    }
+    this.setText(
+      "[data-objective-count]",
+      `CH.${state.chapter + 1} · ${active.filter((objective) => objective.completed).length}/${active.length} DONE`,
+    );
+  }
+
+  /** Building inspector — the surface for the new upgrade system. */
+  private renderBuildingInspector(): void {
+    const panel = this.root.querySelector<HTMLElement>("[data-building-panel]");
+    if (!panel) return;
+
+    const building = this.selectedBuildingId
+      ? this.simulation.state.buildings.find((candidate) => candidate.id === this.selectedBuildingId)
+      : undefined;
+
+    if (!building) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+
+    const definition = BUILDING_DEFINITIONS[building.type];
+    this.setText("[data-building-name]", definition.label);
+    this.setText("[data-building-level]", `LEVEL ${building.level}/${MAX_BUILDING_LEVEL}`);
+    this.setText("[data-building-output]", `OUTPUT ${Math.round((OUTPUT_MULTIPLIER[building.level] ?? 1) * 100)}%`);
+    this.setText("[data-building-description]", definition.description);
+
+    const upgradeButton = this.root.querySelector<HTMLButtonElement>('[data-action="upgrade-building"]');
+    const costLabel = this.root.querySelector<HTMLElement>("[data-building-upgrade-cost]");
+    const progress = this.root.querySelector<HTMLElement>("[data-building-upgrade-progress]");
+    if (!upgradeButton || !costLabel || !progress) return;
+
+    if (building.upgrading) {
+      const plan = UPGRADE_COSTS[building.level + 1];
+      upgradeButton.disabled = true;
+      upgradeButton.textContent = "UNDER WORK";
+      costLabel.textContent = `Raising to level ${building.level + 1}.`;
+      progress.hidden = false;
+      const percent = plan ? Math.round((building.upgradeProgress / plan.duration) * 100) : 0;
+      progress.querySelector("i")?.setAttribute("style", `width:${percent}%`);
+      return;
+    }
+
+    progress.hidden = true;
+
+    if (building.level >= MAX_BUILDING_LEVEL || building.type === "root-heart") {
+      upgradeButton.disabled = true;
+      upgradeButton.textContent = building.type === "root-heart" ? "THE ROOT ENDURES" : "FULLY GROWN";
+      costLabel.textContent = building.type === "root-heart"
+        ? "The Mosslight Root cannot be rebuilt."
+        : "This building is at its greatest size.";
+      return;
+    }
+
+    const plan = UPGRADE_COSTS[building.level + 1]!;
+    const check = this.simulation.canUpgrade(building.id);
+    upgradeButton.disabled = !check.ok;
+    upgradeButton.textContent = check.ok ? `UPGRADE TO L${building.level + 1}` : check.reason;
+    const parts = [
+      ...(Object.entries(plan.cost) as Array<[ResourceKey, number]>).map(([resource, amount]) => `${amount} ${formatResourceName(resource)}`),
+      ...(Object.entries(plan.itemCost) as Array<[ItemKey, number]>).map(([item, amount]) => `${amount} ${ITEM_DEFINITIONS[item].label.toUpperCase()}`),
+    ];
+    costLabel.textContent = `Cost: ${parts.join(" · ")} · ${plan.duration} ticks of work.`;
+  }
+
+  private renderResident(): void {
+    const state = this.simulation.state;
+    const resident = this.simulation.getSelectedResident();
+    if (!resident) return;
+
+    const species = SPECIES_DEFINITIONS[resident.species];
+    this.setText("[data-resident-name]", resident.name);
+    this.setText("[data-resident-species]", `${species.label} · ${species.role}`);
+    this.setText("[data-resident-goal]", resident.goal);
+    this.setText("[data-resident-explanation]", resident.lastDecisionExplanation);
+    this.setText("[data-resident-glyph]", resident.species === "glowtail" ? "✧" : resident.species === "mireling" ? "◌" : "●");
+    this.setText("[data-resident-stage]", `${resident.stage.toUpperCase()} · ${resident.age}d`);
+
+    // Skills panel, added alongside the resident lifecycle.
+    const skillList = this.root.querySelector<HTMLElement>("[data-skills]");
+    if (skillList) {
+      skillList.replaceChildren(...(Object.keys(resident.skills) as Array<keyof typeof resident.skills>).map((skill) => {
+        const row = document.createElement("div");
+        row.className = "need-row";
+        const name = document.createElement("span");
+        name.textContent = skill;
+        const meter = document.createElement("div");
+        meter.className = "need-meter";
+        const fill = document.createElement("i");
+        fill.style.width = `${Math.round(resident.skills[skill])}%`;
+        meter.append(fill);
+        const value = document.createElement("b");
+        value.textContent = String(Math.round(resident.skills[skill]));
+        row.append(name, meter, value);
+        return row;
+      }));
+    }
+
+    for (const need of Object.keys(resident.needs) as Array<keyof typeof resident.needs>) {
+      const fill = this.root.querySelector<HTMLElement>(`[data-need-fill="${need}"]`);
+      const value = Math.round(resident.needs[need]);
+      if (fill) fill.style.width = `${value}%`;
+      this.setText(`[data-need-value="${need}"]`, `${value}`);
+      const meter = this.root.querySelector<HTMLElement>(`[data-need-meter="${need}"]`);
+      if (meter) {
+        meter.setAttribute("aria-valuenow", String(value));
+        meter.setAttribute("aria-valuetext", `${value} percent ${need} need fulfilled`);
+      }
+    }
+
+    const relationshipList = this.root.querySelector<HTMLElement>("[data-relationships]");
+    if (relationshipList) {
+      relationshipList.replaceChildren(...this.simulation.getRelationshipsForResident(resident.id).map((relationship) => {
+        const partnerId = relationship.aId === resident.id ? relationship.bId : relationship.aId;
+        const partner = state.residents.find((candidate) => candidate.id === partnerId);
+        const item = document.createElement("li");
+        item.textContent = `${relationship.kind} · ${partner?.name ?? "neighbor"} · ${Math.round(relationship.strength)}%`;
+        item.className = `relationship relationship--${relationship.kind}`;
+        return item;
+      }));
+    }
+  }
+
+  private renderMessages(): void {
+    const state = this.simulation.state;
+    const messageList = this.root.querySelector<HTMLElement>("[data-messages]");
+    const latestMessage = state.messages[0];
+    const feedback = this.root.querySelector<HTMLElement>("[data-feedback]");
+    const feedbackPanel = this.root.querySelector<HTMLElement>("[data-feedback-panel]");
+    if (feedbackPanel) feedbackPanel.className = `latest-feedback${latestMessage ? ` message--${latestMessage.tone}` : ""}`;
+    if (feedback) feedback.textContent = latestMessage?.text ?? "No new notes from the Commons.";
+    this.setText("[data-message-count]", `${state.history.length} LOGGED`);
+    if (messageList) {
+      messageList.replaceChildren(...state.messages.slice(1, 3).map((message) => {
+        const item = document.createElement("li");
+        item.className = `message message--${message.tone}`;
+        item.textContent = message.text;
+        return item;
+      }));
+    }
+  }
+
+  /** Full scrollback ledger, replacing the old five-line cap. */
+  private renderLedger(): void {
+    const overlay = this.root.querySelector<HTMLElement>("[data-ledger-overlay]");
+    if (!overlay) return;
+    overlay.hidden = !this.ledgerOpen;
+    if (!this.ledgerOpen) return;
+
+    this.root.querySelectorAll<HTMLButtonElement>("[data-ledger-filter]").forEach((button) => {
+      const active = button.dataset.ledgerFilter === this.ledgerFilter;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+
+    const history = this.simulation.state.history.filter(
+      (message) => this.ledgerFilter === "all" || message.tone === this.ledgerFilter,
+    );
+    this.setText("[data-ledger-count]", `${history.length} ENTRIES`);
+
+    const list = this.root.querySelector<HTMLElement>("[data-ledger-list]");
+    if (!list) return;
+    if (history.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "message";
+      empty.textContent = "Nothing recorded under this filter yet.";
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(...history.map((message: Message) => {
+      const item = document.createElement("li");
+      item.className = `message message--${message.tone}`;
+      const day = document.createElement("b");
+      day.className = "ledger-day";
+      day.textContent = `D${String(message.day).padStart(2, "0")}`;
+      const text = document.createElement("span");
+      text.textContent = message.text;
+      item.append(day, text);
+      return item;
+    }));
+  }
+
+  /** First-run walkthrough. */
+  private renderOnboarding(): void {
+    const overlay = this.root.querySelector<HTMLElement>("[data-onboarding]");
+    if (!overlay) return;
+    const state = this.simulation.state;
+    const done = state.onboardingDismissed || state.onboardingStep >= ONBOARDING_STEPS.length;
+    overlay.hidden = done;
+    if (done) return;
+
+    const step = ONBOARDING_STEPS[state.onboardingStep]!;
+    this.setText("[data-onboarding-title]", step.title);
+    this.setText("[data-onboarding-body]", step.body);
+    this.setText("[data-onboarding-hint]", step.hint);
+    this.setText("[data-onboarding-progress]", `${state.onboardingStep + 1} / ${ONBOARDING_STEPS.length}`);
+    const next = this.root.querySelector<HTMLButtonElement>('[data-action="onboarding-next"]');
+    if (next) next.textContent = state.onboardingStep === ONBOARDING_STEPS.length - 1 ? "BEGIN" : "NEXT";
   }
 
   private handleClick(event: Event): void {
     const target = event.target as HTMLElement;
+
     const fieldTab = target.closest<HTMLButtonElement>("[data-field-tab]");
     if (fieldTab?.dataset.fieldTab === "field" || fieldTab?.dataset.fieldTab === "civic") {
       this.activeFieldTab = fieldTab.dataset.fieldTab;
       this.render();
       return;
     }
+
+    const ledgerFilter = target.closest<HTMLButtonElement>("[data-ledger-filter]");
+    if (ledgerFilter?.dataset.ledgerFilter) {
+      this.ledgerFilter = ledgerFilter.dataset.ledgerFilter as LedgerFilter;
+      this.render();
+      return;
+    }
+
     const buildButton = target.closest<HTMLButtonElement>("[data-build]");
     if (buildButton) {
       const build = buildButton.dataset.build as BuildChoice;
       this.simulation.setBuildMode(this.simulation.state.buildMode === build ? null : build);
       this.render();
-      this.onChange();
+      this.callbacks.onChange();
       return;
     }
 
@@ -307,7 +522,7 @@ export class HUD {
     if (districtButton?.dataset.district) {
       this.simulation.setDistrictFocus(districtButton.dataset.district as DistrictType);
       this.render();
-      this.onChange();
+      this.callbacks.onChange();
       return;
     }
 
@@ -315,44 +530,89 @@ export class HUD {
     if (craftButton?.dataset.craft) {
       this.simulation.startCraft(craftButton.dataset.craft as RecipeKey);
       this.render();
-      this.onChange();
+      this.callbacks.onChange();
       return;
     }
 
     const speedButton = target.closest<HTMLButtonElement>("[data-speed]");
     if (speedButton) {
-      const speed = Number(speedButton.dataset.speed) as 1 | 2 | 4;
-      this.simulation.setSpeed(speed);
+      this.simulation.setSpeed(Number(speedButton.dataset.speed) as 1 | 2 | 4);
       this.render();
       return;
     }
 
     const zoomButton = target.closest<HTMLButtonElement>("[data-zoom]");
     if (zoomButton?.dataset.zoom === "in" || zoomButton?.dataset.zoom === "out" || zoomButton?.dataset.zoom === "reset") {
-      this.onZoomChange(zoomButton.dataset.zoom);
+      this.callbacks.onZoomChange(zoomButton.dataset.zoom);
       this.render();
       return;
     }
 
     const actionButton = target.closest<HTMLButtonElement>("[data-action]");
-    if (actionButton?.dataset.action === "pause") {
-      this.simulation.togglePause();
-      this.render();
-      return;
-    }
+    const action = actionButton?.dataset.action;
+    if (!action) return;
 
-    if (actionButton?.dataset.action === "clear-build") {
-      this.simulation.setBuildMode(null);
-      this.render();
-      this.onChange();
-      return;
+    switch (action) {
+      case "pause":
+        this.simulation.togglePause();
+        break;
+      case "clear-build":
+        this.simulation.setBuildMode(null);
+        this.callbacks.onChange();
+        break;
+      case "dispatch-expedition":
+        this.simulation.dispatchExpedition();
+        this.callbacks.onChange();
+        break;
+      case "upgrade-building":
+        if (this.selectedBuildingId) this.simulation.startUpgrade(this.selectedBuildingId);
+        this.callbacks.onChange();
+        break;
+      case "close-building":
+        this.selectedBuildingId = null;
+        break;
+      case "toggle-ledger":
+        this.ledgerOpen = !this.ledgerOpen;
+        break;
+      case "close-ledger":
+        this.ledgerOpen = false;
+        break;
+      case "onboarding-next":
+        this.simulation.advanceOnboarding();
+        break;
+      case "onboarding-skip":
+        this.simulation.dismissOnboarding();
+        break;
+      case "save":
+        this.callbacks.onSave();
+        break;
+      case "load":
+        this.callbacks.onLoad();
+        break;
+      case "reset":
+        this.callbacks.onReset();
+        break;
+      case "export":
+        this.callbacks.onExport();
+        break;
+      case "import":
+        this.root.querySelector<HTMLInputElement>("[data-import-input]")?.click();
+        break;
+      case "mute":
+        this.callbacks.onToggleMute();
+        break;
+      default:
+        return;
     }
+    this.render();
+  }
 
-    if (actionButton?.dataset.action === "dispatch-expedition") {
-      this.simulation.dispatchExpedition();
-      this.render();
-      this.onChange();
-    }
+  private handleChange(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    if (!input.matches("[data-import-input]")) return;
+    const file = input.files?.[0];
+    if (file) this.callbacks.onImport(file);
+    input.value = "";
   }
 
   private handleKeydown(event: KeyboardEvent): void {
@@ -481,6 +741,15 @@ export class HUD {
       <h1 id="brand-heading">Mosslight<br /><em>Commons</em></h1>
       <p>Shape a habitat. Follow the stories.</p>
       <span class="brand-status" role="status" aria-live="polite"><i aria-hidden="true"></i><span data-status>LIVE</span><span aria-hidden="true"> · </span><span data-phase>DAWN</span><span aria-hidden="true"> · </span><span data-provider>LOCAL MODEL</span></span>
+      <div class="save-row" role="group" aria-label="Save controls">
+        <button type="button" data-action="save" title="Save the Commons">SAVE</button>
+        <button type="button" data-action="load" title="Load the last save">LOAD</button>
+        <button type="button" data-action="export" title="Download this world as a file">EXPORT</button>
+        <button type="button" data-action="import" title="Load a world from a file">IMPORT</button>
+        <button type="button" data-action="reset" title="Start a new Commons">NEW</button>
+        <input type="file" accept="application/json,.json" data-import-input hidden aria-label="Import a saved world" />
+      </div>
+      <p class="settlement-status" data-settlement-status role="status" aria-live="polite" hidden></p>
     </section>
 
     <section class="resource-strip panel" aria-label="Settlement resources">
@@ -496,7 +765,7 @@ export class HUD {
       </div>
       <div class="field-view" data-field-view="field">
         <div class="item-grid" aria-label="Found materials">${itemMarkup}</div>
-        <div class="objective-heading objective-heading--panel"><span>OBJECTIVES</span><span data-objective-count>0/5 DONE</span></div>
+        <div class="objective-heading objective-heading--panel"><span>OBJECTIVES</span><span data-objective-count>CH.1 · 0/5 DONE</span></div>
         <div class="objective-list" data-objectives aria-label="Fieldwork objectives"></div>
         <div class="field-section expedition-section">
           <div class="objective-heading"><span>EXPEDITION</span><span data-expedition-status>READY TO DISPATCH</span></div>
@@ -529,11 +798,25 @@ export class HUD {
         </div>
       </section>
 
+      <section class="building-card panel" data-building-panel hidden aria-labelledby="building-heading">
+        <div class="panel-eyebrow"><span>BUILDING</span><button type="button" class="mini-close" data-action="close-building" aria-label="Close building inspector">×</button></div>
+        <h2 id="building-heading" data-building-name>Burrow Home</h2>
+        <div class="building-meta"><span data-building-level>LEVEL 1/3</span><span data-building-output>OUTPUT 100%</span></div>
+        <p class="building-description" data-building-description></p>
+        <span class="upgrade-meter" data-building-upgrade-progress hidden><i></i></span>
+        <button class="dispatch-button" type="button" data-action="upgrade-building">UPGRADE</button>
+        <small class="upgrade-cost" data-building-upgrade-cost></small>
+      </section>
+
       <section class="inspector-card panel" aria-labelledby="resident-heading">
         <div class="panel-eyebrow"><span>RESIDENT</span><span data-resident-goal>work</span></div>
-        <div class="resident-heading"><span class="resident-glyph" data-resident-glyph aria-hidden="true">●</span><div><h2 id="resident-heading" data-resident-name>Loading</h2><p data-resident-species>Brambleback</p></div></div>
+        <div class="resident-heading"><span class="resident-glyph" data-resident-glyph aria-hidden="true">●</span><div><h2 id="resident-heading" data-resident-name>Loading</h2><p data-resident-species>Brambleback</p></div><span class="resident-stage" data-resident-stage>ADULT</span></div>
         <div class="need-list">
           ${["shelter", "food", "safety", "belonging"].map((need) => `<div class="need-row"><span>${need}</span><div class="need-meter" data-need-meter="${need}" role="progressbar" aria-label="${need} need fulfilled" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-need-fill="${need}"></i></div><b data-need-value="${need}">0</b></div>`).join("")}
+        </div>
+        <div class="relationship-panel">
+          <div class="panel-eyebrow"><span>SKILLS</span><span>GROWS WITH WORK</span></div>
+          <div class="need-list need-list--skills" data-skills></div>
         </div>
         <div class="relationship-panel">
           <div class="panel-eyebrow"><span>SOCIAL CIRCLE</span><span>NEARBY BONDS</span></div>
@@ -559,9 +842,52 @@ export class HUD {
         <button class="zoom-button" type="button" data-zoom="in" aria-label="Zoom map in" title="Zoom map in (plus)">+</button>
         <button class="zoom-reset" type="button" data-zoom="reset" aria-label="Reset map zoom" title="Reset map zoom (0)">RESET</button>
       </div>
-      <span class="control-hint">SPACE pause · 1/2/4 speed · −/+ zoom</span>
+      <button class="zoom-button mute-button" type="button" data-action="mute" aria-pressed="false" aria-keyshortcuts="M" title="Mute audio (M)">♪</button>
+      <span class="control-hint">SPACE pause · 1/2/4 speed · −/+ zoom · M mute</span>
     </section>
 
-    <section class="message-log panel" aria-labelledby="ledger-heading"><div class="panel-eyebrow"><span id="ledger-heading">LEDGER NOTES</span><span data-message-count>1 RECENT</span></div><div class="latest-feedback" data-feedback-panel role="status" aria-live="polite" aria-atomic="true"><span class="feedback-kicker">LATEST</span><p data-feedback>No new notes from the Commons.</p></div><ul data-messages aria-label="Previous ledger notes"></ul></section>`;
+    <section class="message-log panel" aria-labelledby="ledger-heading">
+      <div class="panel-eyebrow"><span id="ledger-heading">LEDGER NOTES</span><button type="button" class="ledger-open" data-action="toggle-ledger" aria-label="Open the full ledger"><span data-message-count>0 LOGGED</span> ▸</button></div>
+      <div class="latest-feedback" data-feedback-panel role="status" aria-live="polite" aria-atomic="true"><span class="feedback-kicker">LATEST</span><p data-feedback>No new notes from the Commons.</p></div>
+      <ul data-messages aria-label="Previous ledger notes"></ul>
+    </section>
+
+    <div class="overlay ledger-overlay" data-ledger-overlay hidden role="dialog" aria-modal="true" aria-label="Full settlement ledger">
+      <div class="overlay-card">
+        <div class="panel-eyebrow"><span>SETTLEMENT LEDGER</span><span data-ledger-count>0 ENTRIES</span></div>
+        <div class="ledger-filters" role="group" aria-label="Filter ledger entries">
+          <button type="button" data-ledger-filter="all" class="is-active" aria-pressed="true">ALL</button>
+          <button type="button" data-ledger-filter="good" aria-pressed="false">GOOD</button>
+          <button type="button" data-ledger-filter="warning" aria-pressed="false">WARNINGS</button>
+          <button type="button" data-ledger-filter="info" aria-pressed="false">NOTES</button>
+        </div>
+        <ul class="ledger-list" data-ledger-list></ul>
+        <button class="dispatch-button" type="button" data-action="close-ledger">CLOSE</button>
+      </div>
+    </div>
+
+    <div class="overlay onboarding-overlay" data-onboarding hidden role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+      <div class="overlay-card overlay-card--narrow">
+        <div class="panel-eyebrow"><span>FIRST SEASON</span><span data-onboarding-progress>1 / 5</span></div>
+        <h2 id="onboarding-title" data-onboarding-title></h2>
+        <p data-onboarding-body></p>
+        <p class="onboarding-hint" data-onboarding-hint></p>
+        <div class="onboarding-actions">
+          <button type="button" class="ghost-button" data-action="onboarding-skip">SKIP</button>
+          <button class="dispatch-button" type="button" data-action="onboarding-next">NEXT</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="overlay collapse-overlay" data-collapse-overlay hidden role="dialog" aria-modal="true" aria-labelledby="collapse-title">
+      <div class="overlay-card overlay-card--narrow">
+        <h2 id="collapse-title">The Commons has gone quiet</h2>
+        <p data-collapse-summary></p>
+        <div class="onboarding-actions">
+          <button type="button" class="ghost-button" data-action="load">LOAD LAST SAVE</button>
+          <button class="dispatch-button" type="button" data-action="reset">BEGIN AGAIN</button>
+        </div>
+      </div>
+    </div>`;
   }
 }
