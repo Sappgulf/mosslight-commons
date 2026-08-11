@@ -11,6 +11,22 @@ function advance(simulation: MosslightSimulation, ticks: number): void {
   for (let index = 0; index < ticks; index += 1) simulation.advance();
 }
 
+/**
+ * Finds a revealed, empty, buildable grass cell. Hardcoding coordinates ties
+ * the tests to the current world layout; this survives terrain changes.
+ */
+function findBuildableTile(simulation: MosslightSimulation): Vec2 {
+  const { grid, revealed } = simulation.state;
+  for (let y = 0; y < grid.length; y += 1) {
+    for (let x = 0; x < grid[y]!.length; x += 1) {
+      if (grid[y]![x] !== "grass" || !revealed[y]![x]) continue;
+      if (simulation.getBuildingAt({ x, y })) continue;
+      return { x, y };
+    }
+  }
+  throw new Error("no buildable tile available");
+}
+
 /** Finds the first *revealed* cell holding a given wild node. */
 function findNode(simulation: MosslightSimulation, tile: CollectibleTile): Vec2 | undefined {
   const { grid, revealed } = simulation.state;
@@ -144,12 +160,13 @@ describe("MosslightSimulation", () => {
       simulation.state.resources.warmth = 90;
       simulation.state.resources.food = 90;
       const before = simulation.state.resources.warmth;
+      const cell = findBuildableTile(simulation);
 
-      expect(simulation.build("burrow-home", { x: 13, y: 6 })).toBe(true);
+      expect(simulation.build("burrow-home", cell)).toBe(true);
       expect(simulation.state.resources.warmth).toBeLessThan(before);
-      expect(simulation.getBuildingAt({ x: 13, y: 6 })?.type).toBe("burrow-home");
+      expect(simulation.getBuildingAt(cell)?.type).toBe("burrow-home");
       // A second placement on the same tile must fail.
-      expect(simulation.build("burrow-home", { x: 13, y: 6 })).toBe(false);
+      expect(simulation.build("burrow-home", cell)).toBe(false);
     });
 
     it("refuses to build on water, stone, fog, or an ungathered node", () => {
@@ -161,18 +178,30 @@ describe("MosslightSimulation", () => {
       const node = findNode(simulation, "fern")!;
       expect(simulation.build("burrow-home", node)).toBe(false);
 
+      // Inside the fogged Sunken Reach.
       expect(simulation.build("burrow-home", { x: 27, y: 17 })).toBe(false);
+
+      // A stone outcrop is not a foundation.
+      let stone: Vec2 | null = null;
+      for (let y = 0; y < 24 && !stone; y += 1) {
+        for (let x = 0; x < 32 && !stone; x += 1) {
+          if (simulation.state.grid[y]![x] === "stone") stone = { x, y };
+        }
+      }
+      expect(stone).not.toBeNull();
+      expect(simulation.build("burrow-home", stone!)).toBe(false);
     });
 
     it("refuses to build without the resources", () => {
+      const cell = findBuildableTile(simulation);
       simulation.state.resources = { food: 0, water: 0, warmth: 0, light: 0 };
-      expect(simulation.build("burrow-home", { x: 13, y: 6 })).toBe(false);
+      expect(simulation.build("burrow-home", cell)).toBe(false);
     });
 
     it("raises housing capacity when a home is added", () => {
       simulation.state.resources = { food: 100, water: 100, warmth: 100, light: 100 };
       const before = simulation.state.metrics.housingCapacity;
-      simulation.build("burrow-home", { x: 13, y: 6 });
+      expect(simulation.build("burrow-home", findBuildableTile(simulation))).toBe(true);
       expect(simulation.state.metrics.housingCapacity).toBeGreaterThan(before);
     });
   });
@@ -230,7 +259,7 @@ describe("MosslightSimulation", () => {
     it("consumes materials and completes a craft with a workshop present", () => {
       simulation.state.resources = { food: 100, water: 100, warmth: 100, light: 100 };
       simulation.state.items = { "seed-pod": 9, resin: 9, moonwater: 9, "map-fragment": 9 };
-      simulation.build("root-workshop", { x: 13, y: 6 });
+      expect(simulation.build("root-workshop", findBuildableTile(simulation))).toBe(true);
 
       const resin = simulation.state.items.resin;
       expect(simulation.startCraft("lantern-kit")).toBe(true);

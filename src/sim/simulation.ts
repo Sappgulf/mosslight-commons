@@ -82,6 +82,20 @@ const COLLECTIBLE_REWARDS: Record<
 
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
 
+/**
+ * Notable things that happen in the world, emitted with a grid position so the
+ * renderer can acknowledge them where they occurred rather than only as a line
+ * of text in a panel.
+ */
+export interface SimEvent {
+  type: "gather" | "build" | "upgrade" | "craft" | "objective" | "arrival" | "departure" | "regrowth" | "collapse";
+  position?: Vec2;
+  label?: string;
+  tone?: "good" | "warning";
+}
+
+export type SimEventListener = (event: SimEvent) => void;
+
 export class SeededRandom {
   private value: number;
 
@@ -147,6 +161,7 @@ export class MosslightSimulation {
    * stale. `updateMetrics()` used to run four times a tick.
    */
   private metricsDirty = true;
+  private readonly eventListeners: SimEventListener[] = [];
   /** id -> building, rebuilt whenever the building list changes. */
   private buildingIndex = new Map<string, Building>();
   /** type -> first building of that type, for the common "find the market" lookup. */
@@ -163,6 +178,19 @@ export class MosslightSimulation {
       this.resourceWarningLevels[resource] = this.getResourceWarningLevel(this.state.resources[resource]);
     }
     this.housingMessageBand = this.getHousingMessageBand(this.state.metrics.housingPressure);
+  }
+
+  /** Subscribes to world events. Returns an unsubscribe function. */
+  public onEvent(listener: SimEventListener): () => void {
+    this.eventListeners.push(listener);
+    return () => {
+      const index = this.eventListeners.indexOf(listener);
+      if (index >= 0) this.eventListeners.splice(index, 1);
+    };
+  }
+
+  private emit(event: SimEvent): void {
+    for (const listener of this.eventListeners) listener(event);
   }
 
   public advance(): void {
@@ -274,6 +302,12 @@ export class MosslightSimulation {
         `UPGRADE · ${BUILDING_DEFINITIONS[building.type].label} is now level ${building.level}. Output rises to ${Math.round(OUTPUT_MULTIPLIER[building.level]! * 100)}%.`,
         "good",
       );
+      this.emit({
+        type: "upgrade",
+        position: building.position,
+        label: `LEVEL ${building.level}`,
+        tone: "good",
+      });
     }
   }
 
@@ -465,6 +499,7 @@ export class MosslightSimulation {
       ? ` · housing ${this.state.metrics.population}/${this.state.metrics.housingCapacity}`
       : "";
     this.addMessage(`BUILD · ${definition.label} is ready${capacityNote}.`, "good");
+    this.emit({ type: "build", position, label: definition.shortLabel, tone: "good" });
     this.updateForecast();
     return true;
   }
@@ -506,6 +541,12 @@ export class MosslightSimulation {
       }.`,
       "good",
     );
+    this.emit({
+      type: "gather",
+      position,
+      label: `+${itemAmount} ${ITEM_DEFINITIONS[reward.item].label}`,
+      tone: "good",
+    });
     this.updateForecast();
     return true;
   }
@@ -663,10 +704,28 @@ export class MosslightSimulation {
       for (let x = 0; x < GRID_WIDTH; x += 1) {
         const lowerWetland = y > 17 && x < 29;
         const sidePool = x < 4 && y > 5;
-        const stone = (x * 17 + y * 13) % 29 === 0;
-        row.push(lowerWetland || sidePool ? "water" : stone ? "stone" : "grass");
+        row.push(lowerWetland || sidePool ? "water" : "grass");
       }
       grid.push(row);
+    }
+
+    // Stone as a handful of small outcrops rather than one isolated cell every
+    // 29th tile. Scattered single cells read as rendering artifacts speckled
+    // across the field; clustered rock reads as terrain.
+    const outcrops: Array<[number, number]> = [
+      [5, 3], [12, 7], [20, 15], [26, 11], [9, 12], [29, 3],
+    ];
+    for (const [ox, oy] of outcrops) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          // A ragged 3x3 blob: the centre always, the ring most of the time.
+          const isCenter = dx === 0 && dy === 0;
+          if (!isCenter && (ox * 7 + oy * 13 + dx * 3 + dy * 5) % 3 === 0) continue;
+          const x = ox + dx;
+          const y = oy + dy;
+          if (grid[y]?.[x] === "grass") grid[y]![x] = "stone";
+        }
+      }
     }
 
     for (let x = 2; x < 30; x += 1) {
@@ -908,6 +967,7 @@ export class MosslightSimulation {
           `REGROWTH · A ${REGROWTH_DEFINITIONS[entry.tile].label} has returned at plot ${entry.x + 1}:${entry.y + 1}.`,
           "good",
         );
+        this.emit({ type: "regrowth", position: { x: entry.x, y: entry.y }, tone: "good" });
       }
     }
     this.state.regrowth = remaining;
@@ -965,6 +1025,9 @@ export class MosslightSimulation {
     this.metricsDirty = true;
     this.advanceObjectives("craft", undefined, undefined, undefined, order.recipe);
     this.addMessage(`CRAFT · ${definition.label} is complete. ${definition.description}`, "good");
+    if (workshop) {
+      this.emit({ type: "craft", position: workshop.position, label: definition.label, tone: "good" });
+    }
   }
 
   /**
@@ -1226,6 +1289,7 @@ export class MosslightSimulation {
       `DEPARTURE · ${resident.name} left the Commons after too long without care. ${this.state.residents.length} remain.`,
       "warning",
     );
+    this.emit({ type: "departure", position: resident.position, label: resident.name, tone: "warning" });
   }
 
   private findClosestFriend(resident: Resident): Resident | undefined {
@@ -1278,6 +1342,7 @@ export class MosslightSimulation {
       `ARRIVAL · ${resident.name} joined the Commons · ${this.state.metrics.population}/${this.state.metrics.housingCapacity} housed.`,
       "good",
     );
+    this.emit({ type: "arrival", position: resident.position, label: resident.name, tone: "good" });
   }
 
   /**
@@ -1666,6 +1731,7 @@ export class MosslightSimulation {
       this.state.items[objective.rewardItem] += objective.rewardAmount;
     }
     this.addMessage(`OBJECTIVE · ${objective.title} complete${rewardText}.`, "good");
+    this.emit({ type: "objective", label: objective.title, tone: "good" });
   }
 
   /** Threshold objectives are checked against live metrics rather than events. */

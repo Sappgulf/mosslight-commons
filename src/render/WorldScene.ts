@@ -1,50 +1,36 @@
 import Phaser from "phaser";
 
 import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS } from "../data/definitions";
-import { MosslightSimulation } from "../sim/simulation";
+import { MosslightSimulation, type SimEvent } from "../sim/simulation";
 import type { BuildingType, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
+import { Effects } from "./Effects";
+import { LightLayer, type LightSource } from "./LightLayer";
+import { TerrainPainter } from "./TerrainPainter";
 
-const TILE_SIZE = 22;
-const OFFSET_X = 52;
-const OFFSET_Y = 60;
+/**
+ * Tiles were 22px, which put a detailed 40px painterly building sprite across
+ * two and a half flat cells. At 32px the ground can carry texture of its own
+ * and the art sits at a believable scale.
+ */
+const TILE_SIZE = 32;
+const OFFSET_X = 44;
+const OFFSET_Y = 52;
 const GRID_W = 32;
 const GRID_H = 24;
-const ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.2, 1.3] as const;
-const DEFAULT_ZOOM_INDEX = 2;
-const CAMERA_FOCUS = { x: 404, y: 324 };
+const BOARD_W = GRID_W * TILE_SIZE;
+const BOARD_H = GRID_H * TILE_SIZE;
+const VIEW_W = 900;
+const VIEW_H = 640;
 
-const TILE_COLORS: Record<TileKind, number> = {
-  grass: 0x173e35,
-  water: 0x124e59,
-  wetland: 0x236d61,
-  path: 0x5c6b4b,
-  stone: 0x2b3f3d,
-  fern: 0x255c43,
-  mushroom: 0x5a3f38,
-  crystal: 0x1b777f,
-  ruin: 0x48524b,
-};
+/** Continuous zoom range; the camera now pans freely rather than snapping to a fixed centre. */
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 1.8;
+const ZOOM_STEP = 0.1;
 
 const INK = 0x08151b;
 const PAPER = 0xf5e6c8;
 const VALID_COLOR = 0x8dbb72;
 const INVALID_COLOR = 0xe87968;
-
-const PHASE_COLORS = {
-  dawn: 0xffd58b,
-  day: 0x63e6d4,
-  dusk: 0xf4b85b,
-  night: 0xc8a9ff,
-} as const;
-
-/** Ambient tint laid over the whole board, giving night a real look. */
-const PHASE_OVERLAY: Record<keyof typeof PHASE_COLORS, { color: number; alpha: number }> = {
-  dawn: { color: 0xffb46b, alpha: 0.07 },
-  day: { color: 0x63e6d4, alpha: 0 },
-  dusk: { color: 0xf4834b, alpha: 0.09 },
-  // Night reads as night without burying the terrain palette underneath it.
-  night: { color: 0x2a2f6b, alpha: 0.17 },
-};
 
 const GOAL_COLORS: Record<ResidentGoal, number> = {
   rest: 0xf4b85b,
@@ -92,13 +78,24 @@ const BUILDING_TEXTURE_KEYS: Partial<Record<BuildingType, string>> = {
   "root-workshop": "building-root-workshop",
 };
 
+/** Display sizes rescaled for the 32px grid. */
 const BUILDING_DISPLAY_SIZES: Partial<Record<BuildingType, { width: number; height: number }>> = {
-  "root-heart": { width: 54, height: 56 },
-  "burrow-home": { width: 40, height: 39 },
-  "reed-farm": { width: 43, height: 42 },
-  "lantern-grove": { width: 40, height: 42 },
-  "commons-market": { width: 48, height: 44 },
-  "root-workshop": { width: 45, height: 43 },
+  "root-heart": { width: 74, height: 77 },
+  "burrow-home": { width: 55, height: 54 },
+  "reed-farm": { width: 59, height: 58 },
+  "lantern-grove": { width: 55, height: 58 },
+  "commons-market": { width: 66, height: 60 },
+  "root-workshop": { width: 62, height: 59 },
+};
+
+/** Buildings that emit light, and how far it reaches. */
+const BUILDING_LIGHT: Partial<Record<BuildingType, { radius: number; strength: number; color: number }>> = {
+  "lantern-grove": { radius: 132, strength: 1, color: 0xf4b85b },
+  "root-heart": { radius: 116, strength: 0.92, color: 0x63e6d4 },
+  "commons-market": { radius: 82, strength: 0.72, color: 0xf4b85b },
+  "burrow-home": { radius: 58, strength: 0.58, color: 0xffb46b },
+  "root-workshop": { radius: 66, strength: 0.6, color: 0xc8a9ff },
+  "reed-farm": { radius: 44, strength: 0.4, color: 0x8dbb72 },
 };
 
 const RESIDENT_TEXTURE_KEYS: Record<Species, string> = {
@@ -119,21 +116,23 @@ interface BuildPreviewState {
   reason: string;
 }
 
-/** Per-resident retained display objects, reused across frames. */
 interface ResidentView {
   container: Phaser.GameObjects.Container;
   marker: Phaser.GameObjects.Graphics;
+  shadow: Phaser.GameObjects.Ellipse;
+  body: Phaser.GameObjects.Container;
   sprite: Phaser.GameObjects.Image | null;
   label: Phaser.GameObjects.Text;
   lastGoal: ResidentGoal | null;
   lastSelected: boolean | null;
+  /** Per-resident phase offset so the idle bob is not in lockstep. */
+  bobPhase: number;
 }
 
-/** Per-building retained display objects. */
 interface BuildingView {
   container: Phaser.GameObjects.Container;
   art: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
-  /** Base display size for image art, so level scaling never falls back to the native texture size. */
+  shadow: Phaser.GameObjects.Ellipse;
   baseSize: { width: number; height: number } | null;
   levelPips: Phaser.GameObjects.Graphics;
   label: Phaser.GameObjects.Text;
@@ -141,54 +140,65 @@ interface BuildingView {
   lastUpgrading: boolean;
 }
 
+interface NodeView {
+  sprite: Phaser.GameObjects.Image;
+  bobPhase: number;
+}
+
 /**
- * Retained-mode renderer.
- *
- * The previous implementation tore down and rebuilt the entire scene graph on
- * every pointer move and every simulation tick — roughly 800 tile rects plus
- * every building, resident, and fog cell, several times a second. Here each
- * layer owns persistent display objects and is redrawn only when the state it
- * depends on actually changes:
- *
- * - terrain and fog: only when the grid or revealed mask changes (`terrainRevision`)
- * - buildings and residents: pooled per entity, transformed rather than recreated
- * - hover and build preview: their own small layer, the only thing a mouse move touches
+ * Depth bands. Everything inside the entity band is y-sorted at runtime so a
+ * resident walking below a building draws in front of it.
  */
+const DEPTH = {
+  terrain: 1,
+  districts: 2,
+  rootNetwork: 3,
+  hover: 4,
+  intent: 5,
+  entities: 10,
+  effects: 900,
+  light: 950,
+  labels: 1000,
+} as const;
+
 export class WorldScene extends Phaser.Scene {
   private readonly simulation: MosslightSimulation;
   private readonly onStateChange: () => void;
+  private readonly onBuildingSelected: (buildingId: string) => void;
 
-  private terrainLayer!: Phaser.GameObjects.Graphics;
-  private nodeLayer!: Phaser.GameObjects.Container;
+  private terrain!: TerrainPainter;
+  private light!: LightLayer;
+  private effects!: Effects;
   private districtLayer!: Phaser.GameObjects.Container;
-  private staticLayer!: Phaser.GameObjects.Graphics;
-  private buildingLayer!: Phaser.GameObjects.Container;
-  private residentLayer!: Phaser.GameObjects.Container;
+  private rootNetwork!: Phaser.GameObjects.Graphics;
+  private entityLayer!: Phaser.GameObjects.Container;
+  private nodeLayer!: Phaser.GameObjects.Container;
   private intentLayer!: Phaser.GameObjects.Graphics;
   private intentLabel!: Phaser.GameObjects.Text;
   private expeditionLayer!: Phaser.GameObjects.Container;
   private hoverLayer!: Phaser.GameObjects.Graphics;
   private previewLabel!: Phaser.GameObjects.Text;
-  private phaseOverlay!: Phaser.GameObjects.Rectangle;
   private titleText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
-  private heartbeatLayer!: Phaser.GameObjects.Container;
-  private heartbeatGraphic!: Phaser.GameObjects.Graphics;
 
   private readonly residentViews = new Map<string, ResidentView>();
   private readonly buildingViews = new Map<string, BuildingView>();
+  private readonly nodeViews = new Map<number, NodeView>();
 
   private hoverCell: Vec2 | null = null;
-  private zoomIndex = DEFAULT_ZOOM_INDEX;
   private ready = false;
+  private unsubscribe: (() => void) | null = null;
 
-  /** Cheap change detectors, so each layer redraws only when it must. */
+  // Camera drag state.
+  private dragging = false;
+  private dragMoved = false;
+  private dragOrigin = { x: 0, y: 0 };
+  private cameraOrigin = { x: 0, y: 0 };
+
   private terrainSignature = "";
   private districtSignature = "";
-  private lastPhase: string | null = null;
   private lastHintText = "";
-
-  private readonly onBuildingSelected: (buildingId: string) => void;
+  private ambientTimer = 0;
 
   constructor(
     simulation: MosslightSimulation,
@@ -215,97 +225,112 @@ export class WorldScene extends Phaser.Scene {
 
   create(): void {
     this.cameras.main.setBackgroundColor(INK);
-    this.applyZoom();
+    // Let the camera roam the board rather than sitting locked at its centre.
+    this.cameras.main.setBounds(
+      OFFSET_X - 60,
+      OFFSET_Y - 60,
+      BOARD_W + 120,
+      BOARD_H + 120,
+    );
+    this.cameras.main.setZoom(this.fitZoom());
+    this.cameras.main.centerOn(OFFSET_X + BOARD_W / 2, OFFSET_Y + BOARD_H / 2);
 
-    // Board frame — drawn once, never again.
-    const board = this.add.graphics().setDepth(0);
-    board.fillStyle(0x0d2727, 1);
-    board.fillRoundedRect(OFFSET_X - 12, OFFSET_Y - 12, TILE_SIZE * GRID_W + 24, TILE_SIZE * GRID_H + 24, 18);
-    board.lineStyle(2, 0x2d8c84, 0.55);
-    board.strokeRoundedRect(OFFSET_X - 12, OFFSET_Y - 12, TILE_SIZE * GRID_W + 24, TILE_SIZE * GRID_H + 24, 18);
+    const frame = this.add.graphics().setDepth(0);
+    frame.fillStyle(0x0b2124, 1);
+    frame.fillRoundedRect(OFFSET_X - 14, OFFSET_Y - 14, BOARD_W + 28, BOARD_H + 28, 20);
+    frame.lineStyle(2, 0x2d8c84, 0.5);
+    frame.strokeRoundedRect(OFFSET_X - 14, OFFSET_Y - 14, BOARD_W + 28, BOARD_H + 28, 20);
 
-    this.terrainLayer = this.add.graphics().setDepth(1);
-    this.nodeLayer = this.add.container(0, 0).setDepth(2);
-    this.districtLayer = this.add.container(0, 0).setDepth(3);
-    this.staticLayer = this.add.graphics().setDepth(3);
-    this.hoverLayer = this.add.graphics().setDepth(4);
-    this.intentLayer = this.add.graphics().setDepth(5);
-    this.buildingLayer = this.add.container(0, 0).setDepth(6);
-    this.residentLayer = this.add.container(0, 0).setDepth(7);
-    this.expeditionLayer = this.add.container(0, 0).setDepth(8);
+    this.terrain = new TerrainPainter(this, {
+      tileSize: TILE_SIZE,
+      offsetX: OFFSET_X,
+      offsetY: OFFSET_Y,
+      width: GRID_W,
+      height: GRID_H,
+    }).setDepth(DEPTH.terrain);
+
+    this.districtLayer = this.add.container(0, 0).setDepth(DEPTH.districts);
+    this.rootNetwork = this.add.graphics().setDepth(DEPTH.rootNetwork);
+    this.hoverLayer = this.add.graphics().setDepth(DEPTH.hover);
+    this.intentLayer = this.add.graphics().setDepth(DEPTH.intent);
+    this.nodeLayer = this.add.container(0, 0).setDepth(DEPTH.entities);
+    this.entityLayer = this.add.container(0, 0).setDepth(DEPTH.entities);
+    this.expeditionLayer = this.add.container(0, 0).setDepth(DEPTH.entities + 5);
+
+    this.effects = new Effects(this, DEPTH.effects);
+    this.light = new LightLayer(this, {
+      x: OFFSET_X,
+      y: OFFSET_Y,
+      width: BOARD_W,
+      height: BOARD_H,
+    }).setDepth(DEPTH.light);
 
     this.intentLabel = this.add.text(0, 0, "", {
       fontFamily: "system-ui, sans-serif",
-      fontSize: "8px",
+      fontSize: "10px",
       fontStyle: "bold",
       backgroundColor: "#08151be6",
-      padding: { x: 4, y: 2 },
-    }).setOrigin(0.5, 1).setDepth(9).setVisible(false);
+      padding: { x: 5, y: 3 },
+    }).setOrigin(0.5, 1).setDepth(DEPTH.labels).setVisible(false);
 
     this.previewLabel = this.add.text(0, 0, "", {
       fontFamily: "system-ui, sans-serif",
-      fontSize: "8px",
+      fontSize: "10px",
       fontStyle: "bold",
-      padding: { x: 5, y: 3 },
+      padding: { x: 6, y: 4 },
       stroke: "#08151b",
       strokeThickness: 2,
-    }).setOrigin(0.5, 1).setDepth(10).setVisible(false);
+    }).setOrigin(0.5, 1).setDepth(DEPTH.labels).setVisible(false);
 
-    // Day/night tint over the board, under the UI text.
-    this.phaseOverlay = this.add.rectangle(
-      OFFSET_X + (TILE_SIZE * GRID_W) / 2,
-      OFFSET_Y + (TILE_SIZE * GRID_H) / 2,
-      TILE_SIZE * GRID_W,
-      TILE_SIZE * GRID_H,
-      0x000000,
-      0,
-    ).setDepth(9).setVisible(false);
-
-    this.heartbeatLayer = this.add.container(0, 0).setDepth(5);
-    this.heartbeatGraphic = this.add.graphics();
-    this.heartbeatLayer.add(this.heartbeatGraphic);
-    this.tweens.add({
-      targets: this.heartbeatLayer,
-      scaleX: { from: 0.94, to: 1.08 },
-      scaleY: { from: 0.94, to: 1.08 },
-      alpha: { from: 0.8, to: 0.24 },
-      duration: 1100,
-      ease: "Sine.easeInOut",
-      repeat: -1,
-      yoyo: true,
-    });
-
-    this.titleText = this.add.text(OFFSET_X, 23, "M O S S L I G H T   B A S I N", {
+    this.titleText = this.add.text(OFFSET_X, OFFSET_Y - 44, "M O S S L I G H T   B A S I N", {
       color: "#63e6d4",
       fontFamily: "Georgia, serif",
-      fontSize: "13px",
-    }).setDepth(11);
-    this.hintText = this.add.text(OFFSET_X + 1, 41, "", {
+      fontSize: "15px",
+    }).setDepth(DEPTH.labels).setScrollFactor(0);
+    this.hintText = this.add.text(OFFSET_X + 1, OFFSET_Y - 24, "", {
       color: "#9eb9ad",
       fontFamily: "system-ui, sans-serif",
-      fontSize: "10px",
-    }).setDepth(11);
+      fontSize: "11px",
+    }).setDepth(DEPTH.labels).setScrollFactor(0);
 
+    this.bindInput();
+    this.unsubscribe = this.simulation.onEvent((event) => this.handleSimEvent(event));
+
+    this.ready = true;
+    this.renderNow();
+  }
+
+  shutdown(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+  }
+
+  // --- Input --------------------------------------------------------------
+
+  private bindInput(): void {
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-      const cell = this.pointerToCell(pointer);
-      if (!cell) return;
-
-      this.hoverCell = cell;
-      const buildMode = this.simulation.state.buildMode;
-      if (buildMode) {
-        this.simulation.build(buildMode, cell);
-      } else if (!this.simulation.collectAt(cell)) {
-        // Clicking a building selects it for upgrade; otherwise pick a resident.
-        const building = this.simulation.getBuildingAt(cell);
-        if (building) this.onBuildingSelected(building.id);
-        else this.simulation.selectAt(cell);
-      }
-      this.renderNow();
-      this.onStateChange();
+      this.dragging = true;
+      this.dragMoved = false;
+      this.dragOrigin = { x: pointer.x, y: pointer.y };
+      this.cameraOrigin = { x: this.cameras.main.scrollX, y: this.cameras.main.scrollY };
     });
 
-    // A pointer move now only redraws the hover layer, not the world.
     this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
+      if (this.dragging && pointer.isDown) {
+        const dx = pointer.x - this.dragOrigin.x;
+        const dy = pointer.y - this.dragOrigin.y;
+        // Only treat it as a pan once the pointer clears a small dead zone, so
+        // a click with a shaky hand still registers as a click.
+        if (Math.hypot(dx, dy) > 5) {
+          this.dragMoved = true;
+          const zoom = this.cameras.main.zoom;
+          this.cameras.main.setScroll(
+            this.cameraOrigin.x - dx / zoom,
+            this.cameraOrigin.y - dy / zoom,
+          );
+        }
+      }
+
       const nextCell = this.pointerToCell(pointer);
       const changed = nextCell?.x !== this.hoverCell?.x || nextCell?.y !== this.hoverCell?.y;
       if (!changed) return;
@@ -315,7 +340,30 @@ export class WorldScene extends Phaser.Scene {
       this.updateBuildingLabels();
     });
 
+    this.input.on("pointerup", (pointer: Phaser.Input.Pointer) => {
+      const wasDrag = this.dragMoved;
+      this.dragging = false;
+      this.dragMoved = false;
+      if (wasDrag) return;
+
+      const cell = this.pointerToCell(pointer);
+      if (!cell) return;
+      this.hoverCell = cell;
+
+      const buildMode = this.simulation.state.buildMode;
+      if (buildMode) {
+        this.simulation.build(buildMode, cell);
+      } else if (!this.simulation.collectAt(cell)) {
+        const building = this.simulation.getBuildingAt(cell);
+        if (building) this.onBuildingSelected(building.id);
+        else this.simulation.selectAt(cell);
+      }
+      this.renderNow();
+      this.onStateChange();
+    });
+
     this.input.on("pointerout", () => {
+      this.dragging = false;
       if (!this.hoverCell) return;
       this.hoverCell = null;
       this.drawHoverLayer();
@@ -323,144 +371,239 @@ export class WorldScene extends Phaser.Scene {
       this.updateBuildingLabels();
     });
 
-    this.ready = true;
-    this.renderNow();
+    // Wheel zooms toward the cursor rather than the board centre.
+    this.input.on(
+      "wheel",
+      (pointer: Phaser.Input.Pointer, _objects: unknown, _dx: number, dy: number) => {
+        this.zoomToward(pointer, dy > 0 ? -ZOOM_STEP : ZOOM_STEP);
+      },
+    );
   }
 
-  /** Full refresh. Each sub-step early-outs when its inputs are unchanged. */
+  private zoomToward(pointer: Phaser.Input.Pointer, delta: number): void {
+    const camera = this.cameras.main;
+    const before = camera.getWorldPoint(pointer.x, pointer.y);
+    camera.setZoom(Phaser.Math.Clamp(camera.zoom + delta, MIN_ZOOM, MAX_ZOOM));
+    const after = camera.getWorldPoint(pointer.x, pointer.y);
+    // Re-anchor so the world point under the cursor stays under the cursor.
+    camera.setScroll(
+      camera.scrollX + (before.x - after.x),
+      camera.scrollY + (before.y - after.y),
+    );
+  }
+
+  private fitZoom(): number {
+    return Math.min(VIEW_W / (BOARD_W + 120), VIEW_H / (BOARD_H + 120));
+  }
+
+  // --- Sim events ---------------------------------------------------------
+
+  private handleSimEvent(event: SimEvent): void {
+    if (!this.ready) return;
+    const position = event.position ? this.cellCenter(event.position) : null;
+
+    switch (event.type) {
+      case "gather":
+        if (!position) return;
+        this.effects.burst(position.x, position.y, "gather", 12);
+        if (event.label) this.effects.floatText(position.x, position.y - 8, event.label, "#c5dd8c");
+        break;
+      case "build":
+        if (!position) return;
+        this.effects.dust(position.x, position.y);
+        this.effects.ring(position.x, position.y, 0x63e6d4, 46);
+        break;
+      case "upgrade":
+        if (!position) return;
+        this.effects.burst(position.x, position.y, "upgrade", 16);
+        this.effects.ring(position.x, position.y, 0xf4b85b, 54);
+        if (event.label) this.effects.floatText(position.x, position.y - 14, event.label, "#f4b85b");
+        break;
+      case "craft":
+        if (!position) return;
+        this.effects.burst(position.x, position.y, "upgrade", 10);
+        break;
+      case "regrowth":
+        if (!position) return;
+        this.effects.burst(position.x, position.y, "gather", 8);
+        break;
+      case "arrival":
+        if (!position) return;
+        this.effects.ring(position.x, position.y, 0x8dbb72, 30);
+        break;
+      case "departure":
+        if (!position) return;
+        this.effects.burst(position.x, position.y, "warn", 8);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // --- Frame --------------------------------------------------------------
+
   public renderNow(): void {
     if (!this.ready) return;
-    this.input.setDefaultCursor(this.simulation.state.buildMode ? "crosshair" : "pointer");
-    this.drawTerrainIfChanged();
+    this.input.setDefaultCursor(this.simulation.state.buildMode ? "crosshair" : "grab");
+    this.repaintTerrainIfChanged();
     this.drawDistrictsIfChanged();
-    this.drawStaticOverlays();
+    this.drawRootNetwork();
     this.syncBuildings();
     this.syncResidents();
+    this.syncNodes();
     this.syncExpeditions();
     this.drawIntent();
     this.drawHoverLayer();
-    this.drawPhaseOverlay();
     this.drawHeader();
-    this.updateHeartbeat();
   }
 
+  /**
+   * Per-frame work: idle animation, light, and ambient motes. Deliberately
+   * separate from `renderNow`, which is driven by simulation ticks.
+   */
+  update(_time: number, delta: number): void {
+    if (!this.ready) return;
+
+    const t = this.time.now / 1000;
+
+    // Idle bob keeps the board alive between ticks.
+    for (const view of this.residentViews.values()) {
+      view.body.y = Math.sin(t * 2.4 + view.bobPhase) * 1.6 - 5;
+    }
+    for (const view of this.nodeViews.values()) {
+      view.sprite.setScale(
+        view.sprite.scaleX,
+        view.sprite.scaleY,
+      );
+      view.sprite.rotation = Math.sin(t * 1.1 + view.bobPhase) * 0.045;
+    }
+
+    this.light.update(this.simulation.state.phase, this.collectLightSources());
+
+    // A slow drift of spores, denser at night.
+    this.ambientTimer += delta;
+    const interval = this.simulation.state.phase === "night" ? 260 : 620;
+    if (this.ambientTimer > interval) {
+      this.ambientTimer = 0;
+      this.effects.spawnAmbientMote({ x: OFFSET_X, y: OFFSET_Y, width: BOARD_W, height: BOARD_H });
+    }
+  }
+
+  private collectLightSources(): LightSource[] {
+    const sources: LightSource[] = [];
+    const flicker = 0.94 + Math.sin(this.time.now / 260) * 0.06;
+
+    for (const building of this.simulation.state.buildings) {
+      const config = BUILDING_LIGHT[building.type];
+      if (!config) continue;
+      const center = this.cellCenter(building.position);
+      sources.push({
+        x: center.x,
+        y: center.y,
+        // Upgraded buildings light a wider area, so levels read on the map.
+        radius: config.radius * (1 + (building.level - 1) * 0.18),
+        strength: config.strength * flicker,
+        color: config.color,
+      });
+    }
+
+    // Glowtails carry their own light.
+    for (const resident of this.simulation.state.residents) {
+      if (resident.species !== "glowtail") continue;
+      const center = this.cellCenter(resident.position);
+      sources.push({ x: center.x, y: center.y, radius: 34, strength: 0.42, color: 0x63e6d4 });
+    }
+    return sources;
+  }
+
+  // --- Camera controls ----------------------------------------------------
+
   public zoomIn(): number {
-    this.zoomIndex = Math.min(ZOOM_STEPS.length - 1, this.zoomIndex + 1);
-    this.applyZoom();
+    this.cameras.main.setZoom(Phaser.Math.Clamp(this.cameras.main.zoom + ZOOM_STEP, MIN_ZOOM, MAX_ZOOM));
     return this.getZoomPercent();
   }
 
   public zoomOut(): number {
-    this.zoomIndex = Math.max(0, this.zoomIndex - 1);
-    this.applyZoom();
+    this.cameras.main.setZoom(Phaser.Math.Clamp(this.cameras.main.zoom - ZOOM_STEP, MIN_ZOOM, MAX_ZOOM));
     return this.getZoomPercent();
   }
 
   public resetZoom(): number {
-    this.zoomIndex = DEFAULT_ZOOM_INDEX;
-    this.applyZoom();
+    this.cameras.main.setZoom(this.fitZoom());
+    this.cameras.main.centerOn(OFFSET_X + BOARD_W / 2, OFFSET_Y + BOARD_H / 2);
     return this.getZoomPercent();
   }
 
   public getZoomPercent(): number {
-    return Math.round(ZOOM_STEPS[this.zoomIndex] * 100);
+    return Math.round((this.cameras.main.zoom / this.fitZoom()) * 100);
   }
 
-  private applyZoom(): void {
-    const camera = this.cameras.main;
-    camera.setZoom(ZOOM_STEPS[this.zoomIndex]);
-    camera.centerOn(CAMERA_FOCUS.x, CAMERA_FOCUS.y);
+  /** Smoothly centres the camera on a grid cell — used to follow a resident. */
+  public focusOn(position: Vec2): void {
+    const center = this.cellCenter(position);
+    this.cameras.main.pan(center.x, center.y, 420, "Sine.easeInOut");
   }
 
   // --- Terrain ------------------------------------------------------------
 
-  /**
-   * The grid and fog mask change only on gather, regrowth, and zone reveal, so
-   * a cheap signature is enough to skip the 768-cell redraw on most frames.
-   */
   private terrainKey(): string {
-    const { grid, revealed, revealedAreas, regrowth } = this.simulation.state;
+    const { grid, revealedAreas, regrowth } = this.simulation.state;
     let nodeHash = 0;
     for (let y = 0; y < grid.length; y += 1) {
       const row = grid[y]!;
       for (let x = 0; x < row.length; x += 1) {
         const kind = row[x]!;
-        if (kind === "fern" || kind === "mushroom" || kind === "crystal" || kind === "ruin") {
-          nodeHash = (nodeHash * 31 + (y * GRID_W + x)) | 0;
-        }
+        if (NODE_TEXTURE_KEYS[kind]) nodeHash = (nodeHash * 31 + (y * GRID_W + x)) | 0;
       }
     }
-    return `${nodeHash}:${revealedAreas.join(",")}:${revealed.length}:${regrowth.length}`;
+    return `${nodeHash}:${revealedAreas.join(",")}:${regrowth.length}`;
   }
 
-  private drawTerrainIfChanged(): void {
+  private repaintTerrainIfChanged(): void {
     const key = this.terrainKey();
     if (key === this.terrainSignature) return;
     this.terrainSignature = key;
-
-    const graphics = this.terrainLayer;
-    graphics.clear();
-    const { grid, revealed } = this.simulation.state;
-
-    for (let y = 0; y < grid.length; y += 1) {
-      for (let x = 0; x < grid[y]!.length; x += 1) {
-        const kind = grid[y]![x]!;
-        const px = OFFSET_X + x * TILE_SIZE;
-        const py = OFFSET_Y + y * TILE_SIZE;
-
-        if (!revealed[y]?.[x]) {
-          // Fog is drawn here rather than as a separate full-grid pass.
-          graphics.fillStyle(0x07181c, 1);
-          graphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-          graphics.lineStyle(1, 0x63e6d4, 0.12);
-          graphics.lineBetween(px + 3, py + 4, px + TILE_SIZE - 4, py + TILE_SIZE - 3);
-          continue;
-        }
-
-        graphics.fillStyle(TILE_COLORS[kind], 1);
-        graphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-
-        if (kind === "water" || kind === "wetland") {
-          graphics.lineStyle(1, 0x63e6d4, 0.15);
-          graphics.lineBetween(px + 4, py + 8, px + TILE_SIZE - 5, py + 8);
-        }
-        if (kind === "path") {
-          graphics.lineStyle(1, 0xf5e6c8, 0.2);
-          graphics.lineBetween(px + 3, py + 5, px + TILE_SIZE - 5, py + TILE_SIZE - 5);
-        }
-        if (kind === "stone") {
-          graphics.fillStyle(0x51605a, 0.65);
-          graphics.fillCircle(px + TILE_SIZE / 2, py + TILE_SIZE / 2, 4);
-        }
-        if (NODE_TEXTURE_KEYS[kind] && !this.textures.exists(NODE_TEXTURE_KEYS[kind]!)) {
-          this.drawFeature(graphics, kind, px, py);
-        }
-      }
-    }
-
-    this.syncNodeSprites();
+    this.terrain.repaint(this.simulation.state.grid, this.simulation.state.revealed);
   }
 
-  /** Node sprites are pooled by cell so regrowth does not rebuild the layer. */
-  private syncNodeSprites(): void {
-    this.nodeLayer.removeAll(true);
+  private syncNodes(): void {
     const { grid, revealed } = this.simulation.state;
+    const seen = new Set<number>();
+
     for (let y = 0; y < grid.length; y += 1) {
       for (let x = 0; x < grid[y]!.length; x += 1) {
         const kind = grid[y]![x]!;
         const textureKey = NODE_TEXTURE_KEYS[kind];
         if (!textureKey || !revealed[y]?.[x] || !this.textures.exists(textureKey)) continue;
-        this.nodeLayer.add(
-          this.add.image(
-            OFFSET_X + x * TILE_SIZE + TILE_SIZE / 2,
-            OFFSET_Y + y * TILE_SIZE + TILE_SIZE / 2 - 2,
-            textureKey,
-          ).setDisplaySize(29, 30),
-        );
+
+        const cell = y * GRID_W + x;
+        seen.add(cell);
+        if (this.nodeViews.has(cell)) continue;
+
+        const center = this.cellCenter({ x, y });
+        const sprite = this.add.image(center.x, center.y - 3, textureKey).setDisplaySize(40, 41);
+        this.nodeLayer.add(sprite);
+        // Newly grown nodes pop in rather than appearing between frames.
+        sprite.setScale(sprite.scaleX * 0.3, sprite.scaleY * 0.3);
+        this.tweens.add({
+          targets: sprite,
+          scaleX: sprite.scaleX / 0.3,
+          scaleY: sprite.scaleY / 0.3,
+          duration: 420,
+          ease: "Back.easeOut",
+        });
+        this.nodeViews.set(cell, { sprite, bobPhase: Math.random() * Math.PI * 2 });
       }
+    }
+
+    for (const [cell, view] of this.nodeViews) {
+      if (seen.has(cell)) continue;
+      view.sprite.destroy();
+      this.nodeViews.delete(cell);
     }
   }
 
+  /** Districts as soft tinted regions rather than debug rectangles. */
   private drawDistrictsIfChanged(): void {
     const key = this.simulation.state.districtFocus;
     if (key === this.districtSignature) return;
@@ -469,91 +612,78 @@ export class WorldScene extends Phaser.Scene {
     this.districtLayer.removeAll(true);
     const activeFocus = this.simulation.state.districtFocus;
     const graphics = this.add.graphics();
+
     for (const district of this.simulation.state.districts) {
       const definition = DISTRICT_DEFINITIONS[district.type];
       const color = Phaser.Display.Color.HexStringToColor(definition.color).color;
       const x = OFFSET_X + district.bounds.xMin * TILE_SIZE;
       const y = OFFSET_Y + district.bounds.yMin * TILE_SIZE;
-      const width = (district.bounds.xMax - district.bounds.xMin + 1) * TILE_SIZE - 1;
-      const height = (district.bounds.yMax - district.bounds.yMin + 1) * TILE_SIZE - 1;
+      const width = (district.bounds.xMax - district.bounds.xMin + 1) * TILE_SIZE;
+      const height = (district.bounds.yMax - district.bounds.yMin + 1) * TILE_SIZE;
       const active = district.type === activeFocus;
-      graphics.lineStyle(active ? 2 : 1, color, active ? 0.42 : 0.16);
-      graphics.strokeRect(x + 1, y + 1, width - 2, height - 2);
+
+      // Only the focused district tints the ground. Five overlapping washes —
+      // several of them light golds and greens — lifted the whole board off its
+      // palette and flattened the contrast the art depends on.
+      if (active) {
+        graphics.fillStyle(color, 0.05);
+        graphics.fillRoundedRect(x + 6, y + 6, width - 12, height - 12, 26);
+      }
+      graphics.lineStyle(active ? 2 : 1, color, active ? 0.3 : 0.07);
+      graphics.strokeRoundedRect(x + 6, y + 6, width - 12, height - 12, 26);
+
       if (active) {
         this.districtLayer.add(
-          this.add.text(OFFSET_X + district.center.x * TILE_SIZE + TILE_SIZE / 2, y + 4, definition.label.toUpperCase(), {
-            color: Phaser.Display.Color.IntegerToColor(color).rgba,
-            fontFamily: "system-ui, sans-serif",
-            fontSize: "8px",
-            fontStyle: "bold",
-            backgroundColor: "#08151bc2",
-            padding: { x: 3, y: 2 },
-          }).setOrigin(0.5, 0),
+          this.add.text(
+            OFFSET_X + district.center.x * TILE_SIZE + TILE_SIZE / 2,
+            y + 12,
+            definition.label.toUpperCase(),
+            {
+              color: Phaser.Display.Color.IntegerToColor(color).rgba,
+              fontFamily: "Georgia, serif",
+              fontSize: "11px",
+              backgroundColor: "#08151bb0",
+              padding: { x: 6, y: 3 },
+            },
+          ).setOrigin(0.5, 0),
         );
       }
     }
     this.districtLayer.add(graphics);
   }
 
-  /** The root network lines — static geometry, redrawn only if the Root moves. */
-  private drawStaticOverlays(): void {
+  private drawRootNetwork(): void {
     const root = this.simulation.state.buildings.find((building) => building.type === "root-heart");
     if (!root) {
-      this.staticLayer.clear();
+      this.rootNetwork.clear();
       return;
     }
-    if (this.staticLayer.getData("rootKey") === `${root.position.x}:${root.position.y}`) return;
-    this.staticLayer.setData("rootKey", `${root.position.x}:${root.position.y}`);
+    const key = `${root.position.x}:${root.position.y}:${this.simulation.state.buildings.length}`;
+    if (this.rootNetwork.getData("key") === key) return;
+    this.rootNetwork.setData("key", key);
 
-    this.staticLayer.clear();
+    this.rootNetwork.clear();
     const center = this.cellCenter(root.position);
-    this.staticLayer.lineStyle(2, 0x63e6d4, 0.24);
-    this.staticLayer.beginPath();
-    for (const [x, y] of [[7, 17], [23, 9], [17, 12]] as const) {
-      this.staticLayer.moveTo(center.x, center.y);
-      this.staticLayer.lineTo(OFFSET_X + x * TILE_SIZE, OFFSET_Y + y * TILE_SIZE);
+    // Draw a living tendril to each civic building rather than three fixed lines.
+    for (const building of this.simulation.state.buildings) {
+      if (building.type === "root-heart") continue;
+      const target = this.cellCenter(building.position);
+      this.rootNetwork.lineStyle(3, 0x63e6d4, 0.13);
+      this.rootNetwork.beginPath();
+      this.rootNetwork.moveTo(center.x, center.y);
+      // A gentle arc keeps the network from looking like a wire diagram.
+      const midX = (center.x + target.x) / 2 + (target.y - center.y) * 0.12;
+      const midY = (center.y + target.y) / 2 - (target.x - center.x) * 0.12;
+      for (let step = 1; step <= 12; step += 1) {
+        const t = step / 12;
+        const inv = 1 - t;
+        this.rootNetwork.lineTo(
+          inv * inv * center.x + 2 * inv * t * midX + t * t * target.x,
+          inv * inv * center.y + 2 * inv * t * midY + t * t * target.y,
+        );
+      }
+      this.rootNetwork.strokePath();
     }
-    this.staticLayer.strokePath();
-  }
-
-  private drawFeature(graphics: Phaser.GameObjects.Graphics, kind: TileKind, px: number, py: number): void {
-    const centerX = px + TILE_SIZE / 2;
-    if (kind === "fern") {
-      graphics.lineStyle(2, 0x8dbb72, 0.95);
-      graphics.lineBetween(centerX, py + 18, centerX - 5, py + 5);
-      graphics.lineBetween(centerX, py + 18, centerX + 6, py + 4);
-      graphics.lineBetween(centerX - 3, py + 13, centerX - 9, py + 9);
-      graphics.lineBetween(centerX + 3, py + 12, centerX + 10, py + 8);
-      graphics.fillStyle(0xc5dd8c, 0.9);
-      graphics.fillCircle(centerX - 6, py + 5, 2);
-      graphics.fillCircle(centerX + 7, py + 4, 2);
-      return;
-    }
-    if (kind === "mushroom") {
-      graphics.fillStyle(0xf4b85b, 0.92);
-      graphics.fillRoundedRect(centerX - 2, py + 10, 4, 8, 2);
-      graphics.fillStyle(0xe98b50, 1);
-      graphics.fillTriangle(centerX - 8, py + 11, centerX, py + 4, centerX + 8, py + 11);
-      graphics.fillStyle(0xffd58b, 0.75);
-      graphics.fillCircle(centerX - 3, py + 9, 1.2);
-      graphics.fillCircle(centerX + 3, py + 8, 1.2);
-      return;
-    }
-    if (kind === "crystal") {
-      graphics.fillStyle(0x63e6d4, 0.78);
-      graphics.fillTriangle(centerX, py + 3, centerX - 7, py + 16, centerX + 2, py + 18);
-      graphics.fillStyle(0xc8fff5, 0.65);
-      graphics.fillTriangle(centerX + 4, py + 6, centerX + 1, py + 17, centerX + 9, py + 14);
-      graphics.lineStyle(1, 0xb8fff4, 0.8);
-      graphics.lineBetween(centerX, py + 3, centerX - 2, py + 14);
-      return;
-    }
-    graphics.fillStyle(0x788276, 0.86);
-    graphics.fillRoundedRect(px + 3, py + 9, 7, 8, 2);
-    graphics.fillRoundedRect(px + 12, py + 5, 7, 12, 2);
-    graphics.fillStyle(0x2c3937, 0.8);
-    graphics.fillRect(px + 7, py + 12, 3, 5);
-    graphics.fillRect(px + 14, py + 8, 3, 5);
   }
 
   // --- Buildings ----------------------------------------------------------
@@ -569,12 +699,15 @@ export class WorldScene extends Phaser.Scene {
         const container = this.add.container(0, 0);
         const definition = BUILDING_DEFINITIONS[building.type];
         const textureKey = BUILDING_TEXTURE_KEYS[building.type];
-        const displaySize = BUILDING_DISPLAY_SIZES[building.type] ?? { width: 40, height: 40 };
+        const displaySize = BUILDING_DISPLAY_SIZES[building.type] ?? { width: 55, height: 55 };
+
+        // A grounded contact shadow is what stops sprites from floating.
+        const shadow = this.add.ellipse(0, displaySize.height * 0.32, displaySize.width * 0.78, displaySize.height * 0.22, 0x040d10, 0.42);
 
         let art: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
         let baseSize: { width: number; height: number } | null = null;
         if (textureKey && this.textures.exists(textureKey)) {
-          art = this.add.image(0, -4, textureKey).setDisplaySize(displaySize.width, displaySize.height);
+          art = this.add.image(0, -6, textureKey).setDisplaySize(displaySize.width, displaySize.height);
           baseSize = displaySize;
         } else {
           const graphics = this.add.graphics();
@@ -583,24 +716,29 @@ export class WorldScene extends Phaser.Scene {
         }
 
         const levelPips = this.add.graphics();
-        const label = this.add.text(0, 14, definition.shortLabel, {
+        const label = this.add.text(0, 20, definition.shortLabel, {
           color: "#f5e6c8",
           fontFamily: "Georgia, serif",
-          fontSize: "8px",
+          fontSize: "10px",
           stroke: "#08151b",
           strokeThickness: 3,
         }).setOrigin(0.5).setVisible(false);
 
-        container.add([art, levelPips, label]);
-        this.buildingLayer.add(container);
-        view = { container, art, baseSize, levelPips, label, lastLevel: -1, lastUpgrading: false };
+        container.add([shadow, art, levelPips, label]);
+        this.entityLayer.add(container);
+        view = { container, art, shadow, baseSize, levelPips, label, lastLevel: -1, lastUpgrading: false };
         this.buildingViews.set(building.id, view);
+
+        // Placement pop.
+        container.setScale(0.6);
+        this.tweens.add({ targets: container, scale: 1, duration: 380, ease: "Back.easeOut" });
       }
 
       const center = this.cellCenter(building.position);
       view.container.setPosition(center.x, center.y);
+      // Y-sort within the entity band so residents can pass in front.
+      view.container.setDepth(center.y);
 
-      // Level pips and the upgrade shimmer only redraw when they change.
       if (view.lastLevel !== building.level || view.lastUpgrading !== building.upgrading) {
         view.lastLevel = building.level;
         view.lastUpgrading = building.upgrading;
@@ -608,22 +746,20 @@ export class WorldScene extends Phaser.Scene {
         if (building.type !== "root-heart") {
           for (let index = 0; index < building.level; index += 1) {
             view.levelPips.fillStyle(0xf4b85b, 0.95);
-            view.levelPips.fillCircle(-6 + index * 6, 10, 1.8);
+            view.levelPips.fillCircle(-7 + index * 7, 14, 2.2);
           }
         }
         if (building.upgrading) {
-          view.levelPips.lineStyle(1.5, 0x63e6d4, 0.75);
-          view.levelPips.strokeCircle(0, -2, 17);
+          view.levelPips.lineStyle(2, 0x63e6d4, 0.7);
+          view.levelPips.strokeCircle(0, -4, 24);
         }
-        // Upgraded buildings read as physically larger. Image art must be
-        // resized via setDisplaySize — setScale would discard it and snap back
-        // to the texture's native pixel size.
         const scale = 1 + (building.level - 1) * 0.12;
         if (view.baseSize && view.art instanceof Phaser.GameObjects.Image) {
           view.art.setDisplaySize(view.baseSize.width * scale, view.baseSize.height * scale);
         } else {
           view.art.setScale(scale);
         }
+        view.shadow.setScale(scale);
       }
     }
 
@@ -640,9 +776,7 @@ export class WorldScene extends Phaser.Scene {
       if (!view) continue;
       const hovered = this.hoverCell?.x === building.position.x && this.hoverCell?.y === building.position.y;
       view.label.setVisible(hovered && building.type !== "root-heart");
-      if (hovered) {
-        view.label.setText(`${BUILDING_DEFINITIONS[building.type].shortLabel} · L${building.level}`);
-      }
+      if (hovered) view.label.setText(`${BUILDING_DEFINITIONS[building.type].shortLabel} · L${building.level}`);
     }
   }
 
@@ -655,9 +789,6 @@ export class WorldScene extends Phaser.Scene {
       graphics.strokeCircle(0, 0, 15);
       graphics.fillStyle(0x63e6d4, 0.9);
       graphics.fillCircle(0, 0, 8);
-      graphics.lineStyle(2, 0xb8fff4, 0.8);
-      graphics.lineBetween(-8, 0, 8, 0);
-      graphics.lineBetween(0, -8, 0, 8);
       return;
     }
     if (type === "burrow-home") {
@@ -672,10 +803,6 @@ export class WorldScene extends Phaser.Scene {
     if (type === "reed-farm") {
       graphics.fillStyle(0x6f9f62, 1);
       graphics.fillRoundedRect(-12, -9, 24, 18, 5);
-      graphics.lineStyle(2, 0xc5dd8c, 0.8);
-      for (let index = -6; index <= 6; index += 6) {
-        graphics.lineBetween(index, 6, index - 2, -8);
-      }
       graphics.fillStyle(0xf4b85b, 0.9);
       graphics.fillCircle(0, -4, 3);
       return;
@@ -685,11 +812,6 @@ export class WorldScene extends Phaser.Scene {
       graphics.fillCircle(0, 3, 12);
       graphics.fillStyle(0xf4b85b, 0.9);
       graphics.fillCircle(0, -3, 7);
-      graphics.fillStyle(0xffe4a3, 1);
-      graphics.fillCircle(0, -3, 3);
-      graphics.lineStyle(2, 0x8dbb72, 0.9);
-      graphics.lineBetween(-8, 7, -5, -7);
-      graphics.lineBetween(8, 7, 5, -7);
       return;
     }
     if (type === "commons-market") {
@@ -697,18 +819,12 @@ export class WorldScene extends Phaser.Scene {
       graphics.fillRoundedRect(-13, -8, 26, 16, 5);
       graphics.fillStyle(0xf4b85b, 0.85);
       graphics.fillTriangle(-15, -8, 0, -18, 15, -8);
-      graphics.fillStyle(0x08151b, 0.8);
-      graphics.fillCircle(-6, 1, 2);
-      graphics.fillCircle(6, 1, 2);
       return;
     }
     graphics.fillStyle(0x4b3d62, 0.95);
     graphics.fillRoundedRect(-13, -9, 26, 18, 4);
     graphics.fillStyle(0xc8a9ff, 0.88);
     graphics.fillTriangle(-14, -9, 0, -17, 14, -9);
-    graphics.lineStyle(2, 0xf5e6c8, 0.8);
-    graphics.lineBetween(-8, 5, 8, -4);
-    graphics.lineBetween(2, -8, 8, -2);
   }
 
   // --- Residents ----------------------------------------------------------
@@ -723,71 +839,93 @@ export class WorldScene extends Phaser.Scene {
 
       if (!view) {
         const container = this.add.container(0, 0);
+        const shadow = this.add.ellipse(0, 10, 22, 8, 0x040d10, 0.45);
+        // The body is a nested container so the idle bob can move the creature
+        // without lifting its shadow off the ground with it.
+        const body = this.add.container(0, -5);
         const marker = this.add.graphics();
+
         const textureKey = RESIDENT_TEXTURE_KEYS[resident.species];
         let sprite: Phaser.GameObjects.Image | null = null;
         if (textureKey && this.textures.exists(textureKey)) {
-          sprite = this.add.image(0, -5, textureKey).setDisplaySize(22, 27);
+          sprite = this.add.image(0, 0, textureKey).setDisplaySize(30, 37);
+          body.add(sprite);
         } else {
           this.drawResidentVector(marker, resident.species);
         }
-        const label = this.add.text(0, -17, "", {
+
+        const label = this.add.text(0, -26, "", {
           color: "#f5e6c8",
           fontFamily: "system-ui, sans-serif",
-          fontSize: "9px",
+          fontSize: "10px",
           fontStyle: "bold",
           backgroundColor: "#08151bcc",
-          padding: { x: 4, y: 2 },
+          padding: { x: 5, y: 3 },
         }).setOrigin(0.5, 1).setVisible(false);
 
-        container.add(sprite ? [marker, sprite, label] : [marker, label]);
-        this.residentLayer.add(container);
-        view = { container, marker, sprite, label, lastGoal: null, lastSelected: null };
+        container.add([shadow, marker, body, label]);
+        this.entityLayer.add(container);
+        view = {
+          container,
+          marker,
+          shadow,
+          body,
+          sprite,
+          label,
+          lastGoal: null,
+          lastSelected: null,
+          bobPhase: Math.random() * Math.PI * 2,
+        };
         this.residentViews.set(resident.id, view);
       }
 
       const center = this.cellCenter(resident.position);
-      // Tween the move so a 520ms tick reads as walking rather than teleporting.
       const distance = Phaser.Math.Distance.Between(view.container.x, view.container.y, center.x, center.y);
       if (distance > 0.5 && distance < TILE_SIZE * 2.5) {
         this.tweens.add({
           targets: view.container,
           x: center.x,
           y: center.y,
-          duration: 420,
+          duration: 430,
           ease: "Sine.easeInOut",
         });
       } else {
         view.container.setPosition(center.x, center.y);
       }
+      view.container.setDepth(center.y + 1);
+
+      // Face the direction of travel.
+      if (view.sprite && resident.path.length > 0) {
+        const next = resident.path[0]!;
+        if (next.x !== resident.position.x) {
+          view.sprite.setFlipX(next.x < resident.position.x);
+        }
+      }
 
       const selected = resident.id === selectedId;
-      // The marker only redraws when goal colour or selection actually change.
       if (view.lastGoal !== resident.goal || view.lastSelected !== selected) {
         view.lastGoal = resident.goal;
         view.lastSelected = selected;
         const intentColor = GOAL_COLORS[resident.goal];
         view.marker.clear();
-        view.marker.fillStyle(0x08151b, 0.46);
-        view.marker.fillEllipse(0, 7, 17, 6);
         if (selected) {
-          view.marker.fillStyle(intentColor, 0.12);
-          view.marker.fillCircle(0, 0, 14);
-          view.marker.lineStyle(1, intentColor, 0.95);
-          view.marker.strokeCircle(0, 0, 13);
-          view.marker.lineStyle(2, PAPER, 0.95);
-          view.marker.strokeCircle(0, 0, 10);
+          view.marker.fillStyle(intentColor, 0.14);
+          view.marker.fillCircle(0, 0, 20);
+          view.marker.lineStyle(2, intentColor, 0.95);
+          view.marker.strokeCircle(0, 0, 18);
+          view.marker.lineStyle(2, PAPER, 0.8);
+          view.marker.strokeCircle(0, 0, 14);
         } else {
-          view.marker.fillStyle(intentColor, 0.68);
-          view.marker.fillTriangle(0, -11, 3, -7, -3, -7);
+          view.marker.fillStyle(intentColor, 0.7);
+          view.marker.fillTriangle(0, -16, 4, -11, -4, -11);
         }
         if (!view.sprite) this.drawResidentVector(view.marker, resident.species);
         view.label.setVisible(selected);
         if (selected) view.label.setText(`${resident.name}  ·  ${GOAL_LABELS[resident.goal]}`);
       }
 
-      // Distressed residents dim, which reads at a glance across the board.
-      view.container.setAlpha(resident.distress > 8 ? 0.55 : 1);
+      // Distress dims the creature, readable at a glance across the board.
+      view.container.setAlpha(resident.distress > 8 ? 0.5 : 1);
     }
 
     for (const [id, view] of this.residentViews) {
@@ -800,19 +938,10 @@ export class WorldScene extends Phaser.Scene {
   private drawResidentVector(graphics: Phaser.GameObjects.Graphics, species: Species): void {
     const color = Phaser.Display.Color.HexStringToColor(SPECIES_DEFINITIONS[species].color).color;
     graphics.fillStyle(color, 1);
-    graphics.fillCircle(0, 0, 6);
+    graphics.fillCircle(0, 0, 8);
     graphics.fillStyle(0xf5e6c8, 0.9);
-    graphics.fillCircle(-2, -1, 1.2);
-    graphics.fillCircle(2, -1, 1.2);
-    if (species === "glowtail") {
-      graphics.lineStyle(3, 0x63e6d4, 0.85);
-      graphics.lineBetween(5, 2, 10, -4);
-    }
-    if (species === "mireling") {
-      graphics.lineStyle(2, 0xc8a9ff, 0.8);
-      graphics.lineBetween(-5, -5, -8, -9);
-      graphics.lineBetween(5, -5, 8, -9);
-    }
+    graphics.fillCircle(-3, -1, 1.6);
+    graphics.fillCircle(3, -1, 1.6);
   }
 
   // --- Intent, expeditions, hover ----------------------------------------
@@ -829,34 +958,25 @@ export class WorldScene extends Phaser.Scene {
     if (start.x === target.x && start.y === target.y) return;
 
     const color = GOAL_COLORS[resident.goal];
-
-    // Draw the actual A* route rather than a straight line — this is now a
-    // truthful picture of where the resident will walk.
-    this.intentLayer.lineStyle(2, color, 0.42);
+    this.intentLayer.lineStyle(2, color, 0.4);
     let cursor = start;
     for (const step of resident.path) {
       const next = this.cellCenter(step);
-      this.drawDashedLine(this.intentLayer, cursor, next, 5, 4);
+      this.drawDashedLine(this.intentLayer, cursor, next, 6, 5);
       cursor = next;
     }
-    if (resident.path.length === 0) this.drawDashedLine(this.intentLayer, start, target, 5, 4);
+    if (resident.path.length === 0) this.drawDashedLine(this.intentLayer, start, target, 6, 5);
 
     this.intentLayer.fillStyle(color, 0.13);
-    this.intentLayer.fillCircle(target.x, target.y, 8);
-    this.intentLayer.lineStyle(2, color, 0.82);
-    this.intentLayer.strokeCircle(target.x, target.y, 6);
-    this.intentLayer.lineBetween(target.x - 3, target.y, target.x + 3, target.y);
-    this.intentLayer.lineBetween(target.x, target.y - 3, target.x, target.y + 3);
+    this.intentLayer.fillCircle(target.x, target.y, 11);
+    this.intentLayer.lineStyle(2, color, 0.8);
+    this.intentLayer.strokeCircle(target.x, target.y, 8);
 
     this.intentLabel
       .setText(`${GOAL_LABELS[resident.goal]} → ${this.targetLabel(resident.target)}`)
       .setColor(Phaser.Display.Color.IntegerToColor(color).rgba)
+      .setPosition(target.x, target.y - 12)
       .setVisible(true);
-    const minX = OFFSET_X + this.intentLabel.width / 2 + 2;
-    const maxX = OFFSET_X + GRID_W * TILE_SIZE - this.intentLabel.width / 2 - 2;
-    let labelY = target.y - 8;
-    if (labelY - this.intentLabel.height < OFFSET_Y + 2) labelY = target.y + TILE_SIZE / 2 + this.intentLabel.height + 3;
-    this.intentLabel.setPosition(this.clamp(target.x, minX, maxX), labelY);
   }
 
   private syncExpeditions(): void {
@@ -866,26 +986,23 @@ export class WorldScene extends Phaser.Scene {
       const target = this.cellCenter(expedition.target);
       const marker = this.add.graphics();
       marker.fillStyle(0xc8a9ff, 0.15);
-      marker.fillCircle(target.x, target.y, 10);
+      marker.fillCircle(target.x, target.y, 14);
       marker.lineStyle(2, 0xc8a9ff, 0.85);
-      marker.strokeCircle(target.x, target.y, 7);
-      marker.lineBetween(target.x - 4, target.y, target.x + 4, target.y);
-      marker.lineBetween(target.x, target.y - 4, target.x, target.y + 4);
+      marker.strokeCircle(target.x, target.y, 10);
       this.expeditionLayer.add(marker);
       this.expeditionLayer.add(
-        this.add.text(target.x, target.y + 10, `SCOUT ${expedition.progress}/${expedition.duration}`, {
+        this.add.text(target.x, target.y + 14, `SCOUT ${expedition.progress}/${expedition.duration}`, {
           color: "#c8a9ff",
           fontFamily: "system-ui, sans-serif",
-          fontSize: "8px",
+          fontSize: "10px",
           fontStyle: "bold",
           backgroundColor: "#08151be6",
-          padding: { x: 3, y: 2 },
+          padding: { x: 4, y: 2 },
         }).setOrigin(0.5, 0),
       );
     }
   }
 
-  /** The only layer a mouse move touches. */
   private drawHoverLayer(): void {
     const graphics = this.hoverLayer;
     graphics.clear();
@@ -899,22 +1016,10 @@ export class WorldScene extends Phaser.Scene {
     const preview = buildMode ? this.getBuildPreview(buildMode, position) : undefined;
     const color = preview ? (preview.valid ? VALID_COLOR : INVALID_COLOR) : PAPER;
 
-    graphics.fillStyle(color, buildMode ? 0.035 : 0.025);
-    graphics.fillRect(px, py, TILE_SIZE - 1, TILE_SIZE - 1);
-    graphics.lineStyle(1, color, buildMode ? 0.68 : 0.62);
-    graphics.strokeRect(px + 0.5, py + 0.5, TILE_SIZE - 2, TILE_SIZE - 2);
-    graphics.lineStyle(2, color, 0.82);
-    const inset = 2;
-    const length = 5;
-    for (const [cx, cy, sx, sy] of [
-      [px + inset, py + inset, 1, 1],
-      [px + TILE_SIZE - inset, py + inset, -1, 1],
-      [px + inset, py + TILE_SIZE - inset, 1, -1],
-      [px + TILE_SIZE - inset, py + TILE_SIZE - inset, -1, -1],
-    ] as const) {
-      graphics.lineBetween(cx, cy, cx + length * sx, cy);
-      graphics.lineBetween(cx, cy, cx, cy + length * sy);
-    }
+    graphics.fillStyle(color, buildMode ? 0.06 : 0.04);
+    graphics.fillRoundedRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2, 6);
+    graphics.lineStyle(1.5, color, 0.6);
+    graphics.strokeRoundedRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2, 6);
 
     if (!buildMode || !preview) return;
 
@@ -922,16 +1027,18 @@ export class WorldScene extends Phaser.Scene {
     const previewColor = preview.valid
       ? Phaser.Display.Color.HexStringToColor(definition.color).color
       : INVALID_COLOR;
-    graphics.fillStyle(previewColor, preview.valid ? 0.22 : 0.14);
-    graphics.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+    graphics.fillStyle(previewColor, preview.valid ? 0.24 : 0.16);
+    graphics.fillRoundedRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2, 6);
     graphics.lineStyle(2, previewColor, 0.9);
-    graphics.strokeRect(px + 1, py + 1, TILE_SIZE - 3, TILE_SIZE - 3);
+    graphics.strokeRoundedRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2, 6);
     if (preview.valid) {
-      graphics.lineBetween(px + 5, py + 11, px + 9, py + 15);
-      graphics.lineBetween(px + 9, py + 15, px + 17, py + 6);
+      graphics.lineStyle(2.5, previewColor, 1);
+      graphics.lineBetween(px + 9, py + 16, px + 14, py + 22);
+      graphics.lineBetween(px + 14, py + 22, px + 24, py + 10);
     } else {
-      graphics.lineBetween(px + 5, py + 5, px + 17, py + 17);
-      graphics.lineBetween(px + 17, py + 5, px + 5, py + 17);
+      graphics.lineStyle(2.5, previewColor, 1);
+      graphics.lineBetween(px + 9, py + 9, px + 23, py + 23);
+      graphics.lineBetween(px + 23, py + 9, px + 9, py + 23);
     }
 
     const status = preview.valid ? "READY" : `BLOCKED · ${preview.reason}`;
@@ -939,24 +1046,8 @@ export class WorldScene extends Phaser.Scene {
       .setText(`${definition.shortLabel} · ${status}\nCOST ${this.formatCost(definition)}`)
       .setColor(preview.valid ? "#f5e6c8" : "#ffd0c6")
       .setBackgroundColor(preview.valid ? "#12352fee" : "#451d22ee")
+      .setPosition(px + TILE_SIZE / 2, py - 6)
       .setVisible(true);
-    const center = this.cellCenter(position);
-    const minX = OFFSET_X + this.previewLabel.width / 2 + 2;
-    const maxX = OFFSET_X + GRID_W * TILE_SIZE - this.previewLabel.width / 2 - 2;
-    let labelY = position.y < 4 ? py + TILE_SIZE + this.previewLabel.height + 4 : py - 4;
-    if (labelY - this.previewLabel.height < OFFSET_Y + 2) labelY = py + TILE_SIZE + this.previewLabel.height + 4;
-    this.previewLabel.setPosition(this.clamp(center.x, minX, maxX), labelY);
-  }
-
-  private drawPhaseOverlay(): void {
-    const phase = this.simulation.state.phase;
-    if (phase === this.lastPhase) return;
-    this.lastPhase = phase;
-    const tint = PHASE_OVERLAY[phase];
-    // Transparency lives in the shape's own fill alpha rather than the game
-    // object's, which is what actually composites correctly here.
-    this.phaseOverlay.setFillStyle(tint.color, tint.alpha);
-    this.phaseOverlay.setVisible(tint.alpha > 0);
   }
 
   private drawHeader(): void {
@@ -972,18 +1063,17 @@ export class WorldScene extends Phaser.Scene {
       : collectibleLabel
         ? `${collectibleLabel} · click to gather · nodes regrow with the seasons`
         : hoveredBuilding
-          ? `${BUILDING_DEFINITIONS[hoveredBuilding.type].label} · level ${hoveredBuilding.level} · click to inspect and upgrade`
+          ? `${BUILDING_DEFINITIONS[hoveredBuilding.type].label} · level ${hoveredBuilding.level} · click to inspect`
           : activeExpedition
             ? `${activeExpedition.title} · scout ${activeExpedition.progress}/${activeExpedition.duration}`
             : hoveredDistrict
               ? `${DISTRICT_DEFINITIONS[hoveredDistrict.type].label} · ${DISTRICT_DEFINITIONS[hoveredDistrict.type].bonus}`
-              : "hover a feature to gather · click a resident to follow intent";
+              : "drag to pan · scroll to zoom · click a creature to follow it";
 
     if (hint !== this.lastHintText) {
       this.lastHintText = hint;
       this.hintText.setText(hint);
     }
-    this.titleText.setVisible(true);
   }
 
   private pointerToCell(pointer: Phaser.Input.Pointer): Vec2 | null {
@@ -1072,27 +1162,6 @@ export class WorldScene extends Phaser.Scene {
       );
     }
   }
-
-  private updateHeartbeat(): void {
-    const root = this.simulation.state.buildings.find((building) => building.type === "root-heart");
-    if (!root) {
-      this.heartbeatLayer.setVisible(false);
-      return;
-    }
-
-    const center = this.cellCenter(root.position);
-    const phaseColor = PHASE_COLORS[this.simulation.state.phase];
-    this.heartbeatLayer.setVisible(true).setPosition(center.x, center.y);
-    this.heartbeatGraphic.clear();
-    this.heartbeatGraphic.fillStyle(phaseColor, 0.055);
-    this.heartbeatGraphic.fillCircle(0, 0, 27);
-    this.heartbeatGraphic.lineStyle(1, phaseColor, 0.32);
-    this.heartbeatGraphic.strokeCircle(0, 0, 21);
-  }
-
-  private clamp(value: number, min: number, max: number): number {
-    return Math.max(min, Math.min(max, value));
-  }
 }
 
-export { TILE_SIZE, OFFSET_X, OFFSET_Y };
+export { TILE_SIZE, OFFSET_X, OFFSET_Y, VIEW_W, VIEW_H };

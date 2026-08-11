@@ -6,7 +6,7 @@ import { MosslightSimulation } from "./sim/simulation";
 import { SaveManager } from "./sim/persistence";
 import { SimulationClock, TICK_MS } from "./sim/clock";
 import { TorxThrmlBridge } from "./sim/bridge";
-import { WorldScene } from "./render/WorldScene";
+import { VIEW_H, VIEW_W, WorldScene } from "./render/WorldScene";
 import "./styles/main.css";
 
 let simulation = new MosslightSimulation(2048);
@@ -57,16 +57,16 @@ worldScene = new WorldScene(
 const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: "game",
-  width: 832,
-  height: 720,
+  width: VIEW_W,
+  height: VIEW_H,
   backgroundColor: "#08151B",
   pixelArt: false,
   antialias: true,
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.NO_CENTER,
-    width: 832,
-    height: 720,
+    width: VIEW_W,
+    height: VIEW_H,
   },
   scene: [worldScene],
 });
