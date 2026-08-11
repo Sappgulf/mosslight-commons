@@ -1042,8 +1042,21 @@ export class WorldScene extends Phaser.Scene {
     }
 
     const status = preview.valid ? "READY" : `BLOCKED · ${preview.reason}`;
+    const lines = [`${definition.shortLabel} · ${status}`, `COST ${this.formatCost(definition)}`];
+
+    // Show what this specific plot is worth. Placement only becomes a decision
+    // if the player can see the difference between two legal tiles.
+    if (preview.valid) {
+      const adjacency = this.simulation.previewAdjacency(buildMode, position);
+      const percent = Math.round((adjacency.multiplier - 1) * 100);
+      if (percent !== 0) {
+        lines.push(`OUTPUT ${percent > 0 ? "+" : ""}${percent}%`);
+      }
+      for (const note of adjacency.notes) lines.push(`${note.good ? "+" : "−"} ${note.text.replace(/ · [+−-]\d+%$/, "")}`);
+    }
+
     this.previewLabel
-      .setText(`${definition.shortLabel} · ${status}\nCOST ${this.formatCost(definition)}`)
+      .setText(lines.join("\n"))
       .setColor(preview.valid ? "#f5e6c8" : "#ffd0c6")
       .setBackgroundColor(preview.valid ? "#12352fee" : "#451d22ee")
       .setPosition(px + TILE_SIZE / 2, py - 6)

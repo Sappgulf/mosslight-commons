@@ -76,8 +76,52 @@ export class HUD {
     this.render();
   }
 
+  /**
+   * Progressive disclosure. The first-run screen used to present every system
+   * at once — fieldwork, districts, crafting, expeditions, skills, bonds, and
+   * the ledger — which is far more than a new player can read. Each surface now
+   * appears when it first becomes meaningful.
+   */
+  private unlocked(feature: "expedition" | "civic" | "skills" | "bonds" | "districts"): boolean {
+    const state = this.simulation.state;
+    const hasWorkshop = state.buildings.some((building) => building.type === "root-workshop");
+    switch (feature) {
+      case "expedition":
+        // Scouting only makes sense once there is somewhere left to chart and
+        // the player has met the idea of map fragments.
+        return state.items["map-fragment"] > 0 || state.revealedAreas.length > 0;
+      case "civic":
+        return hasWorkshop || state.chapter >= 1;
+      case "districts":
+        return state.chapter >= 1 || hasWorkshop;
+      case "skills":
+      case "bonds":
+        return state.chapter >= 1;
+      default:
+        return true;
+    }
+  }
+
+  private applyDisclosure(): void {
+    const show = (selector: string, visible: boolean) => {
+      const element = this.root.querySelector<HTMLElement>(selector);
+      if (element) element.hidden = !visible;
+    };
+    show(".expedition-section", this.unlocked("expedition"));
+    show(".district-section", this.unlocked("districts"));
+    show('[data-field-tab="civic"]', this.unlocked("civic"));
+    show("[data-skills-panel]", this.unlocked("skills"));
+    show("[data-bonds-panel]", this.unlocked("bonds"));
+
+    // If the civic tab is still locked, never leave the player stranded on it.
+    if (!this.unlocked("civic") && this.activeFieldTab === "civic") {
+      this.activeFieldTab = "field";
+    }
+  }
+
   public render(): void {
     const state = this.simulation.state;
+    this.applyDisclosure();
     this.setText("[data-day]", `DAY ${String(state.day).padStart(2, "0")}`);
     this.setText("[data-season]", `${state.season.toUpperCase()} ${state.seasonDay}/7`);
     this.setText("[data-settlement-summary]", `${state.metrics.population}/${state.metrics.housingCapacity} HOUSED · HARMONY ${Math.round(state.metrics.harmony)}%`);
@@ -314,10 +358,25 @@ export class HUD {
     panel.hidden = false;
 
     const definition = BUILDING_DEFINITIONS[building.type];
+    const adjacency = this.simulation.getAdjacency(building.id);
+    const total = (OUTPUT_MULTIPLIER[building.level] ?? 1) * (adjacency?.multiplier ?? 1);
     this.setText("[data-building-name]", definition.label);
     this.setText("[data-building-level]", `LEVEL ${building.level}/${MAX_BUILDING_LEVEL}`);
-    this.setText("[data-building-output]", `OUTPUT ${Math.round((OUTPUT_MULTIPLIER[building.level] ?? 1) * 100)}%`);
+    this.setText("[data-building-output]", `OUTPUT ${Math.round(total * 100)}%`);
     this.setText("[data-building-description]", definition.description);
+
+    // Explain the site, so an underperforming building is diagnosable.
+    const siteList = this.root.querySelector<HTMLElement>("[data-building-site]");
+    if (siteList) {
+      const notes = adjacency?.notes ?? [];
+      siteList.hidden = notes.length === 0;
+      siteList.replaceChildren(...notes.map((note) => {
+        const item = document.createElement("li");
+        item.className = note.good ? "site-note site-note--good" : "site-note site-note--bad";
+        item.textContent = note.text;
+        return item;
+      }));
+    }
 
     const upgradeButton = this.root.querySelector<HTMLButtonElement>('[data-action="upgrade-building"]');
     const costLabel = this.root.querySelector<HTMLElement>("[data-building-upgrade-cost]");
@@ -761,19 +820,19 @@ export class HUD {
       <div class="panel-eyebrow"><span id="field-heading">FIELDWORK</span><span data-item-summary>0 FOUND</span></div>
       <div class="field-tabs" role="tablist" aria-label="Ledger tools">
         <button class="field-tab is-active" type="button" data-field-tab="field" role="tab" aria-selected="true">FIELDWORK</button>
-        <button class="field-tab" type="button" data-field-tab="civic" role="tab" aria-selected="false">CIVIC TOOLS</button>
+        <button class="field-tab" type="button" data-field-tab="civic" role="tab" aria-selected="false" hidden>CIVIC TOOLS</button>
       </div>
       <div class="field-view" data-field-view="field">
         <div class="item-grid" aria-label="Found materials">${itemMarkup}</div>
         <div class="objective-heading objective-heading--panel"><span>OBJECTIVES</span><span data-objective-count>CH.1 · 0/5 DONE</span></div>
         <div class="objective-list" data-objectives aria-label="Fieldwork objectives"></div>
-        <div class="field-section expedition-section">
+        <div class="field-section expedition-section" hidden>
           <div class="objective-heading"><span>EXPEDITION</span><span data-expedition-status>READY TO DISPATCH</span></div>
           <button class="dispatch-button" type="button" data-action="dispatch-expedition">DISPATCH SCOUT</button>
         </div>
       </div>
       <div class="field-view" data-field-view="civic" hidden>
-        <div class="field-section district-section">
+        <div class="field-section district-section" hidden>
           <div class="objective-heading"><span>DISTRICT FOCUS</span><strong data-district-focus>Commons Market</strong></div>
           <div class="district-grid" role="group" aria-label="District focus">${districtMarkup}</div>
         </div>
@@ -803,6 +862,7 @@ export class HUD {
         <h2 id="building-heading" data-building-name>Burrow Home</h2>
         <div class="building-meta"><span data-building-level>LEVEL 1/3</span><span data-building-output>OUTPUT 100%</span></div>
         <p class="building-description" data-building-description></p>
+        <ul class="site-notes" data-building-site hidden aria-label="Site effects"></ul>
         <span class="upgrade-meter" data-building-upgrade-progress hidden><i></i></span>
         <button class="dispatch-button" type="button" data-action="upgrade-building">UPGRADE</button>
         <small class="upgrade-cost" data-building-upgrade-cost></small>
@@ -814,11 +874,11 @@ export class HUD {
         <div class="need-list">
           ${["shelter", "food", "safety", "belonging"].map((need) => `<div class="need-row"><span>${need}</span><div class="need-meter" data-need-meter="${need}" role="progressbar" aria-label="${need} need fulfilled" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-need-fill="${need}"></i></div><b data-need-value="${need}">0</b></div>`).join("")}
         </div>
-        <div class="relationship-panel">
+        <div class="relationship-panel" data-skills-panel hidden>
           <div class="panel-eyebrow"><span>SKILLS</span><span>GROWS WITH WORK</span></div>
           <div class="need-list need-list--skills" data-skills></div>
         </div>
-        <div class="relationship-panel">
+        <div class="relationship-panel" data-bonds-panel hidden>
           <div class="panel-eyebrow"><span>SOCIAL CIRCLE</span><span>NEARBY BONDS</span></div>
           <ul class="relationship-list" data-relationships aria-label="Resident relationships"></ul>
         </div>

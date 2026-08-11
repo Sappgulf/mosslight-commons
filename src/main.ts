@@ -35,7 +35,8 @@ const hud = new HUD(hudElement, simulation, {
     // Drop the save and reload. Rebuilding the scene, HUD, retained view pools,
     // and audio state in place is far more error-prone than a clean boot.
     saves.stopAutosave();
-    saves.clear();
+    // Seal so the unload handlers cannot write the discarded world back.
+    saves.clear(true);
     location.reload();
   },
   onExport: () => saves.exportToFile(),

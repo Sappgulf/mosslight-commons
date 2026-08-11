@@ -10,6 +10,7 @@ import {
   SEASONAL_EVENT_DEFINITIONS,
   UPGRADE_COSTS,
 } from "../data/definitions";
+import { evaluateAdjacency, type AdjacencyResult } from "./adjacency";
 import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
 import type {
   Building,
@@ -162,6 +163,8 @@ export class MosslightSimulation {
    */
   private metricsDirty = true;
   private readonly eventListeners: SimEventListener[] = [];
+  private adjacencyCache = new Map<string, AdjacencyResult>();
+  private adjacencyCacheTick = -1;
   /** id -> building, rebuilt whenever the building list changes. */
   private buildingIndex = new Map<string, Building>();
   /** type -> first building of that type, for the common "find the market" lookup. */
@@ -394,6 +397,40 @@ export class MosslightSimulation {
     };
     this.addMessage(`CRAFT · ${definition.label} is on the Root Workshop bench.`, "good");
     return true;
+  }
+
+  /**
+   * Adjacency for an existing building, memoised for the current tick. Every
+   * resource pass asks for this, and the neighbour scan is not free.
+   */
+  private adjacencyFor(building: Building): AdjacencyResult {
+    const cached = this.adjacencyCache.get(building.id);
+    if (cached && this.adjacencyCacheTick === this.state.tick) return cached;
+    if (this.adjacencyCacheTick !== this.state.tick) {
+      this.adjacencyCache.clear();
+      this.adjacencyCacheTick = this.state.tick;
+    }
+    const result = evaluateAdjacency(building.type, building.position, {
+      grid: this.state.grid,
+      buildings: this.state.buildings,
+      ignoreId: building.id,
+    });
+    this.adjacencyCache.set(building.id, result);
+    return result;
+  }
+
+  /** Adjacency for a placed building, for the inspector. */
+  public getAdjacency(buildingId: string): AdjacencyResult | undefined {
+    const building = this.buildingIndex.get(buildingId);
+    return building ? this.adjacencyFor(building) : undefined;
+  }
+
+  /** Adjacency a building *would* have at a cell, for the build preview. */
+  public previewAdjacency(type: BuildingType, position: Vec2): AdjacencyResult {
+    return evaluateAdjacency(type, position, {
+      grid: this.state.grid,
+      buildings: this.state.buildings,
+    });
   }
 
   public getDistrictAt(position: Vec2): District | undefined {
@@ -1133,7 +1170,8 @@ export class MosslightSimulation {
     let total = 0;
     for (const building of this.state.buildings) {
       if (building.type !== type) continue;
-      let contribution = OUTPUT_MULTIPLIER[building.level] ?? 1;
+      // Where a building sits now matters as much as what level it is.
+      let contribution = (OUTPUT_MULTIPLIER[building.level] ?? 1) * this.adjacencyFor(building).multiplier;
       if (skill) {
         const workers = this.state.residents.filter((resident) => resident.workplaceId === building.id);
         if (workers.length > 0) {
@@ -1577,6 +1615,8 @@ export class MosslightSimulation {
   }
 
   private reindexBuildings(): void {
+    this.adjacencyCache.clear();
+    this.adjacencyCacheTick = -1;
     this.buildingIndex = new Map(this.state.buildings.map((building) => [building.id, building]));
     this.buildingByType = new Map();
     this.occupiedCells = new Set();

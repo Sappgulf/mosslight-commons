@@ -34,6 +34,13 @@ function isValidPayload(value: unknown): value is SavePayload {
 
 export class SaveManager {
   private timer: number | null = null;
+  /**
+   * Once the player asks for a new Commons we must stop writing. The reset path
+   * clears storage and then reloads, and the reload fires `beforeunload` and
+   * `pagehide` — which were promptly saving the discarded world straight back
+   * over the clear, so "NEW" appeared to do nothing.
+   */
+  private sealed = false;
 
   constructor(private readonly simulation: MosslightSimulation) {}
 
@@ -62,6 +69,7 @@ export class SaveManager {
   }
 
   save(): boolean {
+    if (this.sealed) return false;
     try {
       localStorage.setItem(
         STORAGE_KEY,
@@ -91,7 +99,9 @@ export class SaveManager {
     }
   }
 
-  clear(): void {
+  /** Clears the save. Pass `seal` when the page is about to reload. */
+  clear(seal = false): void {
+    if (seal) this.sealed = true;
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {

@@ -446,3 +446,115 @@ kbd {
  * attribute and leaves a collapsed panel bleeding through the stack.
  */
 [hidden] { display: none !important; }
+
+/* ==========================================================================
+ * Layout and typography pass
+ *
+ * The HUD previously boxed the map in on four sides and showed 148 text
+ * elements at once, 100 of them at 9px or smaller. The map was 31% of the
+ * screen. These rules give the world back the screen and establish an actual
+ * type hierarchy instead of one uniform micro-label treatment.
+ * ========================================================================== */
+
+@media (min-width: 901px) {
+  /* Narrower rails, and the build dock now floats over the map rather than
+     reserving a band of its own beneath it. */
+  #game { inset: 104px 250px 14px 250px; border-radius: 20px; }
+
+  .brand-card { width: 230px; min-height: 0; padding: 13px 15px; }
+  .brand-card h1 { margin: 5px 0 2px; font-size: 21px; }
+  .brand-card p { font-size: 10px; }
+  .brand-card::after { display: none; }
+
+  .resource-strip { left: 262px; min-height: 74px; }
+
+  .field-panel { top: 150px; width: 230px; max-height: calc(100vh - 268px); }
+
+  .right-stack { top: 104px; width: 232px; height: calc(100vh - 128px); }
+
+  .message-log { width: 230px; max-height: 84px; }
+
+  /* Float the dock on the map, translucent, so it costs no vertical space. */
+  .build-dock {
+    left: calc(50% + 0px);
+    bottom: 22px;
+    width: min(400px, calc(100vw - 540px));
+    padding: 9px;
+    background: linear-gradient(145deg, rgba(12, 38, 34, 0.86), rgba(6, 20, 24, 0.9));
+    backdrop-filter: blur(14px);
+  }
+  .build-detail { display: none; }
+}
+
+/* --- Type hierarchy ------------------------------------------------------
+ * Three levels only: a serif display number, readable body copy, and a small
+ * label used sparingly. Previously everything shared one 7-9px uppercase
+ * letterspaced style, so nothing had emphasis.
+ * ------------------------------------------------------------------------ */
+
+.day-card span { font-size: 19px; }
+.day-card small { font-size: 9px; letter-spacing: 0.09em; }
+.day-summary { font-size: 8px; }
+
+.resource-copy span { font-size: 10px; letter-spacing: 0.04em; }
+.resource-copy strong { font-size: 17px; }
+
+.objective-row strong { font-size: 12px; letter-spacing: 0; text-transform: none; }
+.objective-row small { font-size: 10px; line-height: 1.45; }
+.objective-heading span { font-size: 9px; }
+
+.item-copy strong { font-size: 15px; }
+.item-copy small { font-size: 7px; }
+
+.need-row { font-size: 10px; }
+.need-row b { font-size: 11px; }
+
+.forecast-card h2 { font-size: 19px; }
+.driver-list li { font-size: 10px; line-height: 1.5; }
+.recommendation { font-size: 11px; line-height: 1.5; }
+
+.resident-heading h2 { font-size: 17px; }
+.resident-heading p { font-size: 10px; }
+.decision-note { font-size: 10px; line-height: 1.5; }
+
+.build-name { font-size: 10px; }
+.build-cost, .build-status { font-size: 8px; }
+
+.latest-feedback p { font-size: 10px; line-height: 1.45; }
+
+/* Panel eyebrows are the one place the small caps treatment still earns its
+   keep — as section dividers, not as every label on screen. */
+.panel-eyebrow span { font-size: 8px; }
+
+/* --- Narrow-rail corrections -------------------------------------------- */
+
+@media (min-width: 901px) {
+  /* Four item chips across a 230px rail truncated every label to "SEED P…".
+     Two columns give the names room to breathe. */
+  .item-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .item-chip { grid-template-rows: auto; grid-template-columns: 22px minmax(0, 1fr); justify-items: start; align-items: center; padding: 7px 8px; }
+  .item-copy { justify-items: start; grid-auto-flow: column; align-items: baseline; gap: 6px; }
+  .item-copy small { font-size: 8px; }
+
+  /* SAVE/LOAD/EXPORT/IMPORT/NEW in one 230px row was five cramped stubs. */
+  .save-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+  .save-row button { min-height: 22px; padding: 0 4px; }
+}
+
+/* A tab strip with one visible tab is just a mislabelled heading. */
+.field-tabs:has(> [data-field-tab="civic"][hidden]) { display: none; }
+
+/* Adjacency notes in the building inspector and build preview. */
+.site-notes { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.site-note { padding-left: 9px; position: relative; font-size: 9px; line-height: 1.4; color: var(--muted); }
+.site-note::before { content: ""; position: absolute; left: 0; top: 5px; width: 4px; height: 4px; border-radius: 50%; }
+.site-note--good { color: #b6d9a3; }
+.site-note--good::before { background: var(--teal); }
+.site-note--bad { color: #e8a99c; }
+.site-note--bad::before { background: var(--warning); }
+
+@media (min-width: 901px) {
+  /* The card clips its background image, which was also clipping the second
+     row of save controls. Give it room for both rows. */
+  .brand-card { min-height: 148px; padding-bottom: 14px; }
+}
