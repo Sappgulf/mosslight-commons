@@ -2,7 +2,7 @@ import Phaser from "phaser";
 
 import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS } from "../data/definitions";
 import { MosslightSimulation, type SimEvent } from "../sim/simulation";
-import type { BuildingType, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
+import type { BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
 import { Effects } from "./Effects";
 import { LightLayer, type LightSource } from "./LightLayer";
 import { TerrainPainter } from "./TerrainPainter";
@@ -102,6 +102,7 @@ const RESIDENT_TEXTURE_KEYS: Record<Species, string> = {
   brambleback: "resident-brambleback",
   glowtail: "resident-glowtail",
   mireling: "resident-mireling",
+  cloudmoth: "resident-cloudmoth",
 };
 
 const NODE_TEXTURE_KEYS: Partial<Record<TileKind, string>> = {
@@ -218,6 +219,8 @@ export class WorldScene extends Phaser.Scene {
     for (const [species, fileName] of Object.entries(RESIDENT_TEXTURE_KEYS)) {
       this.load.image(fileName, `assets/runtime/residents/${species}.png`);
     }
+    this.load.image("building-lantern-grove-night", "assets/runtime/buildings/lantern-grove-night.png");
+    this.load.image("tile-path", "assets/runtime/tiles/path.png");
     for (const [kind, fileName] of Object.entries(NODE_TEXTURE_KEYS)) {
       if (fileName) this.load.image(fileName, `assets/runtime/nodes/${kind}.png`);
     }
@@ -351,7 +354,9 @@ export class WorldScene extends Phaser.Scene {
       this.hoverCell = cell;
 
       const buildMode = this.simulation.state.buildMode;
-      if (buildMode) {
+      if (buildMode === "path") {
+        this.simulation.paintPath(cell);
+      } else if (buildMode) {
         this.simulation.build(buildMode, cell);
       } else if (!this.simulation.collectAt(cell)) {
         const building = this.simulation.getBuildingAt(cell);
@@ -744,6 +749,17 @@ export class WorldScene extends Phaser.Scene {
       // Y-sort within the entity band so residents can pass in front.
       view.container.setDepth(center.y);
 
+      if (building.type === "lantern-grove" && view.art instanceof Phaser.GameObjects.Image) {
+        const night = this.simulation.state.phase === "night" || this.simulation.state.phase === "dusk";
+        const nightKey = "building-lantern-grove-night";
+        const dayKey = BUILDING_TEXTURE_KEYS["lantern-grove"]!;
+        const next = night && this.textures.exists(nightKey) ? nightKey : dayKey;
+        if (view.art.texture.key !== next && this.textures.exists(next)) {
+          view.art.setTexture(next);
+          if (view.baseSize) view.art.setDisplaySize(view.baseSize.width, view.baseSize.height);
+        }
+      }
+
       if (view.lastLevel !== building.level || view.lastUpgrading !== building.upgrading) {
         view.lastLevel = building.level;
         view.lastUpgrading = building.upgrading;
@@ -1028,7 +1044,9 @@ export class WorldScene extends Phaser.Scene {
 
     if (!buildMode || !preview) return;
 
-    const definition = BUILDING_DEFINITIONS[buildMode];
+    const definition = buildMode === "path"
+      ? { shortLabel: "PATH", color: "#8DBB72", cost: { warmth: 2, food: 1 } }
+      : BUILDING_DEFINITIONS[buildMode];
     const previewColor = preview.valid
       ? Phaser.Display.Color.HexStringToColor(definition.color).color
       : INVALID_COLOR;
@@ -1051,7 +1069,7 @@ export class WorldScene extends Phaser.Scene {
 
     // Show what this specific plot is worth. Placement only becomes a decision
     // if the player can see the difference between two legal tiles.
-    if (preview.valid) {
+    if (preview.valid && buildMode !== "path") {
       const adjacency = this.simulation.previewAdjacency(buildMode, position);
       const percent = Math.round((adjacency.multiplier - 1) * 100);
       if (percent !== 0) {
@@ -1076,7 +1094,9 @@ export class WorldScene extends Phaser.Scene {
     const hoveredDistrict = this.hoverCell ? this.simulation.getDistrictAt(this.hoverCell) : undefined;
     const activeExpedition = this.simulation.state.expeditions.find((expedition) => expedition.status === "active");
 
-    const hint = buildMode
+    const hint = buildMode === "path"
+      ? "hover to preview PATH · click to pack earth"
+      : buildMode
       ? `hover to preview ${BUILDING_DEFINITIONS[buildMode].shortLabel} · click to place`
       : collectibleLabel
         ? `${collectibleLabel} · click to gather · nodes regrow with the seasons`
@@ -1109,7 +1129,7 @@ export class WorldScene extends Phaser.Scene {
     };
   }
 
-  private getBuildPreview(type: Exclude<BuildingType, "root-heart">, position: Vec2): BuildPreviewState {
+  private getBuildPreview(type: BuildTool, position: Vec2): BuildPreviewState {
     const state = this.simulation.state;
     const tile = state.grid[position.y]?.[position.x];
     if (!tile) return { valid: false, reason: "OUT OF BOUNDS" };
@@ -1125,6 +1145,11 @@ export class WorldScene extends Phaser.Scene {
     }
     if (type === "root-workshop" && tile !== "grass" && tile !== "path") {
       return { valid: false, reason: "CLEAR GROUND" };
+    }
+    if (type === "path") {
+      if (tile !== "grass") return { valid: false, reason: "NEED GRASS" };
+      if (state.resources.warmth < 2 || state.resources.food < 1) return { valid: false, reason: "NEED STORES" };
+      return { valid: true, reason: "READY" };
     }
 
     const definition = BUILDING_DEFINITIONS[type];

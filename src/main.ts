@@ -182,6 +182,12 @@ window.render_game_to_text = () => {
     onboarding: { step: state.onboardingStep, dismissed: state.onboardingDismissed },
     buildMode: state.buildMode,
     zoomPercent: worldScene?.getZoomPercent() ?? 100,
+    habitatStress: state.habitatStress,
+    births: state.births,
+    cloudmothsArrived: state.cloudmothsArrived,
+    proposal: state.proposal ? { kind: state.proposal.kind, status: state.proposal.status } : null,
+    forecastHistory: state.forecastHistory.length,
+    waterQuality: Math.round((state.waterQuality?.flat().reduce((sum, value) => sum + value, 0) ?? 0) / Math.max(1, state.waterQuality?.flat().length ?? 1)),
   });
 };
 
@@ -208,6 +214,7 @@ const clock = new SimulationClock({
     worldScene?.renderNow();
     hud.render();
     audio.setPhase(simulation.state.phase);
+    audio.setHarmony(simulation.state.metrics.harmony);
     audio.reactToMessages(simulation.state.messages);
   },
 });

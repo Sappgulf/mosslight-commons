@@ -5,13 +5,14 @@ import {
   MAX_BUILDING_LEVEL,
   ONBOARDING_STEPS,
   OUTPUT_MULTIPLIER,
+  PATH_COST,
   RECIPE_DEFINITIONS,
   RESOURCE_DEFINITIONS,
   SPECIES_DEFINITIONS,
   UPGRADE_COSTS,
 } from "../data/definitions";
 import { MosslightSimulation } from "../sim/simulation";
-import type { BuildingType, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
+import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
 
 const resourceOrder: ResourceKey[] = ["food", "water", "warmth", "light"];
 const buildOrder: Exclude<BuildingType, "root-heart">[] = [
@@ -25,7 +26,7 @@ const itemOrder: ItemKey[] = ["seed-pod", "resin", "moonwater", "map-fragment"];
 const districtOrder: DistrictType[] = ["meadow", "wetland", "lantern", "market", "ruin"];
 const recipeOrder: RecipeKey[] = ["lantern-kit", "bridge-kit", "comfort-kit"];
 
-type BuildChoice = Exclude<BuildingType, "root-heart">;
+type BuildChoice = BuildTool;
 type ZoomAction = "in" | "out" | "reset";
 type LedgerFilter = "all" | "good" | "warning" | "info";
 type MissingCost =
@@ -125,6 +126,11 @@ export class HUD {
     this.setText("[data-day]", `DAY ${String(state.day).padStart(2, "0")}`);
     this.setText("[data-season]", `${state.season.toUpperCase()} ${state.seasonDay}/7`);
     this.setText("[data-settlement-summary]", `${state.metrics.population}/${state.metrics.housingCapacity} HOUSED · HARMONY ${Math.round(state.metrics.harmony)}%`);
+    const waterAvg = state.waterQuality?.flat().reduce((sum, value) => sum + value, 0) / Math.max(1, state.waterQuality?.flat().length ?? 1);
+    this.setText("[data-water-quality]", `WATER ${Math.round(waterAvg)}% · WILD ${Math.max(0, 100 - Math.round(state.habitatStress * 3))}%`);
+    this.setText("[data-births]", state.births ? `${state.births} BORN` : "");
+    const title = this.root.querySelector<HTMLElement>("[data-title-overlay]");
+    if (title) title.hidden = state.titleSeen;
     this.setText("[data-phase]", state.phase.toUpperCase());
     this.setText("[data-status]", state.paused ? "PAUSED" : "LIVE");
     this.setText("[data-provider]", state.forecastSource === "torx-thrml" ? "TORX+THRML" : "LOCAL MODEL");
@@ -187,6 +193,8 @@ export class HUD {
     this.renderObjectives();
     this.renderBuildingInspector();
     this.renderLedger();
+    this.renderPetitions();
+    this.renderCouncil();
 
     const activeExpedition = state.expeditions.find((expedition) => expedition.status === "active");
     this.setText(
@@ -265,15 +273,19 @@ export class HUD {
 
     this.root.querySelectorAll<HTMLButtonElement>("[data-build]").forEach((button) => {
       const build = button.dataset.build as BuildChoice;
+      const active = build === state.buildMode;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      if (build === "path") {
+        const affordable = state.resources.warmth >= PATH_COST.warmth && state.resources.food >= PATH_COST.food;
+        button.classList.toggle("is-unavailable", !affordable);
+        return;
+      }
       const definition = BUILDING_DEFINITIONS[build];
       const missing: MissingCost[] = [...this.getMissingResources(build), ...this.getMissingItems(build)];
       const affordable = missing.length === 0;
-      const active = build === state.buildMode;
       const status = affordable ? "READY" : `NEEDS ${this.formatMissingCosts(missing)}`;
-
-      button.classList.toggle("is-active", active);
       button.classList.toggle("is-unavailable", !affordable);
-      button.setAttribute("aria-pressed", active ? "true" : "false");
       button.setAttribute("aria-label", definition.label);
       this.setText(`[data-build-cost="${build}"]`, `COST · ${this.formatCost(definition)}`);
       this.setText(`[data-build-status="${build}"]`, status);
@@ -424,9 +436,14 @@ export class HUD {
     const species = SPECIES_DEFINITIONS[resident.species];
     this.setText("[data-resident-name]", resident.name);
     this.setText("[data-resident-species]", `${species.label} · ${species.role}`);
+    const portrait = this.root.querySelector<HTMLImageElement>("[data-resident-portrait]");
+    if (portrait) {
+      portrait.src = `assets/runtime/portraits/${resident.species}.png`;
+      portrait.alt = species.label;
+    }
     this.setText("[data-resident-goal]", resident.goal);
     this.setText("[data-resident-explanation]", resident.lastDecisionExplanation);
-    this.setText("[data-resident-glyph]", resident.species === "glowtail" ? "✧" : resident.species === "mireling" ? "◌" : "●");
+    this.setText("[data-resident-glyph]", resident.species === "glowtail" ? "✧" : resident.species === "mireling" ? "◌" : resident.species === "cloudmoth" ? "☽" : "●");
     this.setText("[data-resident-stage]", `${resident.stage.toUpperCase()} · ${resident.age}d`);
 
     // A resident's personal request is the most player-actionable thing about
@@ -545,6 +562,37 @@ export class HUD {
     }));
   }
 
+  private renderPetitions(): void {
+    const list = this.root.querySelector<HTMLElement>("[data-petitions]");
+    if (!list) return;
+    const open = this.simulation.state.residents.filter((resident) => resident.want && !resident.want.fulfilled).slice(0, 4);
+    if (open.length === 0) {
+      list.replaceChildren();
+      const empty = document.createElement("p");
+      empty.className = "petition-empty";
+      empty.textContent = "No open petitions. Neighbors will ask when something is missing.";
+      list.append(empty);
+      return;
+    }
+    list.replaceChildren(...open.map((resident) => {
+      const item = document.createElement("p");
+      item.className = "petition";
+      item.textContent = resident.want?.description ?? "";
+      return item;
+    }));
+  }
+
+  private renderCouncil(): void {
+    const card = this.root.querySelector<HTMLElement>("[data-council]");
+    if (!card) return;
+    const proposal = this.simulation.state.proposal;
+    const pending = proposal?.status === "pending";
+    card.hidden = !pending;
+    if (!pending || !proposal) return;
+    this.setText("[data-council-title]", proposal.title);
+    this.setText("[data-council-body]", proposal.body);
+  }
+
   /** First-run walkthrough. */
   private renderOnboarding(): void {
     const overlay = this.root.querySelector<HTMLElement>("[data-onboarding]");
@@ -654,6 +702,23 @@ export class HUD {
       case "onboarding-skip":
         this.simulation.dismissOnboarding();
         break;
+      case "dismiss-title":
+        this.simulation.dismissTitle();
+        break;
+      case "approve-proposal":
+        this.simulation.approveProposal();
+        this.callbacks.onChange();
+        break;
+      case "reject-proposal":
+        this.simulation.rejectProposal();
+        this.callbacks.onChange();
+        break;
+      case "forecast-back":
+        this.simulation.rewindForecast(-1);
+        break;
+      case "forecast-forward":
+        this.simulation.rewindForecast(1);
+        break;
       case "save":
         this.callbacks.onSave();
         break;
@@ -704,7 +769,7 @@ export class HUD {
     if (button?.dataset.build) this.updateBuildDetail(button.dataset.build as BuildChoice);
   }
 
-  private getMissingResources(build: BuildChoice): Array<{ resource: ResourceKey; amount: number }> {
+  private getMissingResources(build: Exclude<BuildChoice, "path">): Array<{ resource: ResourceKey; amount: number }> {
     const definition = BUILDING_DEFINITIONS[build];
     return resourceOrder.flatMap((resource) => {
       const cost = definition.cost[resource] ?? 0;
@@ -713,7 +778,7 @@ export class HUD {
     });
   }
 
-  private getMissingItems(build: BuildChoice): Array<{ item: ItemKey; amount: number }> {
+  private getMissingItems(build: Exclude<BuildChoice, "path">): Array<{ item: ItemKey; amount: number }> {
     const definition = BUILDING_DEFINITIONS[build];
     return itemOrder.flatMap((item) => {
       const cost = definition.itemCost?.[item] ?? 0;
@@ -759,6 +824,12 @@ export class HUD {
       return;
     }
 
+    if (build === "path") {
+      const ready = this.simulation.state.resources.warmth >= PATH_COST.warmth && this.simulation.state.resources.food >= PATH_COST.food;
+      detail.textContent = `Packed path: motes prefer roads. Cost: ${PATH_COST.food} food · ${PATH_COST.warmth} warmth; ${ready ? "ready to pack" : "short on stores"}.`;
+      return;
+    }
+
     const definition = BUILDING_DEFINITIONS[build];
     const missing: MissingCost[] = [...this.getMissingResources(build), ...this.getMissingItems(build)];
     const status = missing.length === 0 ? "ready to place" : `short on ${this.formatMissingCosts(missing)}`;
@@ -797,6 +868,7 @@ export class HUD {
       return `<button class="craft-button" type="button" data-craft="${recipe}" aria-label="${definition.label}: ${definition.description}" title="${definition.description}"><span class="craft-icon" aria-hidden="true">${definition.icon}</span><span>${definition.label}</span><small data-craft-cost="${recipe}">NEEDS MATERIALS</small></button>`;
     }).join("");
 
+    const pathButton = `<button class="build-button" type="button" data-build="path" aria-pressed="false" aria-label="Packed path" title="Lay a road motes prefer"><span class="build-icon" aria-hidden="true">≈</span><span class="build-name">PATH</span><span class="build-cost">FOOD 1 · WARMTH 2</span><span class="build-status">ROAD</span></button>`;
     const buildMarkup = buildOrder.map((type) => {
       const definition = BUILDING_DEFINITIONS[type];
       return `<button class="build-button" type="button" data-build="${type}" aria-pressed="false" aria-label="${definition.label}" aria-describedby="build-${type}-description build-${type}-cost build-${type}-status" title="${definition.description}">
@@ -824,7 +896,7 @@ export class HUD {
     </section>
 
     <section class="resource-strip panel" aria-label="Settlement resources">
-      <div class="day-card"><span data-day>DAY 08</span><small data-season>MOSSWAKE 1/7</small><strong class="day-summary" data-settlement-summary>36/42 HOUSED · HARMONY 72%</strong></div>
+      <div class="day-card"><span data-day>DAY 08</span><small data-season>MOSSWAKE 1/7</small><strong class="day-summary" data-settlement-summary>36/42 HOUSED · HARMONY 72%</strong><small data-water-quality>WATER 70% · WILD 100%</small><small data-births></small></div>
       ${resourceMarkup}
     </section>
 
@@ -836,6 +908,10 @@ export class HUD {
       </div>
       <div class="field-view" data-field-view="field">
         <div class="item-grid" aria-label="Found materials">${itemMarkup}</div>
+        <div class="field-section petition-section">
+          <div class="objective-heading"><span>PETITIONS</span><span>FROM THE MOTES</span></div>
+          <div data-petitions></div>
+        </div>
         <div class="objective-heading objective-heading--panel"><span>OBJECTIVES</span><span data-objective-count>CH.1 · 0/5 DONE</span></div>
         <div class="objective-list" data-objectives aria-label="Fieldwork objectives"></div>
         <div class="field-section expedition-section" hidden>
@@ -862,6 +938,19 @@ export class HUD {
         <div class="forecast-probability"><strong data-forecast-probability>65% likely</strong><span class="forecast-meter" data-forecast-meter role="progressbar" aria-label="Forecast probability" aria-valuemin="0" aria-valuemax="100" aria-valuenow="65"><i data-forecast-fill></i></span></div>
         <ul class="driver-list" data-forecast-drivers aria-label="Forecast drivers"></ul>
         <p class="recommendation" data-forecast-recommendation></p>
+        <div class="forecast-rewind" role="group" aria-label="Forecast history">
+          <button type="button" data-action="forecast-back">◂ LAST</button>
+          <button type="button" data-action="forecast-forward">NEXT ▸</button>
+        </div>
+        <section class="council-card" data-council hidden>
+          <div class="panel-eyebrow"><span>SPECIES COUNCIL</span></div>
+          <strong data-council-title></strong>
+          <p data-council-body></p>
+          <div class="council-actions">
+            <button type="button" class="dispatch-button" data-action="approve-proposal">APPROVE</button>
+            <button type="button" class="ghost-button" data-action="reject-proposal">REJECT</button>
+          </div>
+        </section>
         <div class="season-event" data-season-event data-tone="calm">
           <div class="panel-eyebrow"><span>SEASONAL EVENT</span><span data-season-event-days>7 DAYS LEFT</span></div>
           <strong data-season-event-title>Seedwake Gathering</strong>
@@ -882,7 +971,7 @@ export class HUD {
 
       <section class="inspector-card panel" aria-labelledby="resident-heading">
         <div class="panel-eyebrow"><span>RESIDENT</span><span data-resident-goal>work</span></div>
-        <div class="resident-heading"><span class="resident-glyph" data-resident-glyph aria-hidden="true">●</span><div><h2 id="resident-heading" data-resident-name>Loading</h2><p data-resident-species>Brambleback</p></div><span class="resident-stage" data-resident-stage>ADULT</span></div>
+        <div class="resident-heading"><img class="resident-portrait" data-resident-portrait alt="" width="44" height="44" /><span class="resident-glyph" data-resident-glyph aria-hidden="true">●</span><div><h2 id="resident-heading" data-resident-name>Loading</h2><p data-resident-species>Brambleback</p></div><span class="resident-stage" data-resident-stage>ADULT</span></div>
         <div class="need-list">
           ${["shelter", "food", "safety", "belonging"].map((need) => `<div class="need-row"><span>${need}</span><div class="need-meter" data-need-meter="${need}" role="progressbar" aria-label="${need} need fulfilled" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-need-fill="${need}"></i></div><b data-need-value="${need}">0</b></div>`).join("")}
         </div>
@@ -902,7 +991,7 @@ export class HUD {
     <section class="build-dock panel" aria-labelledby="build-heading">
       <div class="dock-heading"><span id="build-heading">BUILD</span><button type="button" data-action="clear-build" aria-label="Cancel building mode" aria-keyshortcuts="Escape">cancel <kbd>Esc</kbd></button></div>
       <p class="build-detail" data-build-detail aria-live="polite">Choose a tool. Costs are shown on every tile; press Escape to clear a selection.</p>
-      <div class="build-grid" role="group" aria-label="Building choices">${buildMarkup}</div>
+      <div class="build-grid" role="group" aria-label="Building choices">${pathButton}${buildMarkup}</div>
     </section>
 
     <section class="control-dock panel" aria-label="Simulation controls">
@@ -936,6 +1025,15 @@ export class HUD {
         </div>
         <ul class="ledger-list" data-ledger-list></ul>
         <button class="dispatch-button" type="button" data-action="close-ledger">CLOSE</button>
+      </div>
+    </div>
+
+    <div class="overlay title-overlay" data-title-overlay role="dialog" aria-modal="true" aria-labelledby="title-heading">
+      <div class="overlay-card overlay-card--title">
+        <div class="panel-eyebrow"><span>A BROKEN SURVEY MAP</span><span>THE LAST HEALTHY ROOT</span></div>
+        <h2 id="title-heading">Mosslight Commons</h2>
+        <p>The canopy is dying. You are the first Steward. Shape a habitat. Let the motes decide what the city becomes.</p>
+        <button class="dispatch-button" type="button" data-action="dismiss-title">TAKE UP THE LEDGER</button>
       </div>
     </div>
 

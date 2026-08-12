@@ -5,16 +5,26 @@ import {
   ITEM_DEFINITIONS,
   MAX_BUILDING_LEVEL,
   OUTPUT_MULTIPLIER,
+  PATH_COST,
   RECIPE_DEFINITIONS,
   REGROWTH_DEFINITIONS,
   SEASONAL_EVENT_DEFINITIONS,
   UPGRADE_COSTS,
 } from "../data/definitions";
 import { evaluateAdjacency, type AdjacencyResult } from "./adjacency";
+import {
+  createWaterQuality,
+  marketShortages,
+  nextProposal,
+  normalizeWorld,
+  pushForecastHistory,
+  tickWaterQuality,
+} from "./civic";
 import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
 import type {
   Building,
   BuildingType,
+  BuildTool,
   CollectibleTile,
   District,
   DistrictType,
@@ -137,6 +147,7 @@ export class SeededRandom {
 }
 
 const speciesOrder: Species[] = ["brambleback", "glowtail", "mireling"];
+let nextProposalId = 1;
 
 const names = [
   "Pip", "Mallow", "Tallow", "Nix", "Pebble", "Lumen", "Sedge", "Bramble", "Clover", "Moss",
@@ -221,8 +232,85 @@ export class MosslightSimulation {
     this.state.speed = speed;
   }
 
-  public setBuildMode(type: Exclude<BuildingType, "root-heart"> | null): void {
+  public setBuildMode(type: BuildTool | null): void {
     this.state.buildMode = type;
+  }
+
+  public dismissTitle(): void {
+    this.state.titleSeen = true;
+  }
+
+  public paintPath(position: Vec2): boolean {
+    if (!this.isInside(position) || !this.isRevealed(position)) return false;
+    const tile = this.state.grid[position.y]?.[position.x];
+    if (tile !== "grass") {
+      this.addMessage("PATH BLOCKED · Roads need clear grass.", "warning");
+      return false;
+    }
+    if (this.isOccupied(position)) {
+      this.addMessage("PATH BLOCKED · Something already stands here.", "warning");
+      return false;
+    }
+    if (this.state.resources.warmth < PATH_COST.warmth || this.state.resources.food < PATH_COST.food) {
+      this.addMessage("PATH BLOCKED · Need a little food and warmth to pack the earth.", "warning");
+      return false;
+    }
+    this.state.resources.warmth -= PATH_COST.warmth;
+    this.state.resources.food -= PATH_COST.food;
+    this.state.grid[position.y]![position.x] = "path";
+    this.invalidateAllPaths();
+    this.metricsDirty = true;
+    this.addMessage(`PATH · Packed earth at ${position.x + 1}:${position.y + 1}.`, "good");
+    this.emit({ type: "build", position, label: "PATH", tone: "good" });
+    const roads = this.state.objectives.find((objective) => objective.id === "pack-the-roads");
+    if (roads && !roads.completed && this.state.chapter >= 3) {
+      roads.progress = Math.min(roads.target, roads.progress + 1);
+      if (roads.progress >= roads.target) {
+        roads.completed = true;
+        this.addMessage("OBJECTIVE · Packed the roads.", "good");
+      }
+    }
+    return true;
+  }
+
+  public approveProposal(): boolean {
+    const proposal = this.state.proposal;
+    if (!proposal || proposal.status !== "pending") return false;
+    proposal.status = "approved";
+    if (proposal.kind === "shelter-first") {
+      this.state.resources.warmth = clamp(this.state.resources.warmth + 6);
+    } else if (proposal.kind === "wetland-first") {
+      this.state.districtFocus = "wetland";
+    } else if (proposal.kind === "market-first") {
+      this.state.resources.food = clamp(this.state.resources.food + 5);
+    } else if (proposal.kind === "lantern-first") {
+      this.state.resources.light = clamp(this.state.resources.light + 8);
+    } else if (proposal.kind === "welcome-moths") {
+      this.spawnCloudmoths(2);
+    }
+    this.addMessage(`COUNCIL · Approved: ${proposal.title}.`, "good");
+    this.metricsDirty = true;
+    this.updateMetrics();
+    this.updateForecast();
+    return true;
+  }
+
+  public rejectProposal(): boolean {
+    const proposal = this.state.proposal;
+    if (!proposal || proposal.status !== "pending") return false;
+    proposal.status = "rejected";
+    this.state.metrics.harmony = clamp(this.state.metrics.harmony - 4);
+    this.addMessage(`COUNCIL · Rejected: ${proposal.title}. The species will remember.`, "warning");
+    this.metricsDirty = true;
+    return true;
+  }
+
+  public rewindForecast(delta: number): void {
+    const history = this.state.forecastHistory;
+    if (history.length === 0) return;
+    this.state.forecastCursor = Math.max(0, Math.min(history.length - 1, this.state.forecastCursor + delta));
+    const snapshot = history[this.state.forecastCursor];
+    if (snapshot) this.state.forecast = snapshot;
   }
 
   public setDistrictFocus(type: DistrictType): void {
@@ -645,7 +733,7 @@ export class MosslightSimulation {
     this.nextBuildingId = payload.nextBuildingId;
     this.resourceWarningLevels = payload.resourceWarningLevels;
     this.housingMessageBand = payload.housingMessageBand;
-    this.state = payload.state;
+    this.state = normalizeWorld(payload.state, payload.state.grid);
     this.reindexBuildings();
     this.metricsDirty = true;
     this.updateMetrics();
@@ -728,6 +816,16 @@ export class MosslightSimulation {
       departures: 0,
       onboardingStep: 0,
       onboardingDismissed: false,
+      waterQuality: createWaterQuality(grid),
+      habitatStress: 0,
+      births: 0,
+      cloudmothsArrived: false,
+      longShadeCrisis: false,
+      proposal: null,
+      forecastHistory: [],
+      forecastCursor: 0,
+      marketShortages: [],
+      titleSeen: false,
     };
 
     state.metrics = this.calculateMetrics(state);
@@ -890,7 +988,7 @@ export class MosslightSimulation {
     if (!home || !market || !farm || !grove) return undefined;
 
     const species = speciesOrder[index % speciesOrder.length]!;
-    const work = species === "brambleback" ? home : species === "glowtail" ? grove : farm;
+    const work = species === "brambleback" ? home : species === "mireling" ? farm : grove;
     const offset = { x: (index % 5) - 2, y: Math.floor(index / 5) % 3 - 1 };
     const age = this.rng.int(ADULT_AGE, 30);
     return {
@@ -949,6 +1047,7 @@ export class MosslightSimulation {
     this.updateExpeditions();
     this.updateCrafting();
     this.updateUpgrades();
+    this.updateWaterAndHabitat();
     this.updateResources();
     // Residents read metrics (housing pressure), so refresh once before they act.
     this.updateMetrics();
@@ -957,6 +1056,11 @@ export class MosslightSimulation {
     this.maybeAssignWant();
     this.updateWants();
     this.maybeWelcomeResident();
+    if (dayRolled) {
+      this.maybeBirth();
+      this.maybeIssueProposal();
+      this.maybeArriveCloudmoths();
+    }
     // Everything that could change population, needs, or buildings has now run.
     this.updateMetrics();
     this.checkResourceWarnings();
@@ -1153,12 +1257,18 @@ export class MosslightSimulation {
       1,
     );
 
+    const basinQuality = this.averageWaterQuality();
+    const habitatPenalty = 1 - Math.min(0.28, this.state.habitatStress * 0.012);
     this.state.resources.food = clamp(
-      this.state.resources.food + farmOutput * 1.0 * farmFactor * rivalryDrag - population * 0.022,
+      this.state.resources.food + farmOutput * 1.0 * farmFactor * rivalryDrag * habitatPenalty - population * 0.022,
     );
     this.state.resources.water = clamp(
-      this.state.resources.water + farmOutput * 0.58 * farmFactor * rivalryDrag - population * 0.014,
+      this.state.resources.water
+        + farmOutput * 0.58 * farmFactor * rivalryDrag * (0.65 + basinQuality / 280)
+        - population * 0.014
+        - this.state.habitatStress * 0.02,
     );
+    this.state.marketShortages = marketShortages(this.state.buildings, this.state.resources.food);
     this.state.resources.warmth = clamp(
       this.state.resources.warmth + homeOutput * 0.55 - population * 0.012 + craftedResin * 0.18 + seasonalWarmth - seasonalDrain,
     );
@@ -1250,10 +1360,25 @@ export class MosslightSimulation {
       let target: Vec2 | undefined = this.buildingIndex.get(resident.workplaceId)?.position;
       let explanation = "Following a familiar routine.";
 
-      if (mostPressing === "food" && market) {
+      if (this.state.phase === "night" && resident.species === "mireling") {
+        goal = "rest";
+        target = this.buildingIndex.get(resident.homeId)?.position;
+        explanation = "Night belongs to the water. I am sleeping until dawn.";
+      } else if (this.state.phase === "night" && resident.species === "glowtail" && grove) {
+        goal = "work";
+        target = grove.position;
+        explanation = "Night is when Glowtails keep the lantern routes.";
+      } else if (this.state.phase === "night" && resident.species === "cloudmoth") {
+        goal = "explore";
+        target = grove?.position ?? this.buildingIndex.get(resident.homeId)?.position;
+        explanation = "I am reading the weather of the Long Shade.";
+      } else if (mostPressing === "food" && market) {
         goal = "forage";
         target = market.position;
-        explanation = "Food is becoming uncertain, so I am heading toward the market.";
+        const shortage = this.state.marketShortages.find((entry) => entry.buildingId === market.id);
+        explanation = shortage && shortage.pressure > 0.4
+          ? "This market street is empty. I am hoping another stall still has food."
+          : "Food is becoming uncertain, so I am heading toward the market.";
       } else if (mostPressing === "safety" && grove) {
         goal = "explore";
         target = grove.position;
@@ -1556,14 +1681,14 @@ export class MosslightSimulation {
     const housingCapacity = this.getHousingCapacity(state.buildings);
     const housingPressure = population / Math.max(1, housingCapacity);
     let needsTotal = 0;
-    const speciesCounts: Record<Species, number> = { brambleback: 0, glowtail: 0, mireling: 0 };
+    const speciesCounts: Record<Species, number> = { brambleback: 0, glowtail: 0, mireling: 0, cloudmoth: 0 };
     for (const resident of state.residents) {
       needsTotal += (resident.needs.shelter + resident.needs.food + resident.needs.safety + resident.needs.belonging) / 4;
       speciesCounts[resident.species] += 1;
     }
     const averageWellbeing = needsTotal / Math.max(1, population);
     const resourceSecurity = (state.resources.food + state.resources.water + state.resources.warmth + state.resources.light) / 4;
-    const largestSpeciesShare = Math.max(speciesCounts.brambleback, speciesCounts.glowtail, speciesCounts.mireling, 0) / Math.max(1, population);
+    const largestSpeciesShare = Math.max(speciesCounts.brambleback, speciesCounts.glowtail, speciesCounts.mireling, speciesCounts.cloudmoth, 0) / Math.max(1, population);
     const speciesMix = clamp(1 - largestSpeciesShare, 0, 1);
     const housingHealth = clamp(1 - Math.max(0, housingPressure - 0.75) / 0.5, 0, 1);
     const marketBonus = this.countBuildings("commons-market", state) > 0 ? 5 : 0;
@@ -1739,11 +1864,95 @@ export class MosslightSimulation {
     return this.state.residents.find((resident) => resident.id === id);
   }
 
+  private updateWaterAndHabitat(): void {
+    const result = tickWaterQuality(this.state.grid, this.state.waterQuality, this.state.buildings);
+    this.state.waterQuality = result.quality;
+    this.state.habitatStress = result.stress;
+  }
+
+  private averageWaterQuality(state: WorldState = this.state): number {
+    let total = 0;
+    let count = 0;
+    if (!state?.waterQuality) return 70;
+    for (const row of state.waterQuality) {
+      for (const value of row) {
+        total += value;
+        count += 1;
+      }
+    }
+    return count ? total / count : 70;
+  }
+
+  private maybeIssueProposal(): void {
+    if (this.state.day % 7 !== 0) return;
+    if (this.state.proposal?.status === "pending") return;
+    this.state.proposal = nextProposal(this.state.day, this.state.chapter, nextProposalId++);
+    this.addMessage(`COUNCIL · ${this.state.proposal.title}`, "info");
+  }
+
+  private maybeBirth(): void {
+    if (this.state.metrics.housingAvailable < 1) return;
+    if (this.state.residents.length >= MAX_POPULATION) return;
+    const families = this.state.relationships.filter((relationship) => relationship.kind === "family" && relationship.strength > 70);
+    if (families.length === 0 || this.rng.next() > 0.35) return;
+    const family = this.rng.pick(families);
+    const parent = this.state.residents.find((resident) => resident.id === family.aId);
+    if (!parent) return;
+    const child = this.createResident(this.state.residents.length, this.state.buildings);
+    if (!child) return;
+    child.age = 0;
+    child.stage = "sprout";
+    child.species = parent.species;
+    child.homeId = parent.homeId;
+    child.skills = { farming: 2, crafting: 2, scouting: 2 };
+    this.state.residents.push(child);
+    this.state.births += 1;
+    this.state.relationships.push({
+      id: `relationship-birth-${this.state.births}`,
+      aId: parent.id,
+      bId: child.id,
+      kind: "family",
+      strength: 80,
+      sharedDays: 0,
+    });
+    this.metricsDirty = true;
+    this.addMessage(`BIRTH · ${child.name} arrived in ${parent.name}'s burrow.`, "good");
+    this.emit({ type: "arrival", position: child.position, label: child.name, tone: "good" });
+  }
+
+  private maybeArriveCloudmoths(): void {
+    if (this.state.cloudmothsArrived) return;
+    const shade = this.state.season === "longshade" || this.state.chapter >= 2;
+    if (!shade || this.state.metrics.harmony < 55) return;
+    this.spawnCloudmoths(3);
+  }
+
+  private spawnCloudmoths(count: number): void {
+    this.state.cloudmothsArrived = true;
+    this.state.longShadeCrisis = this.state.season === "longshade";
+    let spawned = 0;
+    for (let index = 0; index < count; index += 1) {
+      const resident = this.createResident(this.state.residents.length + index, this.state.buildings);
+      if (!resident) continue;
+      resident.species = "cloudmoth";
+      resident.age = this.rng.int(8, 20);
+      resident.stage = "adult";
+      resident.lastDecisionExplanation = "We followed the last healthy roots.";
+      this.state.residents.push(resident);
+      spawned += 1;
+    }
+    if (spawned > 0) {
+      this.addMessage(`LONG SHADE · ${spawned} Cloudmoths found the Commons.`, "good");
+    }
+  }
+
   // --- Forecast -----------------------------------------------------------
 
   private updateForecast(): void {
     const localForecast = this.calculateLocalForecast();
     this.localForecast = localForecast;
+    this.state.forecastHistory = pushForecastHistory(this.state.forecastHistory, localForecast);
+    this.state.forecastCursor = this.state.forecastHistory.length - 1;
 
     // A live Torx+THRML result owns the visible forecast until the adapter
     // explicitly replaces it or the main loop requests a local fallback.
@@ -1807,6 +2016,20 @@ export class MosslightSimulation {
           `${state.residents.filter((resident) => resident.species === "brambleback").length} Bramblebacks are exploring`,
           `${Math.max(0, state.metrics.housingAvailable)} open housing spaces`,
           `${seasonNote} · open ground remains nearby`,
+        ],
+      },
+      {
+        ...EVENT_COPY.longShade,
+        probability: clamp(
+          (state.season === "longshade" ? 0.42 : 0.08) + (state.cloudmothsArrived ? 0.12 : 0.2) + (100 - this.averageWaterQuality(state)) / 400,
+          0.05,
+          0.94,
+        ),
+        window: "this season",
+        drivers: [
+          `${seasonNote} · habitat stain ${state.habitatStress}`,
+          `water quality ${Math.round(this.averageWaterQuality(state))}%`,
+          state.cloudmothsArrived ? "Cloudmoths are already among you" : "Cloudmoths have not yet arrived",
         ],
       },
     ];
@@ -1963,7 +2186,7 @@ function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 export interface SavePayload {
   version: number;
@@ -2121,6 +2344,30 @@ function createObjectives(): Objective[] {
       rewardItem: "moonwater",
       rewardAmount: 5,
       chapter: 2,
+    },
+    {
+      id: "welcome-the-shade",
+      title: "Welcome the Long Shade",
+      description: "Hold the Commons through a Longshade season with Cloudmoths present.",
+      kind: "harmony",
+      target: 70,
+      progress: 0,
+      completed: false,
+      rewardItem: "resin",
+      rewardAmount: 5,
+      chapter: 3,
+    },
+    {
+      id: "pack-the-roads",
+      title: "Pack the Roads",
+      description: "Lay six new packed-earth paths so motes stop cutting through the reeds.",
+      kind: "build",
+      target: 6,
+      progress: 0,
+      completed: false,
+      rewardItem: "seed-pod",
+      rewardAmount: 4,
+      chapter: 3,
     },
   ];
 }

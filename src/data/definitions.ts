@@ -3,6 +3,7 @@ import type {
   CollectibleTile,
   DistrictType,
   ItemKey,
+  ProposalKind,
   RecipeKey,
   ResourceKey,
   Season,
@@ -211,6 +212,45 @@ export const SPECIES_DEFINITIONS: Record<
     accent: "#C8A9FF",
     role: "growers and mediators",
   },
+  cloudmoth: {
+    label: "Cloudmoth",
+    color: "#C8A9FF",
+    accent: "#F5E6C8",
+    role: "artists and weather-readers",
+  },
+};
+
+export const PATH_COST = { warmth: 2, food: 1 } as const;
+
+export const PROPOSAL_DEFINITIONS: Record<
+  ProposalKind,
+  { title: string; body: string; species: Species }
+> = {
+  "shelter-first": {
+    title: "Brambleback Council: Shelter First",
+    body: "Raise another burrow before the next harvest. Housing is the only warmth that lasts.",
+    species: "brambleback",
+  },
+  "wetland-first": {
+    title: "Mireling Circle: Keep the Reeds Quiet",
+    body: "Hold lanterns back from the water. Farms and wetlands need room to breathe.",
+    species: "mireling",
+  },
+  "market-first": {
+    title: "Glowtail Caravan: Open the Stalls",
+    body: "A second market route would stop the empty shelves from spreading street by street.",
+    species: "glowtail",
+  },
+  "lantern-first": {
+    title: "Glowtail Nightwatch: Light the Paths",
+    body: "Night work needs lanterns. Without them the traders walk in the dark.",
+    species: "glowtail",
+  },
+  "welcome-moths": {
+    title: "Steward's Oath: Welcome the Cloudmoths",
+    body: "The Long Shade is coming. Prepare a bright, mixed neighborhood for the moths.",
+    species: "cloudmoth",
+  },
 };
 
 export interface BuildingDefinition {
@@ -278,9 +318,9 @@ export const BUILDING_DEFINITIONS: Record<BuildingType, BuildingDefinition> = {
 /** Copy shown by the first-run onboarding walkthrough. */
 export const ONBOARDING_STEPS: Array<{ title: string; body: string; hint: string }> = [
   {
-    title: "Welcome to the Commons",
-    body: "You tend a basin, not an empire. Residents make their own choices; you shape the ground they choose from.",
-    hint: "The map is live. Click any creature to follow what it is thinking.",
+    title: "Steward of the Commons",
+    body: "The Great Canopy is receding. You arrived with a broken survey map and a seed of Mosslight. Shape conditions. The motes decide the rest.",
+    hint: "Click any creature. Their note tells you why they moved.",
   },
   {
     title: "Gather the wild",
@@ -324,5 +364,10 @@ export const EVENT_COPY = {
     title: "Unmapped Burrow",
     recommendation: "Inspect the new route before building over it.",
     tone: "calm" as const,
+  },
+  longShade: {
+    title: "Long Shade Crossing",
+    recommendation: "Keep lanterns lit and welcome the Cloudmoths before the canopy fails.",
+    tone: "warning" as const,
   },
 };

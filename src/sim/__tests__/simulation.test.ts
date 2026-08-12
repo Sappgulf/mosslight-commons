@@ -347,6 +347,43 @@ describe("MosslightSimulation", () => {
     });
   });
 
+  describe("civic expansion", () => {
+    it("packs a grass path and refuses water", () => {
+      simulation.state.resources = { food: 80, water: 80, warmth: 80, light: 80 };
+      const cell = findBuildableTile(simulation);
+      expect(simulation.paintPath(cell)).toBe(true);
+      expect(simulation.state.grid[cell.y]![cell.x]).toBe("path");
+      expect(simulation.paintPath({ x: 1, y: 20 })).toBe(false);
+    });
+
+    it("approves a council proposal and records forecast history", () => {
+      advance(simulation, 12);
+      expect(simulation.state.forecastHistory.length).toBeGreaterThan(0);
+      simulation.state.proposal = {
+        id: "test",
+        kind: "lantern-first",
+        title: "Light",
+        body: "More light",
+        species: "glowtail",
+        status: "pending",
+        createdDay: simulation.state.day,
+      };
+      const light = simulation.state.resources.light;
+      expect(simulation.approveProposal()).toBe(true);
+      expect(simulation.state.resources.light).toBeGreaterThan(light);
+      simulation.rewindForecast(-1);
+      expect(simulation.state.forecastCursor).toBeGreaterThanOrEqual(0);
+    });
+
+    it("stains water near farms over time", () => {
+      const before = simulation.state.waterQuality.flat().reduce((sum, value) => sum + value, 0);
+      advance(simulation, 24);
+      const after = simulation.state.waterQuality.flat().reduce((sum, value) => sum + value, 0);
+      expect(Number.isFinite(after)).toBe(true);
+      expect(after).not.toBe(before);
+    });
+  });
+
   describe("serialization", () => {
     it("round-trips a mid-game world exactly", () => {
       advance(simulation, 150);

@@ -571,3 +571,36 @@ kbd {
   line-height: 1.5;
 }
 .want-note.is-impatient { border-left-color: var(--warning); background: rgba(232, 121, 104, 0.12); color: #f0c4bb; }
+
+.resident-portrait {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(245, 230, 200, 0.25);
+  background: #12352f;
+}
+.petition, .petition-empty { margin: 6px 0 0; color: var(--paper); font-size: 10px; line-height: 1.45; }
+.petition { padding-left: 8px; border-left: 2px solid var(--gold); }
+.forecast-rewind { display: flex; gap: 6px; margin-top: 8px; }
+.forecast-rewind button, .council-actions button {
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: rgba(8, 21, 27, 0.55);
+  color: var(--paper);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+.council-card { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(245, 230, 200, 0.12); }
+.council-card p { color: var(--muted); font-size: 10px; }
+.council-actions { display: flex; gap: 6px; margin-top: 6px; }
+.title-overlay .overlay-card--title {
+  max-width: 440px;
+  background: linear-gradient(160deg, rgba(18, 53, 47, 0.98), rgba(8, 21, 27, 0.98));
+  border: 1px solid rgba(244, 184, 91, 0.35);
+  font-family: Georgia, serif;
+}
+.title-overlay h2 { font-size: 32px; margin: 8px 0; color: var(--paper); }
+.day-card small { display: block; color: var(--muted); margin-top: 3px; letter-spacing: 0.08em; }

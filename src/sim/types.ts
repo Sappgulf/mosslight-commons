@@ -1,4 +1,4 @@
-export type Species = "brambleback" | "glowtail" | "mireling";
+export type Species = "brambleback" | "glowtail" | "mireling" | "cloudmoth";
 
 export type ResourceKey = "food" | "water" | "warmth" | "light";
 
@@ -31,6 +31,26 @@ export type BuildingType =
   | "lantern-grove"
   | "commons-market"
   | "root-workshop";
+
+/** Tools the player can hold. Paths are a terrain verb, not a building. */
+export type BuildTool = Exclude<BuildingType, "root-heart"> | "path";
+
+export type ProposalKind = "shelter-first" | "wetland-first" | "market-first" | "lantern-first" | "welcome-moths";
+
+export interface CouncilProposal {
+  id: string;
+  kind: ProposalKind;
+  title: string;
+  body: string;
+  species: Species;
+  status: "pending" | "approved" | "rejected";
+  createdDay: number;
+}
+
+export interface MarketShortage {
+  buildingId: string;
+  pressure: number;
+}
 
 export type ResidentGoal = "rest" | "forage" | "work" | "socialize" | "explore";
 
@@ -251,7 +271,7 @@ export interface WorldState {
   /** Full ledger history, newest first, capped for memory. */
   history: Message[];
   selectedResidentId: string;
-  buildMode: Exclude<BuildingType, "root-heart"> | null;
+  buildMode: BuildTool | null;
   paused: boolean;
   speed: 1 | 2 | 4;
   status: SettlementStatus;
@@ -260,4 +280,16 @@ export interface WorldState {
   departures: number;
   onboardingStep: number;
   onboardingDismissed: boolean;
+  /** Per-tile water cleanliness 0–100. Farms stain it; wetlands restore it. */
+  waterQuality: number[][];
+  /** Derived civic stain from lanterns and farms sitting on wild ground. */
+  habitatStress: number;
+  births: number;
+  cloudmothsArrived: boolean;
+  longShadeCrisis: boolean;
+  proposal: CouncilProposal | null;
+  forecastHistory: Forecast[];
+  forecastCursor: number;
+  marketShortages: MarketShortage[];
+  titleSeen: boolean;
 }

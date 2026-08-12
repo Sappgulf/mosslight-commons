@@ -25,15 +25,15 @@ The upstream Torx checkout remains at the parent workspace root. This folder is 
 In one terminal:
 
 ```bash
-cd /Users/austinbeatty/Documents/ChatGPT/torx/creaturecity
+cd mosslight-commons
+npm install
 npm run dev
 ```
 
-In a second terminal, enable the live Torx/THRML forecast bridge:
+The optional Torx/THRML sidecar is only for localhost research. On Vercel the HUD stays on `LOCAL MODEL`. To run the sidecar locally:
 
 ```bash
-cd /Users/austinbeatty/Documents/ChatGPT/torx/creaturecity
-../.venv/bin/python sim/mosslight_sim.py
+python sim/mosslight_sim.py
 ```
 
 The browser prototype works without the second process by using its deterministic local forecast. When the bridge is running, the HUD changes to `TORX+THRML`. The bridge is only polled when the page is served from localhost, or when `VITE_TORX_ENDPOINT` is set.

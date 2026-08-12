@@ -42,6 +42,7 @@ export class AudioEngine {
   private ambientGain: GainNode | null = null;
   private ambientVoices: OscillatorNode[] = [];
   private currentPhase: WorldState["phase"] | null = null;
+  private lastHarmony = -1;
   private muted: boolean;
   private lastMessageId = 0;
 
@@ -132,7 +133,6 @@ export class AudioEngine {
       const oscillator = context.createOscillator();
       oscillator.type = "sine";
       oscillator.frequency.value = frequency;
-      // A slow detune keeps the pad from sounding like a test tone.
       oscillator.detune.value = (Math.random() - 0.5) * 8;
       oscillator.connect(ambientGain);
       oscillator.start();
@@ -140,6 +140,28 @@ export class AudioEngine {
     }
     this.ambientVoices = voices;
     ambientGain.gain.setTargetAtTime(tone.gain, context.currentTime, 1.5);
+  }
+
+  /** Extra chime voices as harmony rises — denser, not louder. */
+  setHarmony(harmony: number): void {
+    const context = this.context;
+    const ambientGain = this.ambientGain;
+    if (!context || !ambientGain || context.state !== "running" || this.muted) return;
+    const band = Math.floor(harmony / 25);
+    if (band === this.lastHarmony || band < 2) {
+      this.lastHarmony = band;
+      return;
+    }
+    this.lastHarmony = band;
+    const extra = band === 3 ? [329.63, 392] : [329.63];
+    for (const frequency of extra) {
+      const oscillator = context.createOscillator();
+      oscillator.type = "triangle";
+      oscillator.frequency.value = frequency;
+      oscillator.connect(ambientGain);
+      oscillator.start();
+      this.ambientVoices.push(oscillator);
+    }
   }
 
   /**
