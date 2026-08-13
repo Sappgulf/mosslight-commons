@@ -12,6 +12,8 @@ import {
   UPGRADE_COSTS,
 } from "../data/definitions";
 import { MosslightSimulation } from "../sim/simulation";
+import { crisisBanner } from "../sim/crisis";
+import { WANT_GLYPH } from "../sim/wants";
 import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
 
 const resourceOrder: ResourceKey[] = ["food", "water", "warmth", "light"];
@@ -44,6 +46,7 @@ export interface HUDCallbacks {
   onImport: (file: File) => void;
   onToggleMute: () => boolean;
   isMuted: () => boolean;
+  onFocusResident: (id: string) => void;
 }
 
 const formatResourceName = (resource: ResourceKey): string => RESOURCE_DEFINITIONS[resource].label.toUpperCase();
@@ -250,6 +253,35 @@ export class HUD {
     this.setText("[data-season-event-days]", `${state.seasonalEvent.daysRemaining} DAYS LEFT`);
     const seasonEvent = this.root.querySelector<HTMLElement>("[data-season-event]");
     if (seasonEvent) seasonEvent.dataset.tone = state.seasonalEvent.tone;
+    const lesson = this.simulation.forecastLesson();
+    const lessonEl = this.root.querySelector<HTMLElement>("[data-forecast-lesson]");
+    if (lessonEl) {
+      lessonEl.hidden = lesson.length === 0;
+      lessonEl.replaceChildren(...lesson.map((line) => {
+        const item = document.createElement("li");
+        item.textContent = line;
+        return item;
+      }));
+    }
+    const cursor = this.simulation.state.forecastCursor + 1;
+    const total = Math.max(1, this.simulation.state.forecastHistory.length);
+    this.setText("[data-forecast-cursor]", `${cursor}/${total}`);
+    const crisis = this.root.querySelector<HTMLElement>("[data-crisis]");
+    const banner = crisisBanner(this.simulation.state);
+    if (crisis) {
+      crisis.hidden = !banner;
+      crisis.textContent = banner ?? "";
+      crisis.dataset.tone = this.simulation.state.longShadeOutcome === "thrived" ? "good" : "warning";
+    }
+    const policies = this.root.querySelector<HTMLElement>("[data-policies]");
+    if (policies) {
+      policies.replaceChildren(...this.simulation.state.activePolicies.map((policy) => {
+        const item = document.createElement("span");
+        item.className = "policy-chip";
+        item.textContent = `${policy.label} · ${policy.daysRemaining}d`;
+        return item;
+      }));
+    }
     const forecastBar = this.root.querySelector<HTMLElement>("[data-forecast-fill]");
     if (forecastBar) forecastBar.style.width = `${Math.round(forecast.probability * 100)}%`;
     const forecastMeter = this.root.querySelector<HTMLElement>("[data-forecast-meter]");
@@ -575,9 +607,13 @@ export class HUD {
       return;
     }
     list.replaceChildren(...open.map((resident) => {
-      const item = document.createElement("p");
+      const item = document.createElement("button");
+      item.type = "button";
       item.className = "petition";
-      item.textContent = resident.want?.description ?? "";
+      item.dataset.focusResident = resident.id;
+      const waited = this.simulation.state.day - (resident.want?.createdDay ?? 0);
+      item.classList.toggle("is-impatient", waited > 6);
+      item.textContent = `${WANT_GLYPH[resident.want!.kind]} ${resident.want?.description ?? ""}`;
       return item;
     }));
   }
@@ -591,6 +627,19 @@ export class HUD {
     if (!pending || !proposal) return;
     this.setText("[data-council-title]", proposal.title);
     this.setText("[data-council-body]", proposal.body);
+    this.setText(
+      "[data-council-deadline]",
+      `Vote by day ${proposal.deadlineDay} · ${Math.max(0, proposal.deadlineDay - this.simulation.state.day)} days left`,
+    );
+    const votes = this.root.querySelector<HTMLElement>("[data-council-votes]");
+    if (votes) {
+      votes.replaceChildren(...(proposal.votes ?? []).map((vote) => {
+        const item = document.createElement("span");
+        item.className = `vote vote--${vote.stance}`;
+        item.textContent = `${vote.species} ${vote.stance} (${vote.weight})`;
+        return item;
+      }));
+    }
   }
 
   /** First-run walkthrough. */
@@ -613,6 +662,15 @@ export class HUD {
 
   private handleClick(event: Event): void {
     const target = event.target as HTMLElement;
+
+    const petition = target.closest<HTMLButtonElement>("[data-focus-resident]");
+    if (petition?.dataset.focusResident) {
+      this.simulation.selectResident(petition.dataset.focusResident);
+      this.callbacks.onFocusResident(petition.dataset.focusResident);
+      this.render();
+      this.callbacks.onChange();
+      return;
+    }
 
     const fieldTab = target.closest<HTMLButtonElement>("[data-field-tab]");
     if (fieldTab?.dataset.fieldTab === "field" || fieldTab?.dataset.fieldTab === "civic") {
@@ -938,14 +996,19 @@ export class HUD {
         <div class="forecast-probability"><strong data-forecast-probability>65% likely</strong><span class="forecast-meter" data-forecast-meter role="progressbar" aria-label="Forecast probability" aria-valuemin="0" aria-valuemax="100" aria-valuenow="65"><i data-forecast-fill></i></span></div>
         <ul class="driver-list" data-forecast-drivers aria-label="Forecast drivers"></ul>
         <p class="recommendation" data-forecast-recommendation></p>
+        <p class="crisis-banner" data-crisis hidden></p>
+        <div class="policy-row" data-policies></div>
         <div class="forecast-rewind" role="group" aria-label="Forecast history">
-          <button type="button" data-action="forecast-back">◂ LAST</button>
-          <button type="button" data-action="forecast-forward">NEXT ▸</button>
+          <button type="button" data-action="forecast-back">◂ THEN</button>
+          <span data-forecast-cursor>1/1</span>
+          <button type="button" data-action="forecast-forward">NOW ▸</button>
         </div>
+        <ul class="forecast-lesson" data-forecast-lesson hidden></ul>
         <section class="council-card" data-council hidden>
-          <div class="panel-eyebrow"><span>SPECIES COUNCIL</span></div>
+          <div class="panel-eyebrow"><span>SPECIES COUNCIL</span><span data-council-deadline></span></div>
           <strong data-council-title></strong>
           <p data-council-body></p>
+          <div class="council-votes" data-council-votes></div>
           <div class="council-actions">
             <button type="button" class="dispatch-button" data-action="approve-proposal">APPROVE</button>
             <button type="button" class="ghost-button" data-action="reject-proposal">REJECT</button>

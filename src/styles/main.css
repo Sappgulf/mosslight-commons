@@ -581,8 +581,42 @@ kbd {
   background: #12352f;
 }
 .petition, .petition-empty { margin: 6px 0 0; color: var(--paper); font-size: 10px; line-height: 1.45; }
-.petition { padding-left: 8px; border-left: 2px solid var(--gold); }
-.forecast-rewind { display: flex; gap: 6px; margin-top: 8px; }
+.petition {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0;
+  border-left: 2px solid var(--gold);
+  background: transparent;
+  color: var(--paper);
+  cursor: pointer;
+}
+.petition.is-impatient { border-left-color: var(--warning); color: #f0c4bb; }
+.forecast-lesson { margin: 6px 0 0; padding-left: 14px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.crisis-banner {
+  margin: 8px 0 0;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(232, 121, 104, 0.14);
+  color: #f0c4bb;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.crisis-banner[data-tone="good"] { background: rgba(141, 187, 114, 0.16); color: #c5dd8c; }
+.policy-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.policy-chip {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(99, 230, 212, 0.12);
+  color: #9ee8dc;
+  font-size: 9px;
+}
+.council-votes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.vote { font-size: 9px; padding: 2px 6px; border-radius: 999px; background: rgba(245, 230, 200, 0.08); }
+.vote--for { color: #c5dd8c; }
+.vote--against { color: #e87968; }
+.forecast-rewind { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
 .forecast-rewind button, .council-actions button {
   min-height: 24px;
   padding: 0 8px;

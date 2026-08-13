@@ -2,6 +2,7 @@ import Phaser from "phaser";
 
 import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS } from "../data/definitions";
 import { MosslightSimulation, type SimEvent } from "../sim/simulation";
+import { WANT_GLYPH } from "../sim/wants";
 import type { BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
 import { Effects } from "./Effects";
 import { LightLayer, type LightSource } from "./LightLayer";
@@ -124,8 +125,11 @@ interface ResidentView {
   body: Phaser.GameObjects.Container;
   sprite: Phaser.GameObjects.Image | null;
   label: Phaser.GameObjects.Text;
+  wantMark: Phaser.GameObjects.Text;
   lastGoal: ResidentGoal | null;
   lastSelected: boolean | null;
+  lastWant: string | null;
+  walking: boolean;
   /** Per-resident phase offset so the idle bob is not in lockstep. */
   bobPhase: number;
 }
@@ -154,6 +158,7 @@ const DEPTH = {
   terrain: 1,
   districts: 2,
   rootNetwork: 3,
+  water: 2.5,
   hover: 4,
   intent: 5,
   entities: 10,
@@ -168,6 +173,7 @@ export class WorldScene extends Phaser.Scene {
   private readonly onBuildingSelected: (buildingId: string) => void;
 
   private terrain!: TerrainPainter;
+  private waterOverlay!: Phaser.GameObjects.Graphics;
   private light!: LightLayer;
   private effects!: Effects;
   private districtLayer!: Phaser.GameObjects.Container;
@@ -252,6 +258,7 @@ export class WorldScene extends Phaser.Scene {
       height: GRID_H,
     }).setDepth(DEPTH.terrain);
 
+    this.waterOverlay = this.add.graphics().setDepth(DEPTH.water);
     this.districtLayer = this.add.container(0, 0).setDepth(DEPTH.districts);
     this.rootNetwork = this.add.graphics().setDepth(DEPTH.rootNetwork);
     this.hoverLayer = this.add.graphics().setDepth(DEPTH.hover);
@@ -401,6 +408,38 @@ export class WorldScene extends Phaser.Scene {
     return Math.min(VIEW_W / (BOARD_W + 120), VIEW_H / (BOARD_H + 120));
   }
 
+  public focusResident(id: string): void {
+    const resident = this.simulation.state.residents.find((candidate) => candidate.id === id);
+    if (!resident) return;
+    const center = this.cellCenter(resident.position);
+    this.cameras.main.pan(center.x, center.y, 280, "Sine.easeInOut");
+    this.renderNow();
+  }
+
+  private drawWaterOverlay(): void {
+    this.waterOverlay.clear();
+    const quality = this.simulation.state.waterQuality;
+    if (!quality) return;
+    const night = this.simulation.state.phase === "night" || this.simulation.state.phase === "dusk";
+    for (let y = 0; y < GRID_H; y += 1) {
+      for (let x = 0; x < GRID_W; x += 1) {
+        const tile = this.simulation.state.grid[y]?.[x];
+        const value = quality[y]?.[x] ?? 70;
+        if (tile !== "water" && tile !== "wetland") continue;
+        if (value > 72 && !night) continue;
+        const stain = Math.max(0, (72 - value) / 72);
+        const alpha = (night ? 0.08 : 0) + stain * 0.28;
+        if (alpha < 0.04) continue;
+        this.waterOverlay.fillStyle(value < 40 ? 0x6b3a2a : 0x1b4a58, alpha);
+        this.waterOverlay.fillRect(OFFSET_X + x * TILE_SIZE, OFFSET_Y + y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+      }
+    }
+    if (this.simulation.state.longShadeCrisis) {
+      this.waterOverlay.fillStyle(0x061031, 0.1);
+      this.waterOverlay.fillRect(OFFSET_X, OFFSET_Y, BOARD_W, BOARD_H);
+    }
+  }
+
   // --- Sim events ---------------------------------------------------------
 
   private handleSimEvent(event: SimEvent): void {
@@ -456,6 +495,7 @@ export class WorldScene extends Phaser.Scene {
     if (!this.ready) return;
     this.input.setDefaultCursor(this.simulation.state.buildMode ? "crosshair" : "grab");
     this.repaintTerrainIfChanged();
+    this.drawWaterOverlay();
     this.drawDistrictsIfChanged();
     this.drawRootNetwork();
     this.syncBuildings();
@@ -478,7 +518,21 @@ export class WorldScene extends Phaser.Scene {
 
     // Idle bob keeps the board alive between ticks.
     for (const view of this.residentViews.values()) {
-      view.body.y = Math.sin(t * 2.4 + view.bobPhase) * 1.6 - 5;
+      if (view.walking) {
+        const frame = Math.floor(t * 8 + view.bobPhase) % 4;
+        const lift = frame === 1 || frame === 3 ? -7.2 : -5.2;
+        view.body.y = lift;
+        if (view.sprite) {
+          view.sprite.setDisplaySize(frame === 2 ? 28 : 30, frame === 0 ? 34 : 38);
+          view.sprite.rotation = (frame === 1 ? 0.08 : frame === 3 ? -0.08 : 0);
+        }
+      } else {
+        view.body.y = Math.sin(t * 2.4 + view.bobPhase) * 1.6 - 5;
+        if (view.sprite) {
+          view.sprite.setDisplaySize(30, 37);
+          view.sprite.rotation = 0;
+        }
+      }
     }
     for (const view of this.nodeViews.values()) {
       view.sprite.setScale(
@@ -883,8 +937,15 @@ export class WorldScene extends Phaser.Scene {
           backgroundColor: "#08151bcc",
           padding: { x: 5, y: 3 },
         }).setOrigin(0.5, 1).setVisible(false);
+        const wantMark = this.add.text(10, -22, "", {
+          color: "#ffd58b",
+          fontFamily: "Georgia, serif",
+          fontSize: "13px",
+          stroke: "#08151b",
+          strokeThickness: 3,
+        }).setOrigin(0.5, 1).setVisible(false);
 
-        container.add([shadow, marker, body, label]);
+        container.add([shadow, marker, body, label, wantMark]);
         this.entityLayer.add(container);
         view = {
           container,
@@ -893,8 +954,11 @@ export class WorldScene extends Phaser.Scene {
           body,
           sprite,
           label,
+          wantMark,
           lastGoal: null,
           lastSelected: null,
+          lastWant: null,
+          walking: false,
           bobPhase: Math.random() * Math.PI * 2,
         };
         this.residentViews.set(resident.id, view);
@@ -914,6 +978,20 @@ export class WorldScene extends Phaser.Scene {
         view.container.setPosition(center.x, center.y);
       }
       view.container.setDepth(center.y + 1);
+
+      view.walking = resident.path.length > 0 || resident.goal === "explore";
+      const wantKey = resident.want && !resident.want.fulfilled ? `${resident.want.kind}:${resident.want.createdDay}` : "";
+      if (view.lastWant !== wantKey) {
+        view.lastWant = wantKey;
+        if (resident.want && !resident.want.fulfilled) {
+          const impatient = this.simulation.state.day - resident.want.createdDay > 6;
+          view.wantMark.setText(WANT_GLYPH[resident.want.kind]);
+          view.wantMark.setColor(impatient ? "#e87968" : "#ffd58b");
+          view.wantMark.setVisible(true);
+        } else {
+          view.wantMark.setVisible(false);
+        }
+      }
 
       // Face the direction of travel.
       if (view.sprite && resident.path.length > 0) {

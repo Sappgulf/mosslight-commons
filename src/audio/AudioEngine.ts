@@ -153,7 +153,7 @@ export class AudioEngine {
       return;
     }
     this.lastHarmony = band;
-    const extra = band === 3 ? [329.63, 392] : [329.63];
+    const extra = band >= 3 ? [329.63, 392, 493.88] : band === 2 ? [329.63, 392] : [329.63];
     for (const frequency of extra) {
       const oscillator = context.createOscillator();
       oscillator.type = "triangle";
@@ -162,6 +162,7 @@ export class AudioEngine {
       oscillator.start();
       this.ambientVoices.push(oscillator);
     }
+    // Denser bed, same master gain — more voices, not more volume.
   }
 
   /**
@@ -182,7 +183,9 @@ export class AudioEngine {
     else if (text.startsWith("BUILD ·")) this.play("build");
     else if (text.startsWith("GATHER")) this.play("gather");
     else if (text.startsWith("CRAFT ·")) this.play("craft");
-    else if (text.startsWith("ARRIVAL")) this.play("arrival");
+    else if (text.startsWith("ARRIVAL") || (text.startsWith("LONG SHADE ·") && text.includes("moths"))) this.play("arrival");
+    else if (text.startsWith("COUNCIL · Approved") || text.startsWith("REQUEST MET")) this.play("objective");
+    else if (text.startsWith("COUNCIL") || text.startsWith("LONG SHADE")) this.play("warning");
     else if (newest.tone === "warning") this.play("warning");
   }
 }

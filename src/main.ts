@@ -47,6 +47,7 @@ const hud = new HUD(hudElement, simulation, {
   },
   onToggleMute: () => audio.toggleMute(),
   isMuted: () => audio.isMuted,
+  onFocusResident: (id) => worldScene?.focusResident(id),
 });
 
 worldScene = new WorldScene(
@@ -185,6 +186,7 @@ window.render_game_to_text = () => {
     habitatStress: state.habitatStress,
     births: state.births,
     cloudmothsArrived: state.cloudmothsArrived,
+    longShade: { crisis: state.longShadeCrisis, outcome: state.longShadeOutcome },
     proposal: state.proposal ? { kind: state.proposal.kind, status: state.proposal.status } : null,
     forecastHistory: state.forecastHistory.length,
     waterQuality: Math.round((state.waterQuality?.flat().reduce((sum, value) => sum + value, 0) ?? 0) / Math.max(1, state.waterQuality?.flat().length ?? 1)),

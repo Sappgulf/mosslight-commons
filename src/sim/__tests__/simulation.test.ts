@@ -367,12 +367,17 @@ describe("MosslightSimulation", () => {
         species: "glowtail",
         status: "pending",
         createdDay: simulation.state.day,
+        deadlineDay: simulation.state.day + 4,
+        votes: [{ species: "glowtail", stance: "for", weight: 3 }],
       };
       const light = simulation.state.resources.light;
       expect(simulation.approveProposal()).toBe(true);
       expect(simulation.state.resources.light).toBeGreaterThan(light);
+      expect(simulation.state.activePolicies.some((policy) => policy.kind === "lantern-first")).toBe(true);
+      expect(simulation.state.districtFocus).toBe("lantern");
       simulation.rewindForecast(-1);
       expect(simulation.state.forecastCursor).toBeGreaterThanOrEqual(0);
+      expect(Array.isArray(simulation.forecastLesson())).toBe(true);
     });
 
     it("stains water near farms over time", () => {
@@ -505,5 +510,43 @@ describe("MosslightSimulation · personal wants", () => {
     advance(simulation, 2);
     expect(resident.want).toBeUndefined();
     expect(resident.needs.belonging).toBeGreaterThan(before);
+  });
+});
+
+describe("MosslightSimulation · Long Shade and council", () => {
+  it("starts a timed Long Shade chapter and can resolve it", () => {
+    const simulation = new MosslightSimulation(SEED);
+    simulation.state.resources = { food: 90, water: 90, warmth: 90, light: 90 };
+    // Season 4 (longshade) begins after 21 days past start day 8.
+    advance(simulation, 12 * 22);
+    expect(simulation.state.season).toBe("longshade");
+    expect(simulation.state.longShadeCrisis).toBe(true);
+    expect(simulation.state.longShadeOutcome).toBe("pending");
+    expect(simulation.state.longShadeEndsDay).toBeGreaterThan(simulation.state.day);
+  });
+
+  it("expires unanswered council votes", () => {
+    const simulation = new MosslightSimulation(SEED);
+    simulation.state.proposal = {
+      id: "expire",
+      kind: "wetland-first",
+      title: "Reeds",
+      body: "Quiet water",
+      species: "mireling",
+      status: "pending",
+      createdDay: simulation.state.day,
+      deadlineDay: simulation.state.day,
+      votes: [],
+    };
+    advance(simulation, 14);
+    expect(simulation.state.proposal?.status).toBe("expired");
+  });
+
+  it("selects a resident by id", () => {
+    const simulation = new MosslightSimulation(SEED);
+    const id = simulation.state.residents[1]?.id;
+    expect(id).toBeTruthy();
+    expect(simulation.selectResident(id!)).toBe(true);
+    expect(simulation.getSelectedResident()?.id).toBe(id);
   });
 });

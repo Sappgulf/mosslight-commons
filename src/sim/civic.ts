@@ -1,11 +1,14 @@
 import { PROPOSAL_DEFINITIONS } from "../data/definitions";
 import type {
+  ActivePolicy,
   Building,
   CouncilProposal,
   Forecast,
   MarketShortage,
   ProposalKind,
+  Resident,
   Species,
+  SpeciesVote,
   TileKind,
   Vec2,
   WorldState,
@@ -93,8 +96,36 @@ export function marketShortages(buildings: Building[], food: number): MarketShor
     }));
 }
 
-export function nextProposal(day: number, chapter: number, id: number): CouncilProposal {
-  const kinds: ProposalKind[] = chapter >= 2
+const ALLIES: Record<ProposalKind, Species[]> = {
+  "shelter-first": ["brambleback"],
+  "wetland-first": ["mireling"],
+  "market-first": ["glowtail"],
+  "lantern-first": ["glowtail", "cloudmoth"],
+  "welcome-moths": ["cloudmoth", "glowtail"],
+};
+
+const RIVALS: Record<ProposalKind, Species[]> = {
+  "shelter-first": ["mireling"],
+  "wetland-first": ["glowtail"],
+  "market-first": ["mireling"],
+  "lantern-first": ["mireling"],
+  "welcome-moths": ["brambleback"],
+};
+
+export function tallyVotes(kind: ProposalKind, residents: Resident[]): SpeciesVote[] {
+  const species: Species[] = ["brambleback", "glowtail", "mireling", "cloudmoth"];
+  return species.map((name) => {
+    const count = residents.filter((resident) => resident.species === name).length;
+    if (count === 0) return { species: name, stance: "split" as const, weight: 0 };
+    const allies = ALLIES[kind];
+    const rivals = RIVALS[kind];
+    const stance: SpeciesVote["stance"] = allies.includes(name) ? "for" : rivals.includes(name) ? "against" : "split";
+    return { species: name, stance, weight: count };
+  }).filter((vote) => vote.weight > 0);
+}
+
+export function nextProposal(day: number, chapter: number, id: number, residents: Resident[] = []): CouncilProposal {
+  const kinds: ProposalKind[] = chapter >= 2 || residents.some((resident) => resident.species === "cloudmoth")
     ? ["welcome-moths", "shelter-first", "wetland-first", "lantern-first", "market-first"]
     : ["shelter-first", "wetland-first", "market-first", "lantern-first"];
   const kind = kinds[id % kinds.length]!;
@@ -107,7 +138,20 @@ export function nextProposal(day: number, chapter: number, id: number): CouncilP
     species: definition.species,
     status: "pending",
     createdDay: day,
+    deadlineDay: day + 4,
+    votes: tallyVotes(kind, residents),
   };
+}
+
+export function policyFrom(kind: ProposalKind): ActivePolicy {
+  const labels: Record<ProposalKind, string> = {
+    "shelter-first": "Housing rush · burrows rise faster",
+    "wetland-first": "Reed quiet · basin is recovering",
+    "market-first": "Open stalls · food routes thicken",
+    "lantern-first": "Nightwatch · groves burn brighter",
+    "welcome-moths": "Moth roost · mixed neighborhoods",
+  };
+  return { kind, daysRemaining: 8, label: labels[kind] };
 }
 
 export function pushForecastHistory(history: Forecast[], forecast: Forecast): Forecast[] {
@@ -127,7 +171,15 @@ export function normalizeWorld(state: WorldState, grid: TileKind[][]): WorldStat
   state.births ??= 0;
   state.cloudmothsArrived ??= false;
   state.longShadeCrisis ??= false;
+  state.longShadeStartDay ??= 0;
+  state.longShadeEndsDay ??= 0;
+  state.longShadeOutcome ??= null;
   state.proposal ??= null;
+  if (state.proposal) {
+    state.proposal.deadlineDay ??= state.proposal.createdDay + 4;
+    state.proposal.votes ??= [];
+  }
+  state.activePolicies ??= [];
   state.forecastHistory ??= [state.forecast];
   state.forecastCursor ??= Math.max(0, state.forecastHistory.length - 1);
   state.marketShortages ??= [];

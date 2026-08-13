@@ -37,15 +37,31 @@ export type BuildTool = Exclude<BuildingType, "root-heart"> | "path";
 
 export type ProposalKind = "shelter-first" | "wetland-first" | "market-first" | "lantern-first" | "welcome-moths";
 
+export interface SpeciesVote {
+  species: Species;
+  stance: "for" | "against" | "split";
+  weight: number;
+}
+
 export interface CouncilProposal {
   id: string;
   kind: ProposalKind;
   title: string;
   body: string;
   species: Species;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "expired";
   createdDay: number;
+  deadlineDay: number;
+  votes: SpeciesVote[];
 }
+
+export interface ActivePolicy {
+  kind: ProposalKind;
+  daysRemaining: number;
+  label: string;
+}
+
+export type LongShadeOutcome = "pending" | "thrived" | "strained" | "failed";
 
 export interface MarketShortage {
   buildingId: string;
@@ -135,6 +151,14 @@ export interface Building {
   upgrading: boolean;
 }
 
+export interface ForecastSnapshot {
+  food: number;
+  water: number;
+  warmth: number;
+  light: number;
+  harmony: number;
+}
+
 export interface Forecast {
   title: string;
   probability: number;
@@ -142,6 +166,8 @@ export interface Forecast {
   drivers: string[];
   recommendation: string;
   tone: "calm" | "bright" | "warning";
+  recordedDay?: number;
+  snapshot?: ForecastSnapshot;
 }
 
 export interface Message {
@@ -287,7 +313,11 @@ export interface WorldState {
   births: number;
   cloudmothsArrived: boolean;
   longShadeCrisis: boolean;
+  longShadeStartDay: number;
+  longShadeEndsDay: number;
+  longShadeOutcome: LongShadeOutcome | null;
   proposal: CouncilProposal | null;
+  activePolicies: ActivePolicy[];
   forecastHistory: Forecast[];
   forecastCursor: number;
   marketShortages: MarketShortage[];
