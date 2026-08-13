@@ -319,6 +319,7 @@ export class WorldScene extends Phaser.Scene {
 
   private bindInput(): void {
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (this.uiBlocksWorld()) return;
       this.dragging = true;
       this.dragMoved = false;
       this.dragOrigin = { x: pointer.x, y: pointer.y };
@@ -354,7 +355,7 @@ export class WorldScene extends Phaser.Scene {
       const wasDrag = this.dragMoved;
       this.dragging = false;
       this.dragMoved = false;
-      if (wasDrag) return;
+      if (this.uiBlocksWorld() || wasDrag) return;
 
       const cell = this.pointerToCell(pointer);
       if (!cell) return;
@@ -362,13 +363,18 @@ export class WorldScene extends Phaser.Scene {
 
       const buildMode = this.simulation.state.buildMode;
       if (buildMode === "path") {
-        this.simulation.paintPath(cell);
+        if (this.simulation.paintPath(cell)) this.simulation.noteTutorial("build");
       } else if (buildMode) {
-        this.simulation.build(buildMode, cell);
-      } else if (!this.simulation.collectAt(cell)) {
+        if (this.simulation.build(buildMode, cell)) this.simulation.noteTutorial("build");
+      } else if (this.simulation.collectAt(cell)) {
+        this.simulation.noteTutorial("gather");
+      } else {
         const building = this.simulation.getBuildingAt(cell);
         if (building) this.onBuildingSelected(building.id);
-        else this.simulation.selectAt(cell);
+        else {
+          this.simulation.selectAt(cell);
+          this.simulation.noteTutorial("select");
+        }
       }
       this.renderNow();
       this.onStateChange();
@@ -406,6 +412,10 @@ export class WorldScene extends Phaser.Scene {
 
   private fitZoom(): number {
     return Math.min(VIEW_W / (BOARD_W + 120), VIEW_H / (BOARD_H + 120));
+  }
+
+  private uiBlocksWorld(): boolean {
+    return !this.simulation.state.titleSeen || this.simulation.state.status === "collapsed";
   }
 
   public focusResident(id: string): void {

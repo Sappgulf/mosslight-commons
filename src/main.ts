@@ -85,8 +85,13 @@ const existingSave = saves.peek();
 if (existingSave) {
   // Resuming is the friendlier default; the HUD exposes NEW for a fresh basin.
   saves.load();
+  // A resumed world has already met the basin. Never trap a returning player
+  // behind the first-run cards.
+  simulation.dismissTitle();
+  simulation.dismissOnboarding();
 }
 saves.startAutosave();
+hud.render();
 
 declare global {
   interface Window {

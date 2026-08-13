@@ -384,7 +384,30 @@ kbd {
   padding: 20px;
   background: rgba(4, 11, 15, 0.78);
   backdrop-filter: blur(3px);
+  pointer-events: auto;
 }
+.overlay-hint { color: var(--muted); font-size: 10px; letter-spacing: 0.06em; }
+
+.coach {
+  position: fixed;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  z-index: 35;
+  width: min(420px, calc(100vw - 36px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(18, 53, 47, 0.97), rgba(8, 21, 27, 0.97));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+.coach[hidden] { display: none !important; }
+.coach h2 { margin: 0; font-family: Georgia, serif; font-size: 17px; font-weight: 500; color: var(--paper); }
+.coach p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .overlay[hidden] { display: none; }
 
 .overlay-card {
@@ -422,7 +445,12 @@ kbd {
 
 .onboarding-hint { color: var(--gold) !important; font-weight: 700; }
 .onboarding-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px; }
-.onboarding-actions .dispatch-button { min-width: 110px; }
+.onboarding-actions .dispatch-button, .onboarding-actions .ghost-button, .title-overlay .dispatch-button {
+  min-width: 110px;
+  min-height: 40px;
+  font-size: 10px;
+  pointer-events: auto;
+}
 .ghost-button {
   min-height: 30px; padding: 0 14px;
   border: 1px solid rgba(245, 230, 200, 0.2); border-radius: 7px;

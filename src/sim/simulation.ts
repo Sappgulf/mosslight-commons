@@ -243,6 +243,18 @@ export class MosslightSimulation {
     this.state.titleSeen = true;
   }
 
+  /**
+   * Advances the first-run coach when the player actually does the hinted
+   * verb, so they never sit on a card that tells them to click a map they
+   * cannot reach.
+   */
+  public noteTutorial(kind: "select" | "gather" | "build" | "civic"): void {
+    if (this.state.onboardingDismissed) return;
+    const expected: Record<typeof kind, number> = { select: 0, gather: 1, build: 2, civic: 3 };
+    if (this.state.onboardingStep === expected[kind]) this.advanceOnboarding();
+    if (this.state.onboardingStep >= 5) this.dismissOnboarding();
+  }
+
   public paintPath(position: Vec2): boolean {
     if (!this.isInside(position) || !this.isRevealed(position)) return false;
     const tile = this.state.grid[position.y]?.[position.x];
@@ -354,10 +366,12 @@ export class MosslightSimulation {
 
   public advanceOnboarding(): void {
     this.state.onboardingStep += 1;
+    if (this.state.onboardingStep >= 5) this.dismissOnboarding();
   }
 
   public dismissOnboarding(): void {
     this.state.onboardingDismissed = true;
+    this.state.onboardingStep = 5;
   }
 
   // --- Building upgrades -------------------------------------------------

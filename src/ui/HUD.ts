@@ -68,6 +68,7 @@ export class HUD {
     this.root.innerHTML = this.template();
     this.root.addEventListener("click", (event) => this.handleClick(event));
     this.root.addEventListener("keydown", (event) => this.handleKeydown(event));
+    window.addEventListener("keydown", (event) => this.handleKeydown(event));
     this.root.addEventListener("focusin", (event) => this.handleFocus(event));
     this.root.addEventListener("pointerover", (event) => this.handlePointerover(event));
     this.root.addEventListener("change", (event) => this.handleChange(event));
@@ -675,6 +676,7 @@ export class HUD {
     const fieldTab = target.closest<HTMLButtonElement>("[data-field-tab]");
     if (fieldTab?.dataset.fieldTab === "field" || fieldTab?.dataset.fieldTab === "civic") {
       this.activeFieldTab = fieldTab.dataset.fieldTab;
+      if (this.activeFieldTab === "civic") this.simulation.noteTutorial("civic");
       this.render();
       return;
     }
@@ -721,6 +723,18 @@ export class HUD {
     const zoomButton = target.closest<HTMLButtonElement>("[data-zoom]");
     if (zoomButton?.dataset.zoom === "in" || zoomButton?.dataset.zoom === "out" || zoomButton?.dataset.zoom === "reset") {
       this.callbacks.onZoomChange(zoomButton.dataset.zoom);
+      this.render();
+      return;
+    }
+
+    const overlayAction = target.closest<HTMLElement>("[data-overlay-action]")?.dataset.overlayAction;
+    if (overlayAction === "dismiss-title") {
+      this.simulation.dismissTitle();
+      this.render();
+      return;
+    }
+    if (overlayAction === "skip-onboarding") {
+      this.simulation.dismissOnboarding();
       this.render();
       return;
     }
@@ -810,10 +824,29 @@ export class HUD {
   }
 
   private handleKeydown(event: KeyboardEvent): void {
-    if (!(event.target instanceof HTMLButtonElement)) return;
     if (event.key === " " || event.key === "Enter") {
-      // Keep native button activation from also triggering main.ts's global pause shortcut.
+      if (event.target instanceof HTMLButtonElement) event.stopPropagation();
+    }
+    const state = this.simulation.state;
+    if (!state.titleSeen && (event.key === "Enter" || event.key === " " || event.key === "Escape")) {
+      event.preventDefault();
       event.stopPropagation();
+      this.simulation.dismissTitle();
+      this.render();
+      return;
+    }
+    if (!state.onboardingDismissed && state.onboardingStep < ONBOARDING_STEPS.length) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.simulation.dismissOnboarding();
+        this.render();
+        return;
+      }
+      if (event.key === "Enter" && !(event.target instanceof HTMLButtonElement)) {
+        event.preventDefault();
+        this.simulation.advanceOnboarding();
+        this.render();
+      }
     }
   }
 
@@ -1091,27 +1124,26 @@ export class HUD {
       </div>
     </div>
 
-    <div class="overlay title-overlay" data-title-overlay role="dialog" aria-modal="true" aria-labelledby="title-heading">
+    <div class="overlay title-overlay" data-title-overlay data-overlay-action="dismiss-title" role="dialog" aria-modal="true" aria-labelledby="title-heading">
       <div class="overlay-card overlay-card--title">
         <div class="panel-eyebrow"><span>A BROKEN SURVEY MAP</span><span>THE LAST HEALTHY ROOT</span></div>
         <h2 id="title-heading">Mosslight Commons</h2>
         <p>The canopy is dying. You are the first Steward. Shape a habitat. Let the motes decide what the city becomes.</p>
         <button class="dispatch-button" type="button" data-action="dismiss-title">TAKE UP THE LEDGER</button>
+        <small class="overlay-hint">Click anywhere · Enter · Esc</small>
       </div>
     </div>
 
-    <div class="overlay onboarding-overlay" data-onboarding hidden role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
-      <div class="overlay-card overlay-card--narrow">
-        <div class="panel-eyebrow"><span>FIRST SEASON</span><span data-onboarding-progress>1 / 5</span></div>
-        <h2 id="onboarding-title" data-onboarding-title></h2>
-        <p data-onboarding-body></p>
-        <p class="onboarding-hint" data-onboarding-hint></p>
-        <div class="onboarding-actions">
-          <button type="button" class="ghost-button" data-action="onboarding-skip">SKIP</button>
-          <button class="dispatch-button" type="button" data-action="onboarding-next">NEXT</button>
-        </div>
+    <aside class="coach" data-onboarding hidden role="dialog" aria-labelledby="onboarding-title">
+      <div class="panel-eyebrow"><span>FIRST SEASON</span><span data-onboarding-progress>1 / 5</span></div>
+      <h2 id="onboarding-title" data-onboarding-title></h2>
+      <p data-onboarding-body></p>
+      <p class="onboarding-hint" data-onboarding-hint></p>
+      <div class="onboarding-actions">
+        <button type="button" class="ghost-button" data-action="onboarding-skip">SKIP</button>
+        <button class="dispatch-button" type="button" data-action="onboarding-next">NEXT</button>
       </div>
-    </div>
+    </aside>
 
     <div class="overlay collapse-overlay" data-collapse-overlay hidden role="dialog" aria-modal="true" aria-labelledby="collapse-title">
       <div class="overlay-card overlay-card--narrow">
