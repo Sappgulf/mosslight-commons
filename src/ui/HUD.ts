@@ -767,6 +767,16 @@ export class HUD {
     if (overlayAction === "dismiss-title") {
       this.simulation.dismissTitle();
       this.render();
+      /*
+       * Drop focus rather than moving it to the coach's NEXT button. Focus had
+       * been left on the title button, which is now hidden, so the next Enter
+       * was swallowed as that button's activation. Parking focus on NEXT fixes
+       * Enter but breaks Space, which would activate the button instead of
+       * pausing the game — and in a game Space belongs to the clock. With
+       * nothing focused, Enter advances the coach and Space pauses, which is
+       * what a player expects from both keys.
+       */
+      this.blurActive();
       return;
     }
     if (overlayAction === "skip-onboarding") {
@@ -949,6 +959,12 @@ export class HUD {
         return `<div class="shortcut-group"><h3>${group}</h3><ul>${items}</ul></div>`;
       })
       .join("");
+  }
+
+  /** Releases focus so global key bindings apply again. */
+  private blurActive(): void {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && this.root.contains(active)) active.blur();
   }
 
   /** Opens or closes the keyboard shortcuts card. */

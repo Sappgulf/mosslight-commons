@@ -21,13 +21,49 @@ const GRID_W = 32;
 const GRID_H = 24;
 const BOARD_W = GRID_W * TILE_SIZE;
 const BOARD_H = GRID_H * TILE_SIZE;
+/**
+ * The starting surface size only. The game runs in Phaser's RESIZE mode, so the
+ * canvas takes whatever the map cell actually gives it and the camera adapts.
+ * These used to be the fixed drawing size with Scale.FIT, which letterboxed the
+ * board: on a 1280x720 laptop the map cell was 640x320 and the 900x640 canvas
+ * shrank to 450x300 inside it, wasting a third of the width and leaving
+ * residents about ten pixels tall.
+ */
 const VIEW_W = 900;
 const VIEW_H = 640;
 
+/** World padding kept visible around the board when fitting the camera. */
+const FIT_MARGIN = 48;
+
+/**
+ * The smallest on-screen tile the game is willing to open at.
+ *
+ * Fitting all 32x24 tiles into the map cell of a 1280x720 laptop puts a tile at
+ * about 14 screen pixels — residents become specks and nothing is clickable
+ * without zooming first. The opening view is framed for readability instead,
+ * centred on the Root Heart, and the player can zoom out to the whole basin.
+ */
+const READABLE_TILE_PX = 26;
+
+/**
+ * The opening view never shows less of the basin than this, however small the
+ * surface. Framing purely by tile size looked right on a desktop but on a phone
+ * put the camera so close that not one gatherable node was on screen — the
+ * player opened the game with nothing to do and no idea where to look.
+ */
+const MIN_VISIBLE_TILES_X = 18;
+const MIN_VISIBLE_TILES_Y = 13;
+
 /** Continuous zoom range; the camera now pans freely rather than snapping to a fixed centre. */
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 1.8;
-const ZOOM_STEP = 0.1;
+/*
+ * Zoom limits are multiples of "fit the whole board", not absolute scales. They
+ * were absolute (0.5-1.8), which meant that on a small window — where fitting
+ * the board needs a zoom below 0.5 — the player could not zoom out far enough
+ * to see their own settlement.
+ */
+const MIN_ZOOM_RATIO = 1;
+const MAX_ZOOM_RATIO = 3.2;
+const ZOOM_STEP = 0.12;
 
 const INK = 0x08151b;
 const PAPER = 0xf5e6c8;
@@ -218,6 +254,17 @@ export class WorldScene extends Phaser.Scene {
   /** Finger separation at the last pinch sample, or null when not pinching. */
   private pinchDistance: number | null = null;
 
+  /** Fit zoom at the last resize, used to preserve the player's zoom ratio. */
+  private lastFitZoom = 0;
+  /**
+   * Whether the player has taken control of the camera. Until they do, a resize
+   * re-frames the opening view rather than preserving whatever ratio the last
+   * surface happened to have — the game boots at its configured size and is
+   * resized to the real cell immediately afterwards, so preserving the ratio
+   * carried a desktop framing onto a phone and left the camera far too close.
+   */
+  private cameraTouched = false;
+
   private terrainSignature = "";
   private districtSignature = "";
   private lastHintText = "";
@@ -254,15 +301,12 @@ export class WorldScene extends Phaser.Scene {
 
   create(): void {
     this.cameras.main.setBackgroundColor(INK);
-    // Let the camera roam the board rather than sitting locked at its centre.
-    this.cameras.main.setBounds(
-      OFFSET_X - 60,
-      OFFSET_Y - 60,
-      BOARD_W + 120,
-      BOARD_H + 120,
-    );
-    this.cameras.main.setZoom(this.fitZoom());
-    this.cameras.main.centerOn(OFFSET_X + BOARD_W / 2, OFFSET_Y + BOARD_H / 2);
+    this.lastFitZoom = this.fitZoom();
+    this.cameras.main.setZoom(this.readableZoom());
+    this.clampCameraBounds();
+    const home = this.cellCenter(this.homeFocus());
+    this.cameras.main.centerOn(home.x, home.y);
+    this.scale.on("resize", this.handleResize, this);
 
     const frame = this.add.graphics().setDepth(0);
     frame.fillStyle(0x0b2124, 1);
@@ -335,6 +379,7 @@ export class WorldScene extends Phaser.Scene {
   shutdown(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.scale.off("resize", this.handleResize, this);
   }
 
   // --- Input --------------------------------------------------------------
@@ -356,6 +401,7 @@ export class WorldScene extends Phaser.Scene {
         // a click with a shaky hand still registers as a click.
         if (Math.hypot(dx, dy) > 5) {
           this.dragMoved = true;
+          this.cameraTouched = true;
           const zoom = this.cameras.main.zoom;
           this.cameras.main.setScroll(
             this.cameraOrigin.x - dx / zoom,
@@ -439,6 +485,7 @@ export class WorldScene extends Phaser.Scene {
       this.dragging = false;
       this.dragMoved = true;
 
+      this.cameraTouched = true;
       const distance = Phaser.Math.Distance.Between(first.x, first.y, second.x, second.y);
       if (this.pinchDistance === null) {
         this.pinchDistance = distance;
@@ -448,7 +495,7 @@ export class WorldScene extends Phaser.Scene {
       const midX = (first.x + second.x) / 2;
       const midY = (first.y + second.y) / 2;
       const before = camera.getWorldPoint(midX, midY);
-      camera.setZoom(Phaser.Math.Clamp(camera.zoom * (distance / this.pinchDistance), MIN_ZOOM, MAX_ZOOM));
+      camera.setZoom(this.clampZoom(camera.zoom * (distance / this.pinchDistance)));
       const after = camera.getWorldPoint(midX, midY);
       camera.setScroll(camera.scrollX + (before.x - after.x), camera.scrollY + (before.y - after.y));
       this.pinchDistance = distance;
@@ -468,9 +515,10 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private zoomToward(pointer: Phaser.Input.Pointer, delta: number): void {
+    this.cameraTouched = true;
     const camera = this.cameras.main;
     const before = camera.getWorldPoint(pointer.x, pointer.y);
-    camera.setZoom(Phaser.Math.Clamp(camera.zoom + delta, MIN_ZOOM, MAX_ZOOM));
+    camera.setZoom(this.clampZoom(camera.zoom + delta * this.fitZoom()));
     const after = camera.getWorldPoint(pointer.x, pointer.y);
     // Re-anchor so the world point under the cursor stays under the cursor.
     camera.setScroll(
@@ -479,8 +527,92 @@ export class WorldScene extends Phaser.Scene {
     );
   }
 
+  /** The camera's current pixel size, which changes whenever the window does. */
+  private viewSize(): { width: number; height: number } {
+    const size = this.scale?.gameSize;
+    return {
+      width: Math.max(1, size?.width ?? VIEW_W),
+      height: Math.max(1, size?.height ?? VIEW_H),
+    };
+  }
+
+  /** Constrains a zoom to the range around "whole board visible". */
+  private clampZoom(value: number): number {
+    const fit = this.fitZoom();
+    return Phaser.Math.Clamp(value, fit * MIN_ZOOM_RATIO, fit * MAX_ZOOM_RATIO);
+  }
+
+  /** Zoom at which the whole board is visible in the current surface. */
   private fitZoom(): number {
-    return Math.min(VIEW_W / (BOARD_W + 120), VIEW_H / (BOARD_H + 120));
+    const { width, height } = this.viewSize();
+    return Math.min(width / (BOARD_W + FIT_MARGIN), height / (BOARD_H + FIT_MARGIN));
+  }
+
+  /**
+   * The zoom the game opens at: close enough to read a creature, but never
+   * closer than fitting the board, so a large window still shows everything.
+   */
+  private readableZoom(): number {
+    const { width, height } = this.viewSize();
+    const fieldOfView = Math.min(
+      width / (MIN_VISIBLE_TILES_X * TILE_SIZE),
+      height / (MIN_VISIBLE_TILES_Y * TILE_SIZE),
+    );
+    const readable = Math.min(READABLE_TILE_PX / TILE_SIZE, fieldOfView);
+    // Never closer than readable, never further out than fitting the board.
+    return this.clampZoom(Math.max(this.fitZoom(), readable));
+  }
+
+  /** Where the settlement is, so the opening view looks at something. */
+  private homeFocus(): Vec2 {
+    const heart = this.simulation.state.buildings.find((building) => building.type === "root-heart");
+    return heart?.position ?? { x: GRID_W / 2, y: GRID_H / 2 };
+  }
+
+  /**
+   * Re-fits the camera when the surface changes size. The zoom the player chose
+   * is kept as a ratio of "fit", so a resized window shows the same amount of
+   * world rather than snapping back to a default.
+   */
+  private handleResize(): void {
+    if (!this.ready) return;
+    const { width, height } = this.viewSize();
+    const camera = this.cameras.main;
+    const previousFit = this.lastFitZoom || this.fitZoom();
+    const ratio = camera.zoom / previousFit;
+
+    camera.setSize(width, height);
+    this.lastFitZoom = this.fitZoom();
+
+    if (this.cameraTouched) {
+      camera.setZoom(this.clampZoom(this.lastFitZoom * ratio));
+      this.clampCameraBounds();
+      return;
+    }
+
+    camera.setZoom(this.readableZoom());
+    this.clampCameraBounds();
+    const home = this.cellCenter(this.homeFocus());
+    camera.centerOn(home.x, home.y);
+  }
+
+  /**
+   * Keeps the board reachable at any zoom. The bounds used to be a fixed box
+   * slightly larger than the board, which at low zoom left the board pinned in
+   * a corner of a much larger viewport.
+   */
+  private clampCameraBounds(): void {
+    const camera = this.cameras.main;
+    const viewW = camera.width / camera.zoom;
+    const viewH = camera.height / camera.zoom;
+    const slackX = Math.max(0, (viewW - BOARD_W) / 2) + FIT_MARGIN;
+    const slackY = Math.max(0, (viewH - BOARD_H) / 2) + FIT_MARGIN;
+    camera.setBounds(
+      OFFSET_X - slackX,
+      OFFSET_Y - slackY,
+      BOARD_W + slackX * 2,
+      BOARD_H + slackY * 2,
+    );
   }
 
   private uiBlocksWorld(): boolean {
@@ -666,20 +798,26 @@ export class WorldScene extends Phaser.Scene {
 
   public zoomIn(): number {
     if (!this.hasCamera()) return 100;
-    this.cameras.main.setZoom(Phaser.Math.Clamp(this.cameras.main.zoom + ZOOM_STEP, MIN_ZOOM, MAX_ZOOM));
+    this.cameraTouched = true;
+    this.cameras.main.setZoom(this.clampZoom(this.cameras.main.zoom + ZOOM_STEP * this.fitZoom()));
     return this.getZoomPercent();
   }
 
   public zoomOut(): number {
     if (!this.hasCamera()) return 100;
-    this.cameras.main.setZoom(Phaser.Math.Clamp(this.cameras.main.zoom - ZOOM_STEP, MIN_ZOOM, MAX_ZOOM));
+    this.cameraTouched = true;
+    this.cameras.main.setZoom(this.clampZoom(this.cameras.main.zoom - ZOOM_STEP * this.fitZoom()));
     return this.getZoomPercent();
   }
 
   public resetZoom(): number {
     if (!this.hasCamera()) return 100;
-    this.cameras.main.setZoom(this.fitZoom());
-    this.cameras.main.centerOn(OFFSET_X + BOARD_W / 2, OFFSET_Y + BOARD_H / 2);
+    this.cameraTouched = false;
+    this.lastFitZoom = this.fitZoom();
+    this.cameras.main.setZoom(this.readableZoom());
+    this.clampCameraBounds();
+    const home = this.cellCenter(this.homeFocus());
+    this.cameras.main.centerOn(home.x, home.y);
     return this.getZoomPercent();
   }
 
@@ -698,6 +836,60 @@ export class WorldScene extends Phaser.Scene {
   public getZoomPercent(): number {
     if (!this.hasCamera()) return 100;
     return Math.round((this.cameras.main.zoom / this.fitZoom()) * 100);
+  }
+
+  /**
+   * Maps a grid cell to a point on the page, or null when it is off-screen.
+   *
+   * Exposed for the end-to-end suite: without it a test could drive the HUD but
+   * never the board, which meant the actual game loop — walk up to a wild node,
+   * gather it, spend what it gave you — had no coverage at all.
+   */
+  public screenPointForCell(cell: Vec2): { x: number; y: number } | null {
+    if (!this.hasCamera()) return null;
+    const camera = this.cameras.main;
+    const world = this.cellCenter(cell);
+
+    /*
+     * Invert the camera using its own `getWorldPoint` rather than rebuilding
+     * the transform by hand. A zoomed Phaser camera scales about its midpoint,
+     * not its origin, so the obvious `(world - scroll) * zoom` is wrong and
+     * lands several tiles away. Sampling two corners gives the exact affine map
+     * whatever convention Phaser uses internally.
+     */
+    const topLeft = camera.getWorldPoint(0, 0);
+    const bottomRight = camera.getWorldPoint(camera.width, camera.height);
+    const spanX = bottomRight.x - topLeft.x;
+    const spanY = bottomRight.y - topLeft.y;
+    if (spanX === 0 || spanY === 0) return null;
+
+    const x = ((world.x - topLeft.x) / spanX) * camera.width;
+    const y = ((world.y - topLeft.y) / spanY) * camera.height;
+    if (x < 0 || y < 0 || x > camera.width || y > camera.height) return null;
+
+    const canvas = this.game.canvas.getBoundingClientRect();
+    // The backing store and the CSS box can differ; scale between them.
+    return {
+      x: canvas.left + (x / camera.width) * canvas.width,
+      y: canvas.top + (y / camera.height) * canvas.height,
+    };
+  }
+
+  /** Camera diagnostics for the QA hooks. */
+  public cameraReport(): Record<string, number | boolean> {
+    const size = this.scale?.gameSize;
+    const camera = this.cameras?.main;
+    return {
+      ready: this.ready,
+      touched: this.cameraTouched,
+      gameW: size?.width ?? -1,
+      gameH: size?.height ?? -1,
+      camW: camera?.width ?? -1,
+      camH: camera?.height ?? -1,
+      zoom: camera?.zoom ?? -1,
+      fit: this.fitZoom(),
+      readable: this.readableZoom(),
+    };
   }
 
   /** Smoothly centres the camera on a grid cell — used to follow a resident. */

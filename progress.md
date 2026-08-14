@@ -292,3 +292,57 @@ Addressed the six priorities from the codebase audit.
   content and that no panel overlaps the board. They check the symptom rather
   than pixel values, so the design can still be tuned freely.
 - Inspected at 1440×900, 1280×800, and 375×812.
+
+## Playability pass
+
+### The board was unplayable at normal window sizes
+
+- [x] The canvas was a fixed 900×640 surface letterboxed by `Scale.FIT`. On a
+      1280×720 laptop the map cell was 640×320 and the canvas shrank to
+      **450×300 inside it** — a third of the width thrown away. The surface is
+      now measured from the map cell before the game boots, so it fills it.
+- [x] The camera opened at "fit the whole 32×24 board", which put a tile at
+      ~14px and a resident at ~10px. It now opens on a readable framing centred
+      on the Root Heart, with a guaranteed minimum field of view so a small
+      screen still shows somewhere to act.
+- [x] Zoom limits were absolute (0.5–1.8). On a small window, fitting the board
+      needs less than 0.5, so the player could not zoom out far enough to see
+      their own settlement. Limits are now multiples of "fit".
+- [x] Short windows: the top bar and dock together claimed 400 of 720 pixels.
+      A short-viewport mode gives that height back to the board.
+
+Net effect at 1280×720: the play area went from 450×300 to 638×352, and the
+opening view from 14px tiles to 26px.
+
+### Testing the game, not just the panels
+
+- [x] Added `window.probe_board()`, which reports wild nodes and buildable
+      plots with their on-screen positions. Every existing end-to-end test drove
+      the HUD; none could touch the board, so the actual loop had no coverage.
+- [x] Five new tests play the game: the opening view has something to act on,
+      the canvas fills its cell, gathering a node pays out and credits the
+      objective, a gathered node leaves the map and is queued to regrow, and a
+      building can be placed.
+
+### Bugs found
+
+- `Scale.RESIZE` and manual resizing both stall Phaser's asset loader when the
+  drawing buffer is resized while it is still running: 6 of 16 files loaded,
+  nothing in flight, nothing failed, `create()` never reached, game stuck on the
+  boot splash. Avoided by sizing the surface once before boot.
+- Dismissing the title card left focus on the button it had just hidden, so the
+  next Enter was swallowed as that button's activation instead of advancing the
+  first-run coach. Focus is now released, which also keeps Space on the clock.
+
+### Known risk
+
+- The in-app browser preview's **mobile emulation** hangs on the boot splash
+  with the loader stalled the same way. Playwright's mobile emulation
+  (390×844, touch, 19/19 green) does not reproduce it, and neither does a
+  desktop context at the same small surface size, so the evidence points to an
+  emulator artifact — but it is not explained, and it has not been checked on
+  real hardware.
+
+### Verification
+
+- 100 Vitest tests and 19 Playwright tests pass, twice in a row.

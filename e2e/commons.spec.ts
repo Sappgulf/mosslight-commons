@@ -8,6 +8,10 @@ interface Snapshot {
   population: number;
   onboarding: { step: number; dismissed: boolean };
   resources: Record<string, number>;
+  items: Record<string, number>;
+  objectives: Array<{ id: string; progress: number; target: number; completed: boolean }>;
+  buildings: Array<{ id: string; type: string }>;
+  regrowth: Array<{ x: number; y: number; tile: string }>;
   zoomPercent: number;
   buildMode: string | null;
 }
@@ -212,6 +216,112 @@ test.describe("layout", () => {
     }, PANELS);
 
     expect(overlapping).toEqual([]);
+  });
+});
+
+interface BoardProbe {
+  nodes: Array<{ tile: string; x: number; y: number; screen: { x: number; y: number } | null }>;
+  buildable: Array<{ x: number; y: number; screen: { x: number; y: number } | null }>;
+}
+
+async function probeBoard(page: Page): Promise<BoardProbe> {
+  return page.evaluate(() => {
+    const hook = (window as unknown as { probe_board?: () => string }).probe_board;
+    if (!hook) throw new Error("probe_board is not exposed");
+    return JSON.parse(hook()) as BoardProbe;
+  });
+}
+
+test.describe("the game is actually playable", () => {
+  /**
+   * Everything else in this file drives the HUD. These drive the board, which
+   * is where the game is: if a player cannot see a wild node, click it, and
+   * spend what it gave them, none of the panels matter.
+   */
+  test("opens on a view you can read and act on", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+
+    const board = await probeBoard(page);
+    const state = await snapshot(page);
+
+    // The canvas used to be a fixed 900x640 surface letterboxed inside its
+    // cell, opened fitted to the whole 32x24 board: a 450x300 play area with
+    // 14px tiles, where a resident was ten pixels tall and nothing was worth
+    // clicking. The opening view is now framed for reading, so there is always
+    // something on screen to act on.
+    expect(board.nodes.some((node) => node.screen !== null)).toBe(true);
+    expect(board.buildable.some((plot) => plot.screen !== null)).toBe(true);
+    expect(state.zoomPercent).toBeGreaterThan(100);
+  });
+
+  test("the canvas fills the space the layout gives it", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+
+    const fill = await page.evaluate(() => {
+      const cell = document.querySelector("#game")!.getBoundingClientRect();
+      const canvas = document.querySelector("#game canvas")!.getBoundingClientRect();
+      return { widthRatio: canvas.width / cell.width, heightRatio: canvas.height / cell.height };
+    });
+
+    // Scale.FIT wasted a third of the cell's width on letterbox bars.
+    expect(fill.widthRatio).toBeGreaterThan(0.97);
+    expect(fill.heightRatio).toBeGreaterThan(0.97);
+  });
+
+  test("gathering a wild node pays out and credits the objective", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+
+    const board = await probeBoard(page);
+    const node = board.nodes.find((entry) => entry.screen !== null);
+    expect(node, "a gatherable node should be visible on the opening view").toBeTruthy();
+
+    const before = await snapshot(page);
+    await page.mouse.click(node!.screen!.x, node!.screen!.y);
+    const after = await snapshot(page);
+
+    const gained = Object.keys(after.items).some(
+      (key) => after.items[key]! > (before.items[key] ?? 0),
+    );
+    expect(gained, "gathering should add an item to the inventory").toBe(true);
+
+    const survey = after.objectives.find((entry) => entry.id === "survey-basin");
+    expect(survey?.progress).toBeGreaterThan(0);
+  });
+
+  test("a gathered node leaves the map and is queued to regrow", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+
+    const board = await probeBoard(page);
+    const node = board.nodes.find((entry) => entry.screen !== null)!;
+    await page.mouse.click(node.screen!.x, node.screen!.y);
+
+    const after = await probeBoard(page);
+    expect(after.nodes.some((entry) => entry.x === node.x && entry.y === node.y)).toBe(false);
+
+    const state = await snapshot(page);
+    expect(state.regrowth.some((entry) => entry.x === node.x && entry.y === node.y)).toBe(true);
+  });
+
+  test("a building can be placed on the board", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+    await page.locator('[data-action="onboarding-skip"]').click();
+
+    const before = await snapshot(page);
+    await page.locator('[data-build="burrow-home"]').click();
+
+    const board = await probeBoard(page);
+    const plot = board.buildable.find((entry) => entry.screen !== null);
+    expect(plot, "there should be somewhere to build").toBeTruthy();
+
+    await page.mouse.click(plot!.screen!.x, plot!.screen!.y);
+
+    const after = await snapshot(page);
+    expect(after.buildings.length).toBe(before.buildings.length + 1);
   });
 });
 

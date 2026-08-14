@@ -90,8 +90,6 @@ kbd {
   right: calc(var(--shell-pad) + var(--rail-right) + var(--shell-gap));
   bottom: calc(var(--shell-pad) + var(--row-dock) + var(--shell-gap));
   left: calc(var(--shell-pad) + var(--rail-left) + var(--shell-gap));
-  display: grid;
-  place-items: center;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -100,8 +98,15 @@ kbd {
   background: radial-gradient(circle at 50% 42%, rgba(45, 140, 132, 0.18), rgba(8, 21, 27, 0.82) 72%);
   box-shadow: 0 22px 70px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(245, 230, 200, 0.04), inset 0 0 50px rgba(99, 230, 212, 0.08);
 }
-#game::before { content: ""; position: absolute; inset: 8px; border: 1px solid rgba(99, 230, 212, 0.12); border-radius: 10px; pointer-events: none; }
-#game canvas { position: relative; z-index: 1; display: block; max-width: calc(100% - 20px); max-height: calc(100% - 20px); border-radius: 10px; }
+#game::before { content: ""; position: absolute; inset: 0; z-index: 2; border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px rgba(99, 230, 212, 0.12); pointer-events: none; }
+/*
+ * In RESIZE mode Phaser owns the canvas box: it writes explicit pixel width and
+ * height from the parent's size every time that size changes. Declaring
+ * width/height here as well made the two disagree by sub-pixel amounts, and the
+ * scale manager chased its own tail — a permanent resize loop that restarted
+ * the loader and left the game stuck on its boot splash forever.
+ */
+#game canvas { z-index: 1; display: block; border-radius: var(--radius-lg); }
 
 /*
  * The HUD is a grid laid over the board rather than a pile of absolutely
@@ -561,6 +566,48 @@ kbd {
  * breakpoint, which meant three sets of hardcoded insets that disagreed with
  * each other and with the map.
  * ========================================================================== */
+
+/*
+ * Short windows. A 1280x720 laptop gave the board a 640x320 cell because the
+ * top bar and dock together claimed 400 of the 720 pixels — more than half the
+ * screen for chrome, in a game whose whole point is the board. Here the shell
+ * gives that height back: the brand block loses its strapline and eyebrow, the
+ * dock tightens, and the board roughly doubles in height.
+ */
+@media (min-width: 901px) and (max-height: 860px) {
+  :root {
+    --shell-pad: 10px;
+    --shell-gap: 10px;
+    --row-top: 124px;
+    --row-dock: 132px;
+  }
+  .brand-kicker { display: none; }
+  .brand-card { padding: var(--s2); }
+  .brand-card h1 { font-size: 17px; }
+  .brand-status { margin-top: 2px; font-size: 10px; }
+  /* One row of session buttons instead of two; they fit the rail at 10px. */
+  /*
+   * One row of session buttons instead of two. Without `nowrap` on the labels
+   * each button wrapped its own text to two lines, so the row stayed 48px tall
+   * even after it stopped wrapping into two rows.
+   */
+  .save-row { flex-wrap: nowrap; }
+  .save-row button { min-height: 22px; padding-inline: 4px; font-size: 10px; letter-spacing: 0; white-space: nowrap; }
+  .resource-strip { padding: var(--s1); }
+  .resource-chip { padding-block: var(--s1); }
+  /* Basin detail lines move to the forecast card's remit on a short screen. */
+  .day-card [data-water-quality], .day-card [data-births] { display: none; }
+  .day-card { width: 132px; }
+  .day-card span { font-size: 18px; }
+
+  .dock-heading { font-size: 12px; }
+  .build-detail { display: none; }
+  .build-icon { font-size: 15px; }
+  .build-button { padding-block: var(--s1); }
+  .control-button { min-height: 34px; }
+  .speed-group button { min-height: 30px; }
+  .zoom-button, .zoom-reset { min-height: 30px; }
+}
 
 @media (min-width: 901px) and (max-width: 1280px) {
   :root {

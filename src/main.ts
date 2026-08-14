@@ -70,6 +70,17 @@ if (!canRenderGame()) {
   throw new Error("No WebGL or canvas context available");
 }
 
+/**
+ * The drawing surface, measured from the map cell before the game boots. Falls
+ * back to the design size when the cell has not been laid out yet.
+ */
+const surface = (() => {
+  const host = document.querySelector<HTMLElement>("#game");
+  const width = Math.floor(host?.clientWidth ?? 0);
+  const height = Math.floor(host?.clientHeight ?? 0);
+  return width > 120 && height > 120 ? { width, height } : { width: VIEW_W, height: VIEW_H };
+})();
+
 const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: "game",
@@ -79,10 +90,22 @@ const game = new Phaser.Game({
   pixelArt: false,
   antialias: true,
   scale: {
+    /*
+     * FIT, with the surface sized to the map cell at boot (see `surface`).
+     *
+     * The original 900x640 FIT surface letterboxed badly: on a 1280x720 laptop
+     * the cell was 640x320 and the canvas shrank to 450x300 inside it, losing a
+     * third of the width. The obvious fix — RESIZE, so the surface tracks the
+     * cell — turned out to be unsafe here: resizing the WebGL drawing buffer
+     * while the asset loader is still running stalls it mid-queue (six of
+     * sixteen files loaded, nothing in flight, nothing failed) and the game
+     * never reaches `create`. Choosing the right size once, before the game
+     * boots, gets the same full-bleed result without ever resizing the buffer.
+     */
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.NO_CENTER,
-    width: VIEW_W,
-    height: VIEW_H,
+    width: surface.width,
+    height: surface.height,
   },
   scene: [worldScene],
 });
@@ -111,6 +134,7 @@ declare global {
   interface Window {
     advanceTime: (milliseconds: number) => void;
     render_game_to_text: () => string;
+    probe_board: () => string;
   }
 }
 
@@ -209,6 +233,40 @@ window.render_game_to_text = () => {
     proposal: state.proposal ? { kind: state.proposal.kind, status: state.proposal.status } : null,
     forecastHistory: state.forecastHistory.length,
     waterQuality: Math.round((state.waterQuality?.flat().reduce((sum, value) => sum + value, 0) ?? 0) / Math.max(1, state.waterQuality?.flat().length ?? 1)),
+  });
+};
+
+/**
+ * Board-level QA hook. `render_game_to_text` describes the world but gives no
+ * way to reach it with a pointer, so nothing could exercise the core loop.
+ */
+window.probe_board = () => {
+  const state = simulation.state;
+  const nodes: Array<{ tile: string; x: number; y: number; screen: { x: number; y: number } | null }> = [];
+  for (let y = 0; y < state.grid.length; y += 1) {
+    const row = state.grid[y]!;
+    for (let x = 0; x < row.length; x += 1) {
+      const tile = row[x]!;
+      if (tile !== "fern" && tile !== "mushroom" && tile !== "crystal" && tile !== "ruin") continue;
+      if (!state.revealed[y]?.[x]) continue;
+      nodes.push({ tile, x, y, screen: worldScene?.screenPointForCell({ x, y }) ?? null });
+    }
+  }
+  return JSON.stringify({
+    camera: worldScene?.cameraReport() ?? null,
+    nodes,
+    buildable: (() => {
+      const found: Array<{ x: number; y: number; screen: { x: number; y: number } | null }> = [];
+      for (let y = 0; y < state.grid.length && found.length < 12; y += 1) {
+        for (let x = 0; x < state.grid[y]!.length && found.length < 12; x += 1) {
+          if (state.grid[y]![x] !== "grass" || !state.revealed[y]?.[x]) continue;
+          if (simulation.getBuildingAt({ x, y })) continue;
+          const screen = worldScene?.screenPointForCell({ x, y }) ?? null;
+          if (screen) found.push({ x, y, screen });
+        }
+      }
+      return found;
+    })(),
   });
 };
 
