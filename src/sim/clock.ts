@@ -20,6 +20,8 @@ export interface ClockHandlers {
   onTick: () => void;
   /** Called once per frame after any ticks were consumed. */
   onFrame: (ticked: boolean) => void;
+  /** Optional: a thrown tick pauses the world instead of freezing the page. */
+  onTickError?: (error: unknown) => void;
 }
 
 /**
@@ -70,7 +72,16 @@ export class SimulationClock {
     let ticked = false;
     while (this.accumulator >= TICK_MS) {
       this.accumulator -= TICK_MS;
-      this.handlers.onTick();
+      try {
+        this.handlers.onTick();
+      } catch (error) {
+        // A thrown tick must not kill the animation frame, or the page freezes
+        // on a dark canvas with no way to save or reset.
+        this.accumulator = 0;
+        console.error("Mosslight tick failed", error);
+        this.handlers.onTickError?.(error);
+        break;
+      }
       ticked = true;
     }
 

@@ -29,10 +29,11 @@ const buildOrder: Exclude<BuildingType, "root-heart">[] = [
   "lantern-grove",
   "commons-market",
   "root-workshop",
+  "sky-walk",
 ];
 const itemOrder: ItemKey[] = ["seed-pod", "resin", "moonwater", "map-fragment"];
 const districtOrder: DistrictType[] = ["meadow", "wetland", "lantern", "market", "ruin"];
-const recipeOrder: RecipeKey[] = ["lantern-kit", "bridge-kit", "comfort-kit"];
+const recipeOrder: RecipeKey[] = ["lantern-kit", "bridge-kit", "comfort-kit", "sky-lantern"];
 
 type BuildChoice = BuildTool;
 type ZoomAction = "in" | "out" | "reset";
@@ -88,6 +89,8 @@ export class HUD {
   private ledgerFilter: LedgerFilter = "all";
   private shortcutsOpen = false;
   private shortcutBindings: readonly Binding[] = [];
+  private victoryDismissed = false;
+  private toastTimer: number | null = null;
 
   constructor(root: HTMLElement, simulation: MosslightSimulation, callbacks: HUDCallbacks) {
     this.root = root;
@@ -150,6 +153,19 @@ export class HUD {
     }
   }
 
+  /** Short status line that does not rebuild the whole HUD. */
+  public notify(message: string): void {
+    const toast = this.root.querySelector<HTMLElement>("[data-toast]");
+    if (!toast) return;
+    toast.hidden = false;
+    toast.textContent = message;
+    if (this.toastTimer !== null) window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => {
+      toast.hidden = true;
+      this.toastTimer = null;
+    }, 2800);
+  }
+
   public render(): void {
     const state = this.simulation.state;
     this.applyDisclosure();
@@ -183,6 +199,11 @@ export class HUD {
 
     const collapseOverlay = this.root.querySelector<HTMLElement>("[data-collapse-overlay]");
     if (collapseOverlay) collapseOverlay.hidden = state.status !== "collapsed";
+    const victory = this.root.querySelector<HTMLElement>("[data-victory-overlay]");
+    if (victory) {
+      const show = this.simulation.isLedgerComplete() && !this.victoryDismissed && state.status !== "collapsed";
+      victory.hidden = !show;
+    }
     this.setText("[data-collapse-summary]", `The Commons held for ${state.day - 8} days. ${state.departures} residents left before the light failed.`);
 
     this.root.querySelectorAll<HTMLButtonElement>("[data-field-tab]").forEach((button) => {
@@ -305,6 +326,7 @@ export class HUD {
     this.setText("[data-forecast-window]", forecast.window);
     this.setText("[data-forecast-probability]", `${Math.round(forecast.probability * 100)}% likely`);
     this.setText("[data-forecast-recommendation]", forecast.recommendation);
+    this.renderResearch();
     this.setText("[data-season-event-title]", state.seasonalEvent.title);
     this.setText("[data-season-event-description]", state.seasonalEvent.description);
     this.setText("[data-season-event-days]", `${state.seasonalEvent.daysRemaining} DAYS LEFT`);
@@ -372,6 +394,11 @@ export class HUD {
         return;
       }
       const definition = BUILDING_DEFINITIONS[build];
+      if (build === "sky-walk" && state.chapter < 2 && !state.cloudmothsArrived) {
+        button.hidden = true;
+        return;
+      }
+      button.hidden = false;
       const missing: MissingCost[] = [...this.getMissingResources(build), ...this.getMissingItems(build)];
       const affordable = missing.length === 0;
       /*
@@ -450,6 +477,55 @@ export class HUD {
       "[data-objective-count]",
       `CH.${state.chapter + 1} · ${active.filter((objective) => objective.completed).length}/${active.length} DONE`,
     );
+  }
+
+  private renderResearch(): void {
+    const panel = this.root.querySelector<HTMLElement>("[data-torx]");
+    if (!panel) return;
+    const research = this.simulation.getResearch();
+    if (!research) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    const hottest = Object.entries(research.sampledRisks)
+      .slice()
+      .sort((left, right) => right[1] - left[1])[0];
+    this.setText("[data-torx-risk]", hottest ? `THRML ${hottest[0]} ${Math.round(hottest[1] * 100)}%` : "THRML");
+
+    const meters = this.root.querySelector<HTMLElement>("[data-torx-meters]");
+    if (meters) {
+      const policy = research.torxPolicy;
+      const axes: Array<[string, number]> = [
+        ["explore", policy.exploration],
+        ["mix", policy.social],
+        ["harvest", policy.harvest],
+        ["vigil", policy.vigil],
+      ];
+      meters.replaceChildren(...axes.map(([label, value]) => {
+        const row = document.createElement("li");
+        const name = document.createElement("span");
+        name.textContent = label;
+        const bar = document.createElement("span");
+        bar.className = "torx-meter";
+        const fill = document.createElement("i");
+        fill.style.width = `${Math.round(value * 100)}%`;
+        bar.append(fill);
+        const amount = document.createElement("em");
+        amount.textContent = `${Math.round(value * 100)}%`;
+        row.append(name, bar, amount);
+        return row;
+      }));
+    }
+
+    const alts = this.root.querySelector<HTMLElement>("[data-torx-alts]");
+    if (alts) {
+      alts.replaceChildren(...research.alternatives.slice(0, 2).map((forecast) => {
+        const item = document.createElement("li");
+        item.textContent = `${forecast.title} · ${Math.round(forecast.probability * 100)}%`;
+        return item;
+      }));
+    }
   }
 
   /** Building inspector — the surface for the new upgrade system. */
@@ -972,6 +1048,9 @@ export class HUD {
       case "dismiss-title":
         this.simulation.dismissTitle();
         break;
+      case "dismiss-victory":
+        this.victoryDismissed = true;
+        break;
       case "approve-proposal":
         this.simulation.approveProposal();
         this.callbacks.onChange();
@@ -1014,7 +1093,10 @@ export class HUD {
     const input = event.target as HTMLInputElement;
     if (!input.matches("[data-import-input]")) return;
     const file = input.files?.[0];
-    if (file) this.callbacks.onImport(file);
+    if (file) {
+      this.callbacks.onImport(file);
+      input.value = "";
+    }
     input.value = "";
   }
 
@@ -1036,6 +1118,17 @@ export class HUD {
           if (chord === "escape" || chord === "?" || chord === "shift+/") {
             event.preventDefault();
             this.shortcutsOpen = false;
+            this.render();
+            return true;
+          }
+          return false;
+        }
+
+        const victoryOpen = this.simulation.isLedgerComplete() && !this.victoryDismissed && state.status !== "collapsed";
+        if (victoryOpen) {
+          if (chord === "enter" || chord === "space" || chord === "escape") {
+            event.preventDefault();
+            this.victoryDismissed = true;
             this.render();
             return true;
           }
@@ -1334,6 +1427,11 @@ export class HUD {
         <div class="forecast-probability"><strong data-forecast-probability>65% likely</strong><span class="forecast-meter" data-forecast-meter role="progressbar" aria-label="Forecast probability" aria-valuemin="0" aria-valuemax="100" aria-valuenow="65"><i data-forecast-fill></i></span></div>
         <ul class="driver-list" data-forecast-drivers aria-label="Forecast drivers"></ul>
         <p class="recommendation" data-forecast-recommendation></p>
+        <div class="torx-signals" data-torx hidden>
+          <div class="panel-eyebrow"><span>TORX POLICY</span><span data-torx-risk>THRML</span></div>
+          <ul class="torx-meters" data-torx-meters></ul>
+          <ul class="torx-alts" data-torx-alts></ul>
+        </div>
         <p class="crisis-banner" data-crisis hidden></p>
         <div class="policy-row" data-policies></div>
         <div class="forecast-rewind" role="group" aria-label="Forecast history">
@@ -1468,6 +1566,16 @@ export class HUD {
           <button class="dispatch-button" type="button" data-action="reset">BEGIN AGAIN</button>
         </div>
       </div>
-    </div>`;
+    </div>
+
+    <div class="overlay victory-overlay" data-victory-overlay hidden role="dialog" aria-modal="true" aria-labelledby="victory-title">
+      <div class="overlay-card overlay-card--title">
+        <div class="panel-eyebrow"><span>THE LEDGER IS CLOSED</span><span>THE BASIN HOLDS</span></div>
+        <h2 id="victory-title">The moths found the light</h2>
+        <p>Every card is done. The Commons can still grow, wander, and weather the Long Shade. You are no longer proving the basin — you are keeping it.</p>
+        <button class="dispatch-button" type="button" data-action="dismiss-victory">KEEP WATCHING</button>
+      </div>
+    </div>
+    <div class="toast" data-toast hidden role="status" aria-live="polite"></div>`;
   }
 }

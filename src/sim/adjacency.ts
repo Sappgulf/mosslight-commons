@@ -150,6 +150,21 @@ export function evaluateAdjacency(
       break;
     }
 
+    case "sky-walk": {
+      const groves = nearby(context, position, "lantern-grove", 4).length;
+      if (groves > 0) {
+        const bonus = Math.min(0.3, groves * 0.12);
+        multiplier += bonus;
+        notes.push({ text: `Lanterns travel the walk · +${Math.round(bonus * 100)}%`, good: true });
+      }
+      const mothsNearby = nearby(context, position, "sky-walk", 3).length;
+      if (mothsNearby > 0) {
+        multiplier -= mothsNearby * 0.14;
+        notes.push({ text: `Walks overlapping · −${mothsNearby * 14}%`, good: false });
+      }
+      break;
+    }
+
     default:
       break;
   }

@@ -664,6 +664,14 @@ kbd {
 .driver-list li { font-size: 10px; line-height: 1.5; }
 .recommendation { font-size: 11px; line-height: 1.5; }
 
+.torx-signals { margin-top: var(--s2); padding-top: var(--s2); border-top: 1px solid var(--panel-border); }
+.torx-meters { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.torx-meters li { display: grid; grid-template-columns: 56px 1fr 32px; gap: 6px; align-items: center; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+.torx-meters em { font-style: normal; color: var(--paper); text-align: right; }
+.torx-meter { display: block; height: 5px; border-radius: 99px; background: rgba(99, 230, 212, 0.12); overflow: hidden; }
+.torx-meter i { display: block; height: 100%; background: linear-gradient(90deg, #63e6d4, #c8a9ff); }
+.torx-alts { margin: 6px 0 0; padding-left: 14px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+
 .resident-heading h2 { font-size: 17px; }
 .resident-heading p { font-size: 10px; }
 .decision-note { font-size: 10px; line-height: 1.5; }
@@ -847,4 +855,32 @@ kbd {
   font-family: Georgia, serif;
 }
 .title-overlay h2 { font-size: 32px; margin: 8px 0; color: var(--paper); }
+.victory-overlay .overlay-card--title {
+  border-color: rgba(99, 230, 212, 0.4);
+}
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  z-index: 60;
+  transform: translateX(-50%);
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 8px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: rgba(8, 21, 27, 0.92);
+  color: var(--paper);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+.toast[hidden] { display: none; }
+:focus-visible {
+  outline: 2px solid #63e6d4;
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .overlay, .toast, #boot, #boot-bar { transition: none; }
+}
 .day-card small { display: block; color: var(--muted); margin-top: 3px; letter-spacing: 0.08em; }

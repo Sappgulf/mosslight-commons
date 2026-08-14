@@ -32,10 +32,16 @@ const hud = new HUD(hudElement, simulation, {
     return worldScene?.resetZoom() ?? 100;
   },
   getZoomPercent: () => worldScene?.getZoomPercent() ?? 100,
-  onSave: () => saves.save(),
+  onSave: () => {
+    hud.notify(saves.save() ? "The Commons is saved." : "Could not write a save.");
+  },
   onLoad: () => {
-    if (!saves.load()) return;
+    if (!saves.load()) {
+      hud.notify("No save to load.");
+      return;
+    }
     refreshAll();
+    hud.notify("The last save is restored.");
   },
   onReset: () => {
     // Drop the save and reload. Rebuilding the scene, HUD, retained view pools,
@@ -45,10 +51,18 @@ const hud = new HUD(hudElement, simulation, {
     saves.clear(true);
     location.reload();
   },
-  onExport: () => saves.exportToFile(),
+  onExport: () => {
+    saves.exportToFile();
+    hud.notify("A world file is downloading.");
+  },
   onImport: (file) => {
     void saves.importFromFile(file).then((ok) => {
-      if (ok) refreshAll();
+      if (ok) {
+        refreshAll();
+        hud.notify("The imported world is live.");
+      } else {
+        hud.notify("That file is not a Commons save.");
+      }
     });
   },
   onToggleMute: () => audio.toggleMute(),
@@ -286,13 +300,31 @@ window.advanceTime = (milliseconds: number) => {
  * The world advances on its own fixed-step clock rather than a Phaser scene
  * timer, so a stalled frame or a backgrounded tab cannot desynchronise it.
  */
+const paintHud = () => {
+  try {
+    hud.render();
+  } catch (error) {
+    console.error("HUD render failed", error);
+  }
+};
+
 const clock = new SimulationClock({
   onTick: () => simulation.advance(),
+  onTickError: () => {
+    simulation.state.paused = true;
+    paintHud();
+    hud.notify("Time stuttered. The Commons is paused.");
+  },
   onFrame: (ticked) => {
     if (!ticked) return;
-    worldScene?.renderNow();
-    hud.render();
+    try {
+      worldScene?.renderNow();
+    } catch (error) {
+      console.error("Scene render failed", error);
+    }
+    paintHud();
     audio.setPhase(simulation.state.phase);
+    audio.setSeason(simulation.state.season);
     audio.setHarmony(simulation.state.metrics.harmony);
     audio.reactToMessages(simulation.state.messages);
   },
@@ -396,7 +428,7 @@ const GAME_BINDINGS: Binding[] = [
     preventDefault: true,
     // Saving from a focused button is still saving; never swallow it.
     allowOnControl: true,
-    run: () => { saves.save(); },
+    run: () => { hud.notify(saves.save() ? "The Commons is saved." : "Could not write a save."); },
   },
   {
     id: "shortcuts",
@@ -441,7 +473,7 @@ const syncResearchForecast = async () => {
       }
       return;
     }
-    simulation.applyForecast(result.forecast, result.provider);
+    simulation.applyResearch(result);
     hud.render();
   } finally {
     forecastInFlight = false;

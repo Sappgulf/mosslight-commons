@@ -8,6 +8,8 @@ import type { BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Speci
 import { Effects } from "./Effects";
 import { LightLayer, type LightSource } from "./LightLayer";
 import { TerrainPainter } from "./TerrainPainter";
+import { WeatherLayer } from "./WeatherLayer";
+import { hasTradition } from "../sim/traditions";
 import { dismissBoot, setBootProgress } from "../ui/boot";
 
 /**
@@ -115,6 +117,7 @@ const BUILDING_TEXTURE_KEYS: Partial<Record<BuildingType, string>> = {
   "lantern-grove": "building-lantern-grove",
   "commons-market": "building-commons-market",
   "root-workshop": "building-root-workshop",
+  "sky-walk": "building-sky-walk",
 };
 
 /** Display sizes rescaled for the 32px grid. */
@@ -125,6 +128,7 @@ const BUILDING_DISPLAY_SIZES: Partial<Record<BuildingType, { width: number; heig
   "lantern-grove": { width: 55, height: 58 },
   "commons-market": { width: 66, height: 60 },
   "root-workshop": { width: 62, height: 59 },
+  "sky-walk": { width: 70, height: 72 },
 };
 
 /** Buildings that emit light, and how far it reaches. */
@@ -135,6 +139,7 @@ const BUILDING_LIGHT: Partial<Record<BuildingType, { radius: number; strength: n
   "burrow-home": { radius: 58, strength: 0.58, color: 0xffb46b },
   "root-workshop": { radius: 66, strength: 0.6, color: 0xc8a9ff },
   "reed-farm": { radius: 44, strength: 0.4, color: 0x8dbb72 },
+  "sky-walk": { radius: 96, strength: 0.82, color: 0xc8a9ff },
 };
 
 const RESIDENT_TEXTURE_KEYS: Record<Species, string> = {
@@ -218,7 +223,9 @@ export class WorldScene extends Phaser.Scene {
 
   private terrain!: TerrainPainter;
   private waterOverlay!: Phaser.GameObjects.Graphics;
+  private waterShimmer!: Phaser.GameObjects.Graphics;
   private light!: LightLayer;
+  private weather!: WeatherLayer;
   private effects!: Effects;
   private districtLayer!: Phaser.GameObjects.Container;
   private rootNetwork!: Phaser.GameObjects.Graphics;
@@ -272,6 +279,9 @@ export class WorldScene extends Phaser.Scene {
   private districtSignature = "";
   private lastHintText = "";
   private ambientTimer = 0;
+  /** Resident the camera should keep framed; cleared when the player pans. */
+  private followId: string | null = null;
+  private reduceMotion = false;
 
   constructor(
     simulation: MosslightSimulation,
@@ -288,6 +298,10 @@ export class WorldScene extends Phaser.Scene {
     // Report real load progress to the boot splash rather than leaving the
     // player watching an unexplained dark rectangle.
     this.load.on("progress", (value: number) => setBootProgress(value * 0.9, "Gathering the lanterns…"));
+    this.load.on("loaderror", (file: { key?: string }) => {
+      // Missing art falls back to vector marks; a failed file must never stall boot.
+      console.warn(`Texture missing: ${file.key ?? "unknown"}`);
+    });
 
     for (const [key, fileName] of Object.entries(BUILDING_TEXTURE_KEYS)) {
       if (fileName) this.load.image(fileName, `assets/runtime/buildings/${key}.webp`);
@@ -326,6 +340,7 @@ export class WorldScene extends Phaser.Scene {
     }).setDepth(DEPTH.terrain);
 
     this.waterOverlay = this.add.graphics().setDepth(DEPTH.water);
+    this.waterShimmer = this.add.graphics().setDepth(DEPTH.water + 0.2);
     this.districtLayer = this.add.container(0, 0).setDepth(DEPTH.districts);
     this.rootNetwork = this.add.graphics().setDepth(DEPTH.rootNetwork);
     this.hoverLayer = this.add.graphics().setDepth(DEPTH.hover);
@@ -335,6 +350,11 @@ export class WorldScene extends Phaser.Scene {
     this.expeditionLayer = this.add.container(0, 0).setDepth(DEPTH.entities + 5);
 
     this.effects = new Effects(this, DEPTH.effects);
+    this.weather = new WeatherLayer(
+      this,
+      { x: OFFSET_X, y: OFFSET_Y, width: BOARD_W, height: BOARD_H },
+      DEPTH.effects - 2,
+    );
     this.light = new LightLayer(this, {
       x: OFFSET_X,
       y: OFFSET_Y,
@@ -370,6 +390,7 @@ export class WorldScene extends Phaser.Scene {
       fontSize: "11px",
     }).setDepth(DEPTH.labels).setScrollFactor(0);
 
+    this.reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     this.bindInput();
     this.unsubscribe = this.simulation.onEvent((event) => this.handleSimEvent(event));
 
@@ -405,6 +426,7 @@ export class WorldScene extends Phaser.Scene {
         if (Math.hypot(dx, dy) > 5) {
           this.dragMoved = true;
           this.cameraTouched = true;
+          this.followId = null;
           const zoom = this.cameras.main.zoom;
           this.cameras.main.setScroll(
             this.cameraOrigin.x - dx / zoom,
@@ -625,6 +647,7 @@ export class WorldScene extends Phaser.Scene {
   public focusResident(id: string): void {
     const resident = this.simulation.state.residents.find((candidate) => candidate.id === id);
     if (!resident) return;
+    this.followId = id;
     const center = this.cellCenter(resident.position);
     this.cameras.main.pan(center.x, center.y, 280, "Sine.easeInOut");
     this.renderNow();
@@ -665,17 +688,23 @@ export class WorldScene extends Phaser.Scene {
         if (!position) return;
         this.effects.burst(position.x, position.y, "gather", 12);
         if (event.label) this.effects.floatText(position.x, position.y - 8, event.label, "#c5dd8c");
+        if (!this.reduceMotion) this.cameras.main.shake(70, 0.0016);
         break;
       case "build":
         if (!position) return;
         this.effects.dust(position.x, position.y);
         this.effects.ring(position.x, position.y, 0x63e6d4, 46);
+        if (!this.reduceMotion) this.cameras.main.shake(140, 0.0034);
         break;
       case "upgrade":
         if (!position) return;
         this.effects.burst(position.x, position.y, "upgrade", 16);
         this.effects.ring(position.x, position.y, 0xf4b85b, 54);
         if (event.label) this.effects.floatText(position.x, position.y - 14, event.label, "#f4b85b");
+        if (!this.reduceMotion) this.cameras.main.flash(180, 244, 184, 91, false);
+        break;
+      case "objective":
+        if (!this.reduceMotion) this.cameras.main.flash(220, 99, 230, 212, false);
         break;
       case "craft":
         if (!position) return;
@@ -752,14 +781,14 @@ export class WorldScene extends Phaser.Scene {
       }
     }
     for (const view of this.nodeViews.values()) {
-      view.sprite.setScale(
-        view.sprite.scaleX,
-        view.sprite.scaleY,
-      );
       view.sprite.rotation = Math.sin(t * 1.1 + view.bobPhase) * 0.045;
+      view.sprite.y = view.sprite.getData("baseY") + Math.sin(t * 1.8 + view.bobPhase) * 1.8;
     }
 
+    this.drawWaterShimmer(t);
+    if (!this.reduceMotion) this.weather.update(this.simulation.state, delta);
     this.light.update(this.simulation.state.phase, this.collectLightSources());
+    this.followSelected(delta);
 
     // A slow drift of spores, denser at night.
     this.ambientTimer += delta;
@@ -782,19 +811,60 @@ export class WorldScene extends Phaser.Scene {
         x: center.x,
         y: center.y,
         // Upgraded buildings light a wider area, so levels read on the map.
-        radius: config.radius * (1 + (building.level - 1) * 0.18),
+        radius: config.radius * (1 + (building.level - 1) * 0.18) * (hasTradition(this.simulation.state, "sky-veil") ? 1.18 : 1),
         strength: config.strength * flicker,
         color: config.color,
       });
     }
 
-    // Glowtails carry their own light.
+    // Glowtails and Cloudmoths carry their own light.
     for (const resident of this.simulation.state.residents) {
-      if (resident.species !== "glowtail") continue;
       const center = this.cellCenter(resident.position);
-      sources.push({ x: center.x, y: center.y, radius: 34, strength: 0.42, color: 0x63e6d4 });
+      if (resident.species === "glowtail") {
+        sources.push({ x: center.x, y: center.y, radius: 34, strength: 0.42, color: 0x63e6d4 });
+      } else if (resident.species === "cloudmoth") {
+        sources.push({ x: center.x, y: center.y, radius: 42, strength: 0.5, color: 0xc8a9ff });
+      }
     }
     return sources;
+  }
+
+  private followSelected(delta: number): void {
+    if (!this.followId || this.reduceMotion) return;
+    const resident = this.simulation.state.residents.find((candidate) => candidate.id === this.followId);
+    if (!resident) {
+      this.followId = null;
+      return;
+    }
+    const target = this.cellCenter(resident.position);
+    const camera = this.cameras.main;
+    const mid = camera.midPoint;
+    const blend = Math.min(1, delta / 220);
+    camera.centerOn(
+      mid.x + (target.x - mid.x) * blend,
+      mid.y + (target.y - mid.y) * blend,
+    );
+  }
+
+  private drawWaterShimmer(time: number): void {
+    this.waterShimmer.clear();
+    const phase = this.simulation.state.phase;
+    if (phase === "night") return;
+    const grid = this.simulation.state.grid;
+    const alpha = phase === "day" ? 0.16 : 0.1;
+    this.waterShimmer.lineStyle(1.2, 0xc8fff5, alpha);
+    for (let y = 0; y < GRID_H; y += 2) {
+      for (let x = 0; x < GRID_W; x += 2) {
+        const tile = grid[y]?.[x];
+        if (tile !== "water" && tile !== "wetland") continue;
+        const originX = OFFSET_X + x * TILE_SIZE;
+        const originY = OFFSET_Y + y * TILE_SIZE + ((Math.sin(time * 1.4 + x * 0.7 + y) + 1) * 6);
+        this.waterShimmer.beginPath();
+        this.waterShimmer.moveTo(originX + 4, originY);
+        this.waterShimmer.lineTo(originX + TILE_SIZE * 1.4, originY + 1.5);
+        this.waterShimmer.strokePath();
+      }
+    }
   }
 
   // --- Camera controls ----------------------------------------------------
@@ -940,6 +1010,7 @@ export class WorldScene extends Phaser.Scene {
 
         const center = this.cellCenter({ x, y });
         const sprite = this.add.image(center.x, center.y - 3, textureKey).setDisplaySize(40, 41);
+        sprite.setData("baseY", center.y - 3);
         this.nodeLayer.add(sprite);
         // Newly grown nodes pop in rather than appearing between frames.
         sprite.setScale(sprite.scaleX * 0.3, sprite.scaleY * 0.3);
@@ -1188,6 +1259,17 @@ export class WorldScene extends Phaser.Scene {
       graphics.fillRoundedRect(-13, -8, 26, 16, 5);
       graphics.fillStyle(0xf4b85b, 0.85);
       graphics.fillTriangle(-15, -8, 0, -18, 15, -8);
+      return;
+    }
+    if (type === "sky-walk") {
+      graphics.fillStyle(0x2d8c84, 0.95);
+      graphics.fillRoundedRect(-16, -4, 8, 22, 3);
+      graphics.fillRoundedRect(8, -4, 8, 22, 3);
+      graphics.fillStyle(0xc8a9ff, 0.9);
+      graphics.fillTriangle(-18, -4, 0, -20, 18, -4);
+      graphics.fillStyle(0xf4b85b, 0.85);
+      graphics.fillCircle(-6, 2, 2);
+      graphics.fillCircle(6, 2, 2);
       return;
     }
     graphics.fillStyle(0x4b3d62, 0.95);
@@ -1488,6 +1570,14 @@ export class WorldScene extends Phaser.Scene {
     const hoveredBuilding = this.hoverCell ? this.simulation.getBuildingAt(this.hoverCell) : undefined;
     const hoveredDistrict = this.hoverCell ? this.simulation.getDistrictAt(this.hoverCell) : undefined;
     const activeExpedition = this.simulation.state.expeditions.find((expedition) => expedition.status === "active");
+    const weatherHint =
+      this.simulation.state.season === "longshade"
+        ? "Long Shade ash is falling · keep the lanterns"
+        : this.simulation.state.season === "emberfall"
+          ? "emberfall motes lift from the canopy"
+          : this.simulation.state.season === "mosswake"
+            ? "mosswake petals drift across the reeds"
+            : "suncrest spores hang in the warm air";
 
     const hint = buildMode === "path"
       ? "hover to preview PATH · click to pack earth"
@@ -1501,7 +1591,7 @@ export class WorldScene extends Phaser.Scene {
             ? `${activeExpedition.title} · scout ${activeExpedition.progress}/${activeExpedition.duration}`
             : hoveredDistrict
               ? `${DISTRICT_DEFINITIONS[hoveredDistrict.type].label} · ${DISTRICT_DEFINITIONS[hoveredDistrict.type].bonus}`
-              : "drag to pan · scroll to zoom · click a creature to follow it";
+              : `${weatherHint} · drag to pan · scroll to zoom`;
 
     if (hint !== this.lastHintText) {
       this.lastHintText = hint;
@@ -1540,6 +1630,10 @@ export class WorldScene extends Phaser.Scene {
     }
     if (type === "root-workshop" && tile !== "grass" && tile !== "path") {
       return { valid: false, reason: "CLEAR GROUND" };
+    }
+    if (type === "sky-walk") {
+      if (state.chapter < 2 && !state.cloudmothsArrived) return { valid: false, reason: "NOT YET" };
+      if (tile !== "grass" && tile !== "path") return { valid: false, reason: "CLEAR GROUND" };
     }
     if (type === "path") {
       if (tile !== "grass") return { valid: false, reason: "NEED GRASS" };

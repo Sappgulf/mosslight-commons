@@ -1,10 +1,18 @@
 import type { Forecast, WorldState } from "./types";
 
+export interface TorxPolicy {
+  exploration: number;
+  social: number;
+  harvest: number;
+  vigil: number;
+}
+
 export interface TorxThrmlForecastResponse {
   provider: "torx-thrml";
   forecast: Forecast;
+  alternatives: Forecast[];
   sampledRisks: Record<string, number>;
-  torxPolicy: { exploration: number; social: number };
+  torxPolicy: TorxPolicy;
   explanation: string[];
 }
 
@@ -88,6 +96,14 @@ export class TorxThrmlBridge {
         this.recordFailure();
         return null;
       }
+      payload.alternatives ??= [];
+      payload.torxPolicy = {
+        exploration: payload.torxPolicy?.exploration ?? 0,
+        social: payload.torxPolicy?.social ?? 0,
+        harvest: payload.torxPolicy?.harvest ?? 0,
+        vigil: payload.torxPolicy?.vigil ?? 0,
+      };
+      payload.sampledRisks ??= {};
       this.consecutiveFailures = 0;
       this.status = "connected";
       return payload;
@@ -126,6 +142,8 @@ function serializeForBridge(state: WorldState) {
     seasonalEvent: { effect: state.seasonalEvent.effect, title: state.seasonalEvent.title },
     metrics: state.metrics,
     status: state.status,
+    chapter: state.chapter,
+    cloudmothsArrived: state.cloudmothsArrived,
     revealedAreas: state.revealedAreas,
     buildings: state.buildings.map((building) => ({ type: building.type, level: building.level })),
     residents: state.residents.map((resident) => ({

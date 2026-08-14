@@ -60,7 +60,12 @@ export function checkThresholdObjectives(context: SimContext): void {
   for (const objective of context.state.objectives) {
     if (objective.completed || objective.chapter > context.state.chapter) continue;
     if (objective.kind === "population") {
-      objective.progress = Math.min(objective.target, context.state.metrics.population);
+      const count = objective.species
+        ? context.state.residents.filter((resident) => resident.species === objective.species).length
+        : context.state.metrics.population;
+      objective.progress = Math.min(objective.target, count);
+    } else if (objective.kind === "tradition" && objective.tradition) {
+      objective.progress = context.state.traditions.includes(objective.tradition) ? objective.target : 0;
     } else if (objective.kind === "harmony") {
       objective.progress = Math.min(objective.target, Math.round(context.state.metrics.harmony));
     } else if (objective.kind === "expedition" && objective.zone) {

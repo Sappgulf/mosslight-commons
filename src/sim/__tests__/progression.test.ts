@@ -5,7 +5,7 @@ import type { RecipeKey, Vec2 } from "../types";
 
 const SEED = 2048;
 const COLLECTIBLE = new Set(["fern", "mushroom", "crystal", "ruin"]);
-const RECIPES: RecipeKey[] = ["bridge-kit", "lantern-kit", "comfort-kit"];
+const RECIPES: RecipeKey[] = ["bridge-kit", "lantern-kit", "comfort-kit", "sky-lantern"];
 
 function revealedNodes(simulation: MosslightSimulation): Vec2[] {
   const found: Vec2[] = [];
@@ -45,7 +45,11 @@ function playThrough(simulation: MosslightSimulation, ticks: number): void {
       if (plot && simulation.build("root-workshop", plot)) workshop = true;
     }
     simulation.dispatchExpedition();
-    for (const recipe of RECIPES) simulation.startCraft(recipe);
+    // Once the Sky Veil is on the ledger, hold materials for it instead of
+    // burning every last resin and map on comfort kits.
+    if (simulation.state.chapter < 3 || simulation.state.traditions.includes("sky-veil")) {
+      for (const recipe of RECIPES) simulation.startCraft(recipe);
+    }
     for (const building of simulation.state.buildings) {
       if (simulation.canUpgrade(building.id).ok) {
         simulation.startUpgrade(building.id);
@@ -55,6 +59,13 @@ function playThrough(simulation: MosslightSimulation, ticks: number): void {
     if (simulation.state.chapter >= 3) {
       const plot = buildablePlot(simulation);
       if (plot) simulation.paintPath(plot);
+    }
+    if (simulation.state.chapter >= 4) {
+      const plot = buildablePlot(simulation);
+      if (plot) simulation.build("sky-walk", plot);
+    }
+    for (const key of ["seed-vault", "open-table", "hearthcraft", "lantern-vigil", "long-memory", "sky-veil"] as const) {
+      simulation.adoptTradition(key);
     }
     simulation.advance();
   }
@@ -72,7 +83,8 @@ describe("the game can be finished", () => {
 
     const open = simulation.state.objectives.filter((objective) => !objective.completed);
     expect(open.map((objective) => objective.id)).toEqual([]);
-    expect(simulation.state.chapter).toBe(3);
+    expect(simulation.state.chapter).toBe(4);
+    expect(simulation.isLedgerComplete()).toBe(true);
   });
 
   it("opens each chapter in turn rather than skipping any", () => {
@@ -82,7 +94,7 @@ describe("the game can be finished", () => {
       playThrough(simulation, 1);
       seen.add(simulation.state.chapter);
     }
-    expect([...seen].sort()).toEqual([0, 1, 2, 3]);
+    expect([...seen].sort()).toEqual([0, 1, 2, 3, 4]);
   });
 });
 

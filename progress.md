@@ -520,6 +520,46 @@ keeps ticking, so this cannot make it three times.
 
 - 134 Vitest tests (16 new) and 19 Playwright tests pass.
 
+## Polish pass — close the loop, keep the page alive
+
+- [x] Victory overlay when the ledger is finished; sandbox play continues.
+- [x] Camera follows a selected resident until the player pans away.
+- [x] Save, load, import, and export speak back through a toast.
+- [x] A thrown tick pauses the world instead of freezing the canvas.
+- [x] HUD and scene paints are isolated so one cannot take down the other.
+- [x] Reduced-motion skips weather, shake, and camera follow.
+- [x] Missing textures no longer stall the loader.
+- [x] Vercel cache headers: HTML always fresh, hashed assets immutable.
+
+## Presence pass — Sky Walk, Sky Lantern, and a real Torx graph
+
+- [x] New late building: Sky Walk. Unlocks at chapter 2 or when Cloudmoths
+      arrive. Produces light, assigns moths as crew, likes lantern groves.
+- [x] New recipe: Sky Lantern. Comforts Cloudmoths and adds light.
+- [x] Chapter 4 now asks the player to hang a Sky Walk. Played runs still
+      finish the whole ledger.
+- [x] New painterly Sky Walk sprite, keyed and shipped as 8KB WebP.
+- [x] Torx+THRML sidecar now samples a six-node Ising graph (stores, housing,
+      shade) and returns four policy axes plus two alternative futures.
+- [x] The forecast card shows those signals when the sidecar is live.
+- [x] Local CORS now accepts the Vite origin, not only the preview port.
+
+## Atmosphere pass — weather, light, and a last chapter
+
+The systems already played like a city. The basin still *looked* like a
+diagram. This pass gives the world weather, punch, and somewhere to go after
+chapter three.
+
+- [x] Seasonal weather layer: mosswake petals, suncrest spores, emberfall
+      embers, Long Shade ash, rain, and Cloudmoth dust.
+- [x] Water shimmer, node bob, camera shake/flash on gather, build, upgrade,
+      and ledger beats.
+- [x] Cloudmoths carry lilac light; Sky Veil tradition widens lanterns and
+      helps moths belong.
+- [x] Wind/ash audio bed that thickens with the season.
+- [x] Chapter 4: Raise the Sky Veil, keep three Cloudmoths. A played game now
+      finishes 15/15 and ends on chapter 4.
+
 ## Dispersal pass — a town rather than a pile
 
 Residents resolved their market, farm and grove from a map that held exactly

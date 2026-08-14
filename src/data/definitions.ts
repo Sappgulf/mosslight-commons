@@ -160,7 +160,7 @@ export interface RecipeDefinition {
   description: string;
   cost: Partial<Record<ItemKey, number>>;
   duration: number;
-  effect: "light" | "reveal" | "comfort";
+  effect: "light" | "reveal" | "comfort" | "sky";
 }
 
 export const RECIPE_DEFINITIONS: Record<RecipeKey, RecipeDefinition> = {
@@ -187,6 +187,14 @@ export const RECIPE_DEFINITIONS: Record<RecipeKey, RecipeDefinition> = {
     cost: { "seed-pod": 2, resin: 1 },
     duration: 4,
     effect: "comfort",
+  },
+  "sky-lantern": {
+    label: "Sky Lantern",
+    icon: "✶",
+    description: "Hang a moth-silk lantern so Cloudmoths can find the Commons at night.",
+    cost: { moonwater: 2, resin: 1 },
+    duration: 5,
+    effect: "sky",
   },
 };
 
@@ -312,6 +320,15 @@ export const BUILDING_DEFINITIONS: Record<BuildingType, BuildingDefinition> = {
     description: "Refines gathered materials into civic craft.",
     cost: { food: 10, water: 6, warmth: 8 },
     itemCost: { resin: 2, "map-fragment": 1 },
+  },
+  "sky-walk": {
+    label: "Sky Walk",
+    shortLabel: "SKY",
+    icon: "✶",
+    color: "#C8A9FF",
+    description: "A hanging walkway where Cloudmoths rest and lanterns travel above the basin.",
+    cost: { light: 10, warmth: 8, food: 4 },
+    itemCost: { moonwater: 2, "map-fragment": 1 },
   },
 };
 

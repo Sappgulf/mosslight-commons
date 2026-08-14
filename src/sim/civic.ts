@@ -210,6 +210,8 @@ export function normalizeWorld(state: WorldState, grid: TileKind[][]): WorldStat
     want.rewardItem ??= "seed-pod";
     want.rewardAmount ??= 2;
   }
+  state.crafted ??= { "lantern-kit": 0, "bridge-kit": 0, "comfort-kit": 0, "sky-lantern": 0 };
+  state.crafted["sky-lantern"] ??= 0;
   state.forecastHistory ??= [state.forecast];
   state.forecastCursor ??= Math.max(0, state.forecastHistory.length - 1);
   state.marketShortages ??= [];

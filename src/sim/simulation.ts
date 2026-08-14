@@ -35,6 +35,7 @@ import {
   updateChapter,
 } from "./systems/progression";
 import { updateResources } from "./systems/production";
+import type { TorxThrmlForecastResponse } from "./bridge";
 import type {
   Building,
   BuildingType,
@@ -83,6 +84,7 @@ const STORAGE_YIELD: Partial<Record<BuildingType, Partial<Record<ResourceKey, nu
   "burrow-home": { warmth: 14 },
   "lantern-grove": { light: 26 },
   "root-workshop": { warmth: 10, light: 10 },
+  "sky-walk": { light: 18, warmth: 6 },
 };
 const START_DAY = 8;
 const TICKS_PER_DAY = 12;
@@ -137,6 +139,7 @@ const WORKPLACE_CRAFT: Partial<Record<BuildingType, keyof Resident["skills"]>> =
   "root-workshop": "crafting",
   "commons-market": "crafting",
   "lantern-grove": "scouting",
+  "sky-walk": "scouting",
 };
 
 /** Crossings before bare ground packs into a road, and the daily cap on that. */
@@ -166,6 +169,7 @@ const LIGHT_RADIUS: Partial<Record<BuildingType, number>> = {
   "commons-market": 4,
   "burrow-home": 2,
   "root-workshop": 3,
+  "sky-walk": 5,
 };
 
 /** How often a resident without a want may develop one. */
@@ -293,6 +297,7 @@ export class MosslightSimulation {
    */
   private nextProposalId = 1;
   private localForecast: Forecast | undefined;
+  private researchSignals: TorxThrmlForecastResponse | null = null;
   private resourceWarningLevels: Record<ResourceKey, number> = {
     food: 0,
     water: 0,
@@ -401,6 +406,11 @@ export class MosslightSimulation {
 
   public dismissTitle(): void {
     this.state.titleSeen = true;
+  }
+
+  /** True when every ledger card is done — the sandbox still runs after this. */
+  public isLedgerComplete(): boolean {
+    return this.state.objectives.length > 0 && this.state.objectives.every((objective) => objective.completed);
   }
 
   /**
@@ -823,6 +833,17 @@ export class MosslightSimulation {
       return false;
     }
 
+    if (type === "sky-walk") {
+      if (this.state.chapter < 2 && !this.state.cloudmothsArrived) {
+        this.addMessage("BUILD BLOCKED · A Sky Walk waits for Cloudmoths or the second chapter.", "warning");
+        return false;
+      }
+      if (tile !== "grass" && tile !== "path") {
+        this.addMessage("BUILD BLOCKED · Sky Walks need a clear patch or path.", "warning");
+        return false;
+      }
+    }
+
     const definition = BUILDING_DEFINITIONS[type];
     const costScale = type === "burrow-home" && this.hasPolicy("shelter-first") ? 0.7 : 1;
     for (const [resource, amount] of Object.entries(definition.cost)) {
@@ -977,6 +998,16 @@ export class MosslightSimulation {
         this.state.forecast.tone === "warning" ? "warning" : "info",
       );
     }
+    if (source === "local") this.researchSignals = null;
+  }
+
+  public applyResearch(result: TorxThrmlForecastResponse): void {
+    this.researchSignals = result;
+    this.applyForecast(result.forecast, result.provider);
+  }
+
+  public getResearch(): TorxThrmlForecastResponse | null {
+    return this.researchSignals;
   }
 
   // --- Serialization ------------------------------------------------------
@@ -1053,7 +1084,7 @@ export class MosslightSimulation {
       expeditions: [],
       seasonalEvent: this.createSeasonalEvent("mosswake"),
       crafting: null,
-      crafted: { "lantern-kit": 0, "bridge-kit": 0, "comfort-kit": 0 },
+      crafted: { "lantern-kit": 0, "bridge-kit": 0, "comfort-kit": 0, "sky-lantern": 0 },
       objectives: createObjectives(),
       chapter: 0,
       metrics: {
@@ -1487,6 +1518,14 @@ export class MosslightSimulation {
         resident.needs.belonging = clamp(resident.needs.belonging + 3);
         resident.needs.shelter = clamp(resident.needs.shelter + 2);
       }
+    } else if (definition.effect === "sky") {
+      this.state.resources.light = clamp(this.state.resources.light + 8);
+      for (const resident of this.state.residents) {
+        if (resident.species === "cloudmoth") {
+          resident.needs.belonging = clamp(resident.needs.belonging + 8);
+          resident.needs.safety = clamp(resident.needs.safety + 6);
+        }
+      }
     } else {
       this.revealZone("old-hollow");
     }
@@ -1724,7 +1763,10 @@ export class MosslightSimulation {
           resident.needs.shelter = clamp(resident.needs.shelter + (4 + 5 * warmed) * hearth);
           if (warmed < 0.5) resident.lastDecisionExplanation = "There was no fuel left for the hearth.";
         }
-        if (goal === "socialize") resident.needs.belonging = clamp(resident.needs.belonging + 7);
+        if (goal === "socialize") {
+          const veil = resident.species === "cloudmoth" && hasTradition(this.state, "sky-veil") ? 1.4 : 1;
+          resident.needs.belonging = clamp(resident.needs.belonging + 7 * veil);
+        }
         if (goal === "explore") {
           resident.needs.safety = clamp(resident.needs.safety + 3);
           resident.skills.scouting = clamp(resident.skills.scouting + 0.25);
@@ -1752,6 +1794,7 @@ export class MosslightSimulation {
           }
           if (workplace?.type === "reed-farm") resident.skills.farming = clamp(resident.skills.farming + rate);
           else if (workplace?.type === "root-workshop") resident.skills.crafting = clamp(resident.skills.crafting + rate);
+          else if (workplace?.type === "sky-walk") resident.skills.scouting = clamp(resident.skills.scouting + rate);
           else resident.skills.scouting = clamp(resident.skills.scouting + rate * 0.5);
         }
       }
@@ -2724,6 +2767,27 @@ export class MosslightSimulation {
       resident.workplaceId = best.id;
       resident.mentorId = undefined;
     }
+
+    const walks = this.buildingsByType.get("sky-walk");
+    if (walks && walks.length > 0) {
+      for (const resident of this.state.residents) {
+        if (resident.species !== "cloudmoth") continue;
+        const home = this.buildingIndex.get(resident.homeId)?.position ?? resident.position;
+        let best = walks[0]!;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (const walk of walks) {
+          const score = manhattan(walk.position, home) + (counts.get(walk.id) ?? 0) * 0.4;
+          if (score < bestScore) {
+            best = walk;
+            bestScore = score;
+          }
+        }
+        if (resident.workplaceId === best.id) continue;
+        counts.set(resident.workplaceId, Math.max(0, (counts.get(resident.workplaceId) ?? 1) - 1));
+        counts.set(best.id, (counts.get(best.id) ?? 0) + 1);
+        resident.workplaceId = best.id;
+      }
+    }
   }
 
   private buildingIndexResident(id: string): Resident | undefined {
@@ -3187,6 +3251,45 @@ function createObjectives(): Objective[] {
       rewardItem: "seed-pod",
       rewardAmount: 4,
       chapter: 3,
+    },
+    {
+      id: "raise-the-sky-veil",
+      title: "Raise the Sky Veil",
+      description: "Take up the Sky Veil so Cloudmoths can rest in the canopy light.",
+      kind: "tradition",
+      tradition: "sky-veil",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "moonwater",
+      rewardAmount: 4,
+      chapter: 4,
+    },
+    {
+      id: "a-host-of-moths",
+      title: "A Host of Moths",
+      description: "Keep three Cloudmoths in the Commons through the Long Shade.",
+      kind: "population",
+      species: "cloudmoth",
+      target: 3,
+      progress: 0,
+      completed: false,
+      rewardItem: "resin",
+      rewardAmount: 4,
+      chapter: 4,
+    },
+    {
+      id: "hang-a-sky-walk",
+      title: "Hang a Sky Walk",
+      description: "Raise a hanging walkway so Cloudmoths have a place above the basin.",
+      kind: "build",
+      building: "sky-walk",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "moonwater",
+      rewardAmount: 3,
+      chapter: 4,
     },
   ];
 }

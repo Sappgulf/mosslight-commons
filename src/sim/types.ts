@@ -6,7 +6,7 @@ export type ItemKey = "seed-pod" | "resin" | "moonwater" | "map-fragment";
 
 export type DistrictType = "meadow" | "wetland" | "lantern" | "market" | "ruin";
 
-export type RecipeKey = "lantern-kit" | "bridge-kit" | "comfort-kit";
+export type RecipeKey = "lantern-kit" | "bridge-kit" | "comfort-kit" | "sky-lantern";
 
 export type RelationshipKind = "friendship" | "rivalry" | "kinship" | "family";
 
@@ -30,7 +30,8 @@ export type BuildingType =
   | "reed-farm"
   | "lantern-grove"
   | "commons-market"
-  | "root-workshop";
+  | "root-workshop"
+  | "sky-walk";
 
 /** Tools the player can hold. Paths are a terrain verb, not a building. */
 export type BuildTool = Exclude<BuildingType, "root-heart"> | "path";
@@ -72,7 +73,7 @@ export type ResidentGoal = "rest" | "forage" | "work" | "socialize" | "explore";
 
 export type Season = "mosswake" | "suncrest" | "emberfall" | "longshade";
 
-export type ObjectiveKind = "collect" | "build" | "expedition" | "craft" | "upgrade" | "population" | "harmony";
+export type ObjectiveKind = "collect" | "build" | "expedition" | "craft" | "upgrade" | "population" | "harmony" | "tradition";
 
 export type LifeStage = "sprout" | "adult" | "elder";
 
@@ -139,7 +140,8 @@ export type TraditionKey =
   | "lantern-vigil"
   | "long-memory"
   | "hearthcraft"
-  | "open-table";
+  | "open-table"
+  | "sky-veil";
 
 export interface Resident {
   id: string;
@@ -256,6 +258,8 @@ export interface Objective {
   building?: BuildingType;
   zone?: MapZoneKey;
   recipe?: RecipeKey;
+  tradition?: TraditionKey;
+  species?: Species;
   rewardItem?: ItemKey;
   rewardAmount?: number;
   /** Chapter index; objectives unlock a chapter at a time. */

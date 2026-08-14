@@ -56,6 +56,7 @@ export function updateResources(context: SimContext): void {
   const groveOutput = weightedOutput(context, "lantern-grove");
   const marketOutput = weightedOutput(context, "commons-market");
   const workshops = weightedOutput(context, "root-workshop", "crafting");
+  const skyWalks = weightedOutput(context, "sky-walk", "scouting");
   /*
    * The workshop renders *surplus* resin into warmth and light, and leaves a
    * working reserve alone.
@@ -114,6 +115,7 @@ export function updateResources(context: SimContext): void {
     "light",
     groveOutput * 0.72 * groveFactor * lanternPolicy
       + marketOutput * marketFactor * marketPolicy
+      + skyWalks * 0.55
       + craftedResin * 0.12
       - seasonalDrain,
   );

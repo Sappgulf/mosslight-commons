@@ -40,8 +40,11 @@ export class AudioEngine {
   private context: AudioContext | null = null;
   private master: GainNode | null = null;
   private ambientGain: GainNode | null = null;
+  private weatherGain: GainNode | null = null;
+  private weatherFilter: BiquadFilterNode | null = null;
   private ambientVoices: OscillatorNode[] = [];
   private currentPhase: WorldState["phase"] | null = null;
+  private currentSeason: WorldState["season"] | null = null;
   private lastHarmony = -1;
   private muted: boolean;
   private lastMessageId = 0;
@@ -70,9 +73,25 @@ export class AudioEngine {
       ambientGain.gain.value = 0;
       ambientGain.connect(master);
 
+      const weatherFilter = context.createBiquadFilter();
+      weatherFilter.type = "bandpass";
+      weatherFilter.frequency.value = 480;
+      weatherFilter.Q.value = 0.7;
+      const weatherGain = context.createGain();
+      weatherGain.gain.value = 0;
+      const noise = context.createBufferSource();
+      noise.buffer = AudioEngine.noiseBuffer(context);
+      noise.loop = true;
+      noise.connect(weatherFilter);
+      weatherFilter.connect(weatherGain);
+      weatherGain.connect(master);
+      noise.start();
+
       this.context = context;
       this.master = master;
       this.ambientGain = ambientGain;
+      this.weatherGain = weatherGain;
+      this.weatherFilter = weatherFilter;
     } catch {
       // Audio is a nicety; a blocked or unavailable AudioContext must never
       // break the game.
@@ -140,6 +159,36 @@ export class AudioEngine {
     }
     this.ambientVoices = voices;
     ambientGain.gain.setTargetAtTime(tone.gain, context.currentTime, 1.5);
+  }
+
+  /** Wind and ash bed that thickens in Emberfall and the Long Shade. */
+  setSeason(season: WorldState["season"]): void {
+    const context = this.context;
+    const weatherGain = this.weatherGain;
+    const weatherFilter = this.weatherFilter;
+    if (!context || !weatherGain || !weatherFilter || context.state !== "running") return;
+    if (season === this.currentSeason) return;
+    this.currentSeason = season;
+
+    const beds: Record<WorldState["season"], { gain: number; frequency: number }> = {
+      mosswake: { gain: 0.012, frequency: 620 },
+      suncrest: { gain: 0.008, frequency: 740 },
+      emberfall: { gain: 0.02, frequency: 380 },
+      longshade: { gain: 0.032, frequency: 260 },
+    };
+    const bed = beds[season];
+    weatherFilter.frequency.setTargetAtTime(bed.frequency, context.currentTime, 1.4);
+    weatherGain.gain.setTargetAtTime(this.muted ? 0 : bed.gain, context.currentTime, 1.4);
+  }
+
+  private static noiseBuffer(context: AudioContext): AudioBuffer {
+    const length = context.sampleRate * 2;
+    const buffer = context.createBuffer(1, length, context.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let index = 0; index < length; index += 1) {
+      data[index] = (Math.random() * 2 - 1) * 0.6;
+    }
+    return buffer;
   }
 
   /** Extra chime voices as harmony rises — denser, not louder. */

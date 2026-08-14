@@ -46,7 +46,7 @@ Mosslight Commons uses a top-down 2D presentation with pixel-informed silhouette
 | `world.buildingSheet` | `assets/world/mosslight-buildings.png` | Five first-slice structures, including Root Workshop | planned |
 | `world.gatheringBoard` | `assets/generated/mosslight-gathering-board.png` | Reference board for four map blocks and four collectible item tokens | generated reference |
 | `world.civicExpansionBoard` | `assets/generated/mosslight-civic-expansion-board.png` | Reference board for scouting, fog-of-war zones, district motifs, recipes, relationships, and seasonal events | generated reference |
-| `world.runtimeBuildingSprites` | `assets/runtime/buildings/*.png` | Transparent runtime sprites for the root-heart and five civic structures | generated runtime |
+| `world.runtimeBuildingSprites` | `assets/runtime/buildings/*.png` | Transparent runtime sprites for the root-heart, civic structures, and Sky Walk | generated runtime |
 | `world.runtimeNodeSprites` | `assets/runtime/nodes/*.png` | Transparent runtime sprites for Fern, Mushroom, Crystal, and Ruin nodes | generated runtime |
 | `world.rootHeart` | `assets/world/root-heart.png` | Central landmark | planned |
 | `world.eventEffects` | `assets/world/event-effects.png` | Festival, warning, discovery effects | planned |

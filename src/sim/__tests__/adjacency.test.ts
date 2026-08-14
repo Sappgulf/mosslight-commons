@@ -122,6 +122,25 @@ describe("evaluateAdjacency", () => {
     });
   });
 
+  describe("sky walk", () => {
+    it("gains output near lantern groves and loses it when walks overlap", () => {
+      const lit = evaluateAdjacency(
+        "sky-walk",
+        at(2, 1),
+        context([".....", ".....", "....."], [building("lantern-grove", 3, 1)]),
+      );
+      const plain = evaluateAdjacency("sky-walk", at(2, 1), context([".....", ".....", "....."]));
+      expect(lit.multiplier).toBeGreaterThan(plain.multiplier);
+
+      const crowded = evaluateAdjacency(
+        "sky-walk",
+        at(2, 1),
+        context([".....", ".....", "....."], [building("sky-walk", 3, 1)]),
+      );
+      expect(crowded.multiplier).toBeLessThan(plain.multiplier);
+    });
+  });
+
   describe("root workshop", () => {
     it("gains output beside a road and beside ruins", () => {
       // The road must run *beside* the workshop; a tile under it is its own cell.

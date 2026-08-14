@@ -61,6 +61,14 @@ export const TRADITION_DEFINITIONS: Record<TraditionKey, TraditionDefinition> = 
     cost: { "map-fragment": 6, "seed-pod": 12 },
     chapter: 2,
   },
+  "sky-veil": {
+    key: "sky-veil",
+    label: "Sky Veil",
+    icon: "✶",
+    effect: "Lanterns reach farther, and Cloudmoths feel they can stay.",
+    cost: { moonwater: 6, resin: 3, "map-fragment": 3 },
+    chapter: 3,
+  },
 };
 
 export const TRADITION_ORDER: readonly TraditionKey[] = [
@@ -69,6 +77,7 @@ export const TRADITION_ORDER: readonly TraditionKey[] = [
   "hearthcraft",
   "lantern-vigil",
   "long-memory",
+  "sky-veil",
 ];
 
 export function hasTradition(state: WorldState, key: TraditionKey): boolean {
