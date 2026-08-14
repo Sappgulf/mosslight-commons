@@ -180,6 +180,19 @@ export function normalizeWorld(state: WorldState, grid: TileKind[][]): WorldStat
     state.proposal.votes ??= [];
   }
   state.activePolicies ??= [];
+  state.traditions ??= [];
+  state.generations ??= 0;
+  state.peakMastery ??= 0;
+  // Footfall is sized to the board; a save from before it existed, or from a
+  // different board size, gets a fresh one rather than a ragged array.
+  const cells = grid.length * (grid[0]?.length ?? 0);
+  if (!Array.isArray(state.footfall) || state.footfall.length !== cells) {
+    state.footfall = new Array(cells).fill(0);
+  }
+  for (const resident of state.residents) {
+    resident.masteryTier ??= 0;
+    resident.taught ??= 0;
+  }
   state.wantsMet ??= 0;
   state.wantsMissed ??= 0;
   state.districtFocusDay ??= state.day;

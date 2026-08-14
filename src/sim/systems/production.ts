@@ -1,5 +1,7 @@
 import { OUTPUT_MULTIPLIER } from "../../data/definitions";
 import { marketShortages } from "../civic";
+import { tierFor } from "../mastery";
+import { hasTradition } from "../traditions";
 import type { BuildingType, Resident, ResourceKey } from "../types";
 import type { SimContext } from "./context";
 
@@ -26,9 +28,15 @@ export function weightedOutput(
     if (skill) {
       const workers = context.state.residents.filter((resident) => resident.workplaceId === building.id);
       if (workers.length > 0) {
+        /*
+         * Mastery, not just raw skill. Each worker contributes their tier's
+         * multiplier, so a bench of Masters is worth substantially more than a
+         * bench of beginners and the settlement's accumulated experience shows
+         * up in what it can actually produce.
+         */
+        const mastery = workers.reduce((sum, resident) => sum + tierFor(resident.skills[skill]).output, 0) / workers.length;
         const average = workers.reduce((sum, resident) => sum + resident.skills[skill], 0) / workers.length;
-        // Skill swings output between 85% and 130%.
-        contribution *= 0.85 + (average / 100) * 0.45;
+        contribution *= mastery * (0.9 + (average / 100) * 0.2);
       }
     }
     total += contribution;
@@ -93,7 +101,9 @@ export function updateResources(context: SimContext): void {
     state.resources[resource] = clamp(state.resources[resource] + delta, 0, storage[resource]);
   };
 
-  store("food", farmOutput * 1.0 * farmFactor * farmPolicy * rivalryDrag * habitatPenalty);
+  // Practices the Commons keeps, applied to what it makes.
+  const seedVault = hasTradition(state, "seed-vault") ? 1.2 : 1;
+  store("food", farmOutput * 1.0 * farmFactor * farmPolicy * rivalryDrag * habitatPenalty * seedVault);
   store(
     "water",
     farmOutput * 0.9 * farmFactor * rivalryDrag * (0.65 + basinQuality / 280) - state.habitatStress * 0.02,

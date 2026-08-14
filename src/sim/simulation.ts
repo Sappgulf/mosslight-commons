@@ -25,6 +25,8 @@ import { beginLongShade, crisisBanner, tickLongShade } from "./crisis";
 import { annotateForecast, calculateLocalForecast, compareForecasts } from "./forecast";
 import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
 import { describeWant, isWantSatisfied, unmetWantKinds } from "./wants";
+import { bestCraft, inheritedSkills, MASTERY_TIERS, speciesAffinity, tierFor } from "./mastery";
+import { canAfford, hasTradition, isAvailable, TRADITION_DEFINITIONS } from "./traditions";
 import type { SimContext } from "./systems/context";
 import {
   activeObjectives,
@@ -57,6 +59,7 @@ import type {
   ResourceKey,
   Season,
   SettlementDiagnosis,
+  TraditionKey,
   SettlementMetrics,
   SettlementStatus,
   Species,
@@ -86,7 +89,13 @@ const TICKS_PER_DAY = 12;
 const DAYS_PER_SEASON = 7;
 const BASE_HOUSING_CAPACITY = 24;
 const HOME_HOUSING_CAPACITY = 18;
-const MAX_POPULATION = 60;
+/*
+ * A ceiling on the basin, not on the game. It was 60, which the settlement
+ * reached by day 74 and then sat at for the rest of the run with housing no
+ * longer meaning anything. Housing is meant to be the constraint the player
+ * manages; this is only the point past which the basin itself is full.
+ */
+const MAX_POPULATION = 110;
 const ARRIVAL_INTERVAL = TICKS_PER_DAY * 3;
 const HISTORY_LIMIT = 240;
 const SEASONS: Season[] = ["mosswake", "suncrest", "emberfall", "longshade"];
@@ -115,6 +124,22 @@ const PROPOSAL_COST = { food: 5, warmth: 4 } as const;
 /** A district focus has to be lived with for a while before it can change. */
 const DISTRICT_SWITCH_DAYS = 4;
 const DISTRICT_SWITCH_COST = { food: 6, warmth: 4 } as const;
+
+/** Which craft each workplace teaches. */
+const WORKPLACE_CRAFT: Partial<Record<BuildingType, keyof Resident["skills"]>> = {
+  "reed-farm": "farming",
+  "root-workshop": "crafting",
+  "commons-market": "crafting",
+  "lantern-grove": "scouting",
+};
+
+/** Crossings before bare ground packs into a road, and the daily cap on that. */
+const DESIRE_PATH_FOOTFALL = 260;
+const DESIRE_PATHS_PER_DAY = 1;
+
+/** How far ahead a worker must be to count as a teacher, and where teaching stops. */
+const MENTOR_GAP = 18;
+const MENTOR_GAP_CEILING = 82;
 
 /** Days between the residents raising shelter for themselves. */
 const SELF_BUILD_INTERVAL = 4;
@@ -1058,6 +1083,10 @@ export class MosslightSimulation {
       // out of the system for the first four days of the game.
       districtFocusDay: START_DAY - DISTRICT_SWITCH_DAYS,
       selfBuildDay: START_DAY,
+      traditions: [],
+      footfall: new Array(GRID_WIDTH * GRID_HEIGHT).fill(0),
+      generations: 0,
+      peakMastery: 0,
       onboardingStep: 0,
       onboardingDismissed: false,
       waterQuality: createWaterQuality(grid),
@@ -1273,6 +1302,8 @@ export class MosslightSimulation {
       age,
       stage: stageForAge(age),
       distress: 0,
+      masteryTier: 0,
+      taught: 0,
     };
   }
 
@@ -1307,6 +1338,8 @@ export class MosslightSimulation {
       { name: "wants", run: () => this.updateWants() },
       { name: "arrivals", run: () => this.maybeWelcomeResident() },
       { name: "self-build", dailyOnly: true, run: () => this.maybeSelfBuild() },
+      { name: "mastery", run: () => this.checkMastery() },
+      { name: "desire-paths", dailyOnly: true, run: () => this.wearDesirePaths() },
       { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
       { name: "issue-proposal", dailyOnly: true, run: () => this.maybeIssueProposal() },
       { name: "expire-proposal", dailyOnly: true, run: () => this.expireProposal() },
@@ -1523,6 +1556,16 @@ export class MosslightSimulation {
 
     for (const resident of this.state.residents) {
       if (dayRolled) {
+        /*
+         * A day's work is a day's practice.
+         *
+         * Skill used to accrue only in the tick a resident happened to arrive
+         * at their workplace with `work` as their goal, which almost never
+         * happened once needs started steering them — a hundred and seventy
+         * days in, the whole settlement was still Untrained. Everyone assigned
+         * to a bench now improves at it daily, and nobody has to be lucky.
+         */
+        this.practiseCraft(resident);
         resident.age += 1;
         const nextStage = stageForAge(resident.age);
         if (nextStage !== resident.stage) {
@@ -1643,13 +1686,15 @@ export class MosslightSimulation {
           // A meal is food out of the granary and water out of the cistern.
           const fed = this.drawFromStore("food", MEAL_FOOD);
           const watered = this.drawFromStore("water", MEAL_WATER);
-          resident.needs.food = clamp(resident.needs.food + 9 * Math.min(1, fed * 0.7 + watered * 0.3));
+          const table = hasTradition(this.state, "open-table") ? 1.3 : 1;
+          resident.needs.food = clamp(resident.needs.food + 9 * table * Math.min(1, fed * 0.7 + watered * 0.3));
           if (fed < 0.5) resident.lastDecisionExplanation = "The stalls are bare. I went hungry.";
         }
         if (goal === "rest" && resident.needs.shelter < SATED) {
           // A warm burrow burns fuel.
           const warmed = this.drawFromStore("warmth", REST_WARMTH);
-          resident.needs.shelter = clamp(resident.needs.shelter + 4 + 5 * warmed);
+          const hearth = hasTradition(this.state, "hearthcraft") ? 1.35 : 1;
+          resident.needs.shelter = clamp(resident.needs.shelter + (4 + 5 * warmed) * hearth);
           if (warmed < 0.5) resident.lastDecisionExplanation = "There was no fuel left for the hearth.";
         }
         if (goal === "socialize") resident.needs.belonging = clamp(resident.needs.belonging + 7);
@@ -1662,7 +1707,22 @@ export class MosslightSimulation {
           resident.needs.belonging = clamp(resident.needs.belonging + 1);
           // Time on the job is how skill accrues.
           const workplace = this.buildingIndex.get(resident.workplaceId);
-          const rate = resident.stage === "sprout" ? 0.4 : resident.stage === "elder" ? 0.12 : 0.22;
+          let rate = resident.stage === "sprout" ? 0.4 : resident.stage === "elder" ? 0.12 : 0.22;
+          // A settlement that keeps its records teaches faster.
+          if (hasTradition(this.state, "long-memory")) rate *= 1.6;
+          // An experienced hand at the same bench brings a beginner on quickly.
+          const mentor = this.findMentorFor(resident, workplace?.id);
+          if (mentor) {
+            rate *= 1.75;
+            if (resident.mentorId !== mentor.id) {
+              resident.mentorId = mentor.id;
+              mentor.taught += 1;
+              this.addMessage(
+                `APPRENTICE · ${mentor.name} has taken ${resident.name} on at the ${workplace?.type === "reed-farm" ? "reeds" : "workshop"}.`,
+                "good",
+              );
+            }
+          }
           if (workplace?.type === "reed-farm") resident.skills.farming = clamp(resident.skills.farming + rate);
           else if (workplace?.type === "root-workshop") resident.skills.crafting = clamp(resident.skills.crafting + rate);
           else resident.skills.scouting = clamp(resident.skills.scouting + rate * 0.5);
@@ -1706,12 +1766,105 @@ export class MosslightSimulation {
     for (const building of this.state.buildings) {
       const radius = LIGHT_RADIUS[building.type];
       if (!radius) continue;
-      const reach = radius * (1 + (building.level - 1) * 0.25);
+      const vigil = hasTradition(this.state, "lantern-vigil") ? 1.5 : 1;
+      const reach = radius * (1 + (building.level - 1) * 0.25) * vigil;
       const distance = manhattan(building.position, position);
       if (distance > reach) continue;
       best = Math.max(best, 1 - distance / (reach + 1));
     }
     return best;
+  }
+
+  /**
+   * Ground that gets walked enough packs itself into a road.
+   *
+   * The settlement's shape used to come only from where the player drew paths.
+   * Now the routes residents actually use wear in on their own, so a Commons
+   * grows the roads its life needs and the map records how it has been lived
+   * in. Deliberately slow, and capped per day, so the basin never turns to
+   * pavement.
+   */
+  private wearDesirePaths(): void {
+    let worn = 0;
+    for (let index = 0; index < this.state.footfall.length && worn < DESIRE_PATHS_PER_DAY; index += 1) {
+      if (this.state.footfall[index]! < DESIRE_PATH_FOOTFALL) continue;
+      const x = index % GRID_WIDTH;
+      const y = Math.floor(index / GRID_WIDTH);
+      // Reset regardless, so a tile that cannot pave stops being reconsidered.
+      this.state.footfall[index] = 0;
+      if (this.state.grid[y]?.[x] !== "grass") continue;
+      if (this.isOccupied({ x, y })) continue;
+
+      this.state.grid[y]![x] = "path";
+      worn += 1;
+      this.addMessage(`TRACKS · A path has worn itself in at ${x + 1}:${y + 1}.`, "info");
+      this.emit({ type: "build", position: { x, y }, label: "TRACK", tone: "good" });
+    }
+    if (worn > 0) {
+      this.invalidateAllPaths();
+      this.metricsDirty = true;
+    }
+  }
+
+  /**
+   * An experienced worker at the same building who can bring a beginner on.
+   *
+   * Skill used to accrue in isolation at a fixed rate, so nobody ever learned
+   * from anybody. Teaching is what turns a settlement's experience into
+   * something the next generation starts from rather than repeats.
+   */
+  /** A day of practice at whatever bench this resident is assigned to. */
+  private practiseCraft(resident: Resident): void {
+    if (resident.stage === "sprout" && resident.age < 2) return;
+    const workplace = this.buildingIndex.get(resident.workplaceId);
+    const craft = workplace ? WORKPLACE_CRAFT[workplace.type] : undefined;
+    const skill = craft ?? speciesAffinity(resident.species);
+
+    let rate = resident.stage === "sprout" ? 1.9 : resident.stage === "elder" ? 0.7 : 1.35;
+    if (hasTradition(this.state, "long-memory")) rate *= 1.5;
+    if (this.findMentorFor(resident, resident.workplaceId)) rate *= 1.6;
+    // Learning slows near the top of a craft; the last stretch is the hardest.
+    const level = resident.skills[skill];
+    if (level > 70) rate *= 0.6;
+    resident.skills[skill] = clamp(level + rate);
+  }
+
+  private findMentorFor(learner: Resident, workplaceId?: string): Resident | undefined {
+    if (!workplaceId) return undefined;
+    const craft = bestCraft(learner).skill;
+    if (learner.skills[craft] >= MENTOR_GAP_CEILING) return undefined;
+
+    let best: Resident | undefined;
+    for (const candidate of this.state.residents) {
+      if (candidate.id === learner.id) continue;
+      if (candidate.workplaceId !== workplaceId) continue;
+      if (candidate.skills[craft] - learner.skills[craft] < MENTOR_GAP) continue;
+      if (!best || candidate.skills[craft] > best.skills[craft]) best = candidate;
+    }
+    return best;
+  }
+
+  /**
+   * Announces a resident crossing into a new tier of their craft. Growth that
+   * nobody reports is growth the player never sees.
+   */
+  private checkMastery(): void {
+    for (const resident of this.state.residents) {
+      const { tier, skill } = bestCraft(resident);
+      if (tier.rank <= resident.masteryTier) continue;
+      resident.masteryTier = tier.rank;
+      this.state.peakMastery = Math.max(this.state.peakMastery, tier.rank);
+      const crafts: Record<typeof skill, string> = {
+        farming: "the reeds",
+        crafting: "the workshop",
+        scouting: "the far paths",
+      };
+      this.addMessage(
+        `MASTERY · ${resident.name} is now a ${tier.label} of ${crafts[skill]}.`,
+        "good",
+      );
+      this.emit({ type: "want", position: resident.position, label: tier.mark, tone: "good" });
+    }
   }
 
   private findClosestFriend(resident: Resident): Resident | undefined {
@@ -1744,10 +1897,18 @@ export class MosslightSimulation {
    * still theirs — but the basin is no longer incapable of housing itself.
    */
   private maybeSelfBuild(): void {
-    if (this.state.metrics.housingPressure <= 1.02) return;
     if (this.state.day - this.state.selfBuildDay < SELF_BUILD_INTERVAL) return;
 
-    const definition = BUILDING_DEFINITIONS["burrow-home"];
+    /*
+     * What the settlement raises follows what the report says is wrong, so the
+     * city grows in the direction of its own needs — farms when the stalls run
+     * thin, groves when the edges are dark, a market when neighbours never
+     * meet — rather than only ever adding another burrow.
+     */
+    const type = this.chooseSelfBuild();
+    if (!type) return;
+
+    const definition = BUILDING_DEFINITIONS[type];
     // Only from genuine surplus, so the residents never build themselves hungry.
     for (const [resource, amount] of Object.entries(definition.cost) as Array<[ResourceKey, number]>) {
       if (this.state.resources[resource] < amount * SELF_BUILD_SURPLUS) return;
@@ -1759,11 +1920,55 @@ export class MosslightSimulation {
     if (!plot) return;
 
     this.state.selfBuildDay = this.state.day;
-    if (!this.build("burrow-home", plot)) return;
-    this.addMessage(
-      "COMMONS · With the burrows full, the residents raised one of their own.",
-      "good",
-    );
+    if (!this.build(type, plot)) return;
+    this.addMessage(`COMMONS · The residents raised a ${definition.label} of their own.`, "good");
+  }
+
+  /** The building the Commons most needs next, or undefined if it needs none. */
+  private chooseSelfBuild(): Exclude<BuildingType, "root-heart"> | undefined {
+    const { housingPressure, diagnosis } = this.state.metrics;
+    // Build ahead of the crunch rather than only once it has arrived, so the
+    // settlement visibly keeps growing instead of settling at its first cap.
+    if (housingPressure > 0.88) return "burrow-home";
+    if (diagnosis.tone !== "warning") return undefined;
+
+    const byNeed: Record<NeedKey, Exclude<BuildingType, "root-heart">> = {
+      shelter: "burrow-home",
+      food: "reed-farm",
+      safety: "lantern-grove",
+      belonging: "commons-market",
+    };
+    const wanted = byNeed[diagnosis.need];
+    // One market is usually enough; more farms and groves are always welcome.
+    if (wanted === "commons-market" && this.countBuildings("commons-market") >= 2) return undefined;
+    return wanted;
+  }
+
+  /**
+   * Takes up a settlement practice for good. Returns false when the Commons
+   * cannot pay for it or already keeps it.
+   */
+  public adoptTradition(key: TraditionKey): boolean {
+    if (!isAvailable(this.state, key)) return false;
+    if (!canAfford(this.state, key)) {
+      this.addMessage(`TRADITION · The Commons cannot yet keep the ${TRADITION_DEFINITIONS[key].label}.`, "warning");
+      return false;
+    }
+    const definition = TRADITION_DEFINITIONS[key];
+    for (const [item, amount] of Object.entries(definition.cost) as Array<[ItemKey, number]>) {
+      this.state.items[item] -= amount;
+    }
+    this.state.traditions.push(key);
+    this.metricsDirty = true;
+    this.updateMetrics();
+    this.addMessage(`TRADITION · The Commons takes up the ${definition.label}. ${definition.effect}`, "good");
+    this.emit({ type: "objective", label: definition.label, tone: "good" });
+    return true;
+  }
+
+  /** Practices the Commons keeps. */
+  public getTraditions(): TraditionKey[] {
+    return this.state.traditions;
   }
 
   /** Nearest legal plot for a home, searched outward from a point. */
@@ -2056,6 +2261,10 @@ export class MosslightSimulation {
         storage[resource] += amount * multiplier;
       }
     }
+    if (hasTradition(state, "open-table")) {
+      storage.food *= 1.25;
+      storage.water *= 1.25;
+    }
     for (const resource of Object.keys(storage) as ResourceKey[]) {
       storage[resource] = Math.min(MAX_RESOURCE, Math.round(storage[resource]));
     }
@@ -2281,6 +2490,10 @@ export class MosslightSimulation {
 
     resident.path.shift();
     resident.position = { x: next.x, y: next.y };
+
+    // Remember where the settlement actually walks.
+    const index = next.y * GRID_WIDTH + next.x;
+    if (this.state.footfall[index] !== undefined) this.state.footfall[index] += 1;
   }
 
   private findWalkableNear(position: Vec2): Vec2 {
@@ -2430,7 +2643,12 @@ export class MosslightSimulation {
     child.stage = "sprout";
     child.species = parent.species;
     child.homeId = parent.homeId;
-    child.skills = { farming: 2, crafting: 2, scouting: 2 };
+    // A quarter of what the parent knows, so a long-lived Commons raises
+    // better workers than a young one and the generations visibly compound.
+    child.skills = inheritedSkills(parent);
+    child.skills[speciesAffinity(child.species)] += 3;
+    child.masteryTier = 0;
+    this.state.generations = Math.max(this.state.generations, 1);
     this.state.residents.push(child);
     this.state.births += 1;
     this.state.relationships.push({
@@ -2442,7 +2660,13 @@ export class MosslightSimulation {
       sharedDays: 0,
     });
     this.metricsDirty = true;
-    this.addMessage(`BIRTH · ${child.name} arrived in ${parent.name}'s burrow.`, "good");
+    const inheritedBest = bestCraft(child);
+    this.addMessage(
+      inheritedBest.level >= 8
+        ? `BIRTH · ${child.name} arrived in ${parent.name}'s burrow, already knowing something of the family craft.`
+        : `BIRTH · ${child.name} arrived in ${parent.name}'s burrow.`,
+      "good",
+    );
     this.emit({ type: "arrival", position: child.position, label: child.name, tone: "good" });
   }
 
@@ -2583,7 +2807,7 @@ function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-export const SAVE_VERSION = 6;
+export const SAVE_VERSION = 7;
 
 export interface SavePayload {
   version: number;

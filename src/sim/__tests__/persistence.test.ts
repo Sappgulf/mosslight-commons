@@ -90,16 +90,16 @@ describe("SaveManager", () => {
     const saves = new SaveManager(simulation);
     saves.save();
 
-    const raw = JSON.parse(localStorage.getItem("mosslight.save.v6")!);
+    const raw = JSON.parse(localStorage.getItem("mosslight.save.v7")!);
     raw.payload.version = SAVE_VERSION - 1;
-    localStorage.setItem("mosslight.save.v6", JSON.stringify(raw));
+    localStorage.setItem("mosslight.save.v7", JSON.stringify(raw));
 
     expect(saves.load()).toBe(false);
     expect(saves.hasSave()).toBe(false);
   });
 
   it("rejects malformed JSON rather than throwing", () => {
-    localStorage.setItem("mosslight.save.v6", "{ not json");
+    localStorage.setItem("mosslight.save.v7", "{ not json");
     const saves = new SaveManager(new MosslightSimulation(SEED));
     expect(saves.peek()).toBeNull();
     expect(saves.load()).toBe(false);
@@ -110,11 +110,71 @@ describe("SaveManager", () => {
     const saves = new SaveManager(simulation);
     saves.save();
 
-    const raw = JSON.parse(localStorage.getItem("mosslight.save.v6")!);
+    const raw = JSON.parse(localStorage.getItem("mosslight.save.v7")!);
     delete raw.payload.state.grid;
-    localStorage.setItem("mosslight.save.v6", JSON.stringify(raw));
+    localStorage.setItem("mosslight.save.v7", JSON.stringify(raw));
 
     expect(saves.load()).toBe(false);
+  });
+
+  /**
+   * The guard for a mistake made twice.
+   *
+   * New world fields (a want's reward, then the settlement's traditions and
+   * footfall) were each added without a matching default for worlds saved
+   * before they existed. Both times the first render read straight through the
+   * missing value and took the whole HUD down. `normalizeWorld` is what stands
+   * between an older save and that crash, so it is checked directly.
+   */
+  it("fills in every field a world saved before them would be missing", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 60);
+    const payload = JSON.parse(simulation.serialize()) as {
+      state: Record<string, unknown> & { residents: Array<Record<string, unknown>> };
+    };
+
+    // Strip everything added after the world schema first shipped.
+    for (const field of [
+      "traditions",
+      "footfall",
+      "generations",
+      "peakMastery",
+      "wantsMet",
+      "wantsMissed",
+      "districtFocusDay",
+      "selfBuildDay",
+    ]) {
+      delete payload.state[field];
+    }
+    for (const resident of payload.state.residents) {
+      delete resident.masteryTier;
+      delete resident.taught;
+      if (resident.want && typeof resident.want === "object") {
+        const want = resident.want as Record<string, unknown>;
+        delete want.deadlineDay;
+        delete want.rewardItem;
+        delete want.rewardAmount;
+      }
+    }
+
+    const restored = new MosslightSimulation(SEED);
+    restored.restore({ ...JSON.parse(simulation.serialize()), state: payload.state });
+
+    const state = restored.state;
+    expect(Array.isArray(state.traditions)).toBe(true);
+    expect(state.footfall.length).toBe(state.grid.length * state.grid[0]!.length);
+    expect(typeof state.generations).toBe("number");
+    for (const resident of state.residents) {
+      expect(typeof resident.masteryTier).toBe("number");
+      expect(typeof resident.taught).toBe("number");
+      if (resident.want) {
+        expect(typeof resident.want.deadlineDay).toBe("number");
+        expect(typeof resident.want.rewardAmount).toBe("number");
+      }
+    }
+
+    // And it must keep running rather than throwing on the next tick.
+    expect(() => advance(restored, 30)).not.toThrow();
   });
 
   it("stops writing once sealed for a reset", () => {

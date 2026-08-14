@@ -3,6 +3,7 @@ import Phaser from "phaser";
 import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS } from "../data/definitions";
 import { MosslightSimulation, type SimEvent } from "../sim/simulation";
 import { WANT_GLYPH } from "../sim/wants";
+import { masteryMark } from "../sim/mastery";
 import type { BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
 import { Effects } from "./Effects";
 import { LightLayer, type LightSource } from "./LightLayer";
@@ -167,6 +168,8 @@ interface ResidentView {
   sprite: Phaser.GameObjects.Image | null;
   label: Phaser.GameObjects.Text;
   wantMark: Phaser.GameObjects.Text;
+  masteryText: Phaser.GameObjects.Text;
+  lastMastery: string | null;
   lastGoal: ResidentGoal | null;
   lastSelected: boolean | null;
   lastWant: string | null;
@@ -1228,6 +1231,17 @@ export class WorldScene extends Phaser.Scene {
           backgroundColor: "#08151bcc",
           padding: { x: 5, y: 3 },
         }).setOrigin(0.5, 1).setVisible(false);
+        // A small mark for what this resident has become good at, kept on the
+        // opposite side to the want glyph so the two never collide.
+        const masteryText = this.add.text(-11, -22, "", {
+          fontFamily: "system-ui, sans-serif",
+          fontSize: "10px",
+          fontStyle: "bold",
+          color: "#f4b85b",
+          stroke: "#08151b",
+          strokeThickness: 3,
+        }).setOrigin(0.5, 0.5);
+
         const wantMark = this.add.text(10, -22, "", {
           color: "#ffd58b",
           fontFamily: "Georgia, serif",
@@ -1236,7 +1250,7 @@ export class WorldScene extends Phaser.Scene {
           strokeThickness: 3,
         }).setOrigin(0.5, 1).setVisible(false);
 
-        container.add([shadow, marker, body, label, wantMark]);
+        container.add([shadow, marker, body, label, wantMark, masteryText]);
         this.entityLayer.add(container);
         view = {
           container,
@@ -1246,6 +1260,8 @@ export class WorldScene extends Phaser.Scene {
           sprite,
           label,
           wantMark,
+          masteryText,
+          lastMastery: null,
           lastGoal: null,
           lastSelected: null,
           lastWant: null,
@@ -1282,6 +1298,14 @@ export class WorldScene extends Phaser.Scene {
         } else {
           view.wantMark.setVisible(false);
         }
+      }
+
+      // Mastery mark, refreshed only when the tier actually changes.
+      const mark = masteryMark(resident);
+      if (view.lastMastery !== mark) {
+        view.lastMastery = mark;
+        view.masteryText.setText(mark);
+        view.masteryText.setVisible(mark !== "");
       }
 
       // Face the direction of travel.

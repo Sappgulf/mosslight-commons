@@ -18,6 +18,8 @@ exports[`tick pipeline > runs stages in the recorded order 1`] = `
   "wants",
   "arrivals",
   "self-build",
+  "mastery",
+  "desire-paths",
   "births",
   "issue-proposal",
   "expire-proposal",

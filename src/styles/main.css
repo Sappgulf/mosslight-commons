@@ -748,6 +748,34 @@ kbd {
 .commons-report p { margin: 0; color: var(--paper); font-size: 11px; line-height: 1.45; }
 .commons-report .report-advice { color: var(--muted); }
 
+/* Traditions: practices the Commons takes up for good. */
+.tradition-list { display: grid; gap: var(--s2); margin-top: var(--s2); }
+.tradition {
+  display: grid;
+  gap: 2px;
+  padding: var(--s2) var(--s3);
+  border: 1px solid rgba(245, 230, 200, 0.14);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  background: rgba(8, 21, 27, 0.48);
+  cursor: pointer;
+  text-align: left;
+}
+.tradition:hover:not(:disabled) { border-color: var(--teal); background: rgba(99, 230, 212, 0.14); }
+.tradition:disabled { cursor: default; }
+.tradition-head { display: flex; align-items: baseline; gap: var(--s2); }
+.tradition-icon { color: var(--gold); font-size: 14px; }
+.tradition-head strong { font-size: 12px; font-weight: 600; }
+.tradition-effect { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.tradition-cost { color: var(--teal); font-size: 10px; font-weight: 800; letter-spacing: 0.06em; }
+.tradition.is-unaffordable { opacity: 0.72; }
+.tradition.is-unaffordable .tradition-cost { color: var(--warning); }
+.tradition.is-kept { border-color: rgba(99, 230, 212, 0.5); background: rgba(99, 230, 212, 0.12); }
+.tradition.is-kept .tradition-cost { color: var(--gold); }
+
+/* A craft the resident has genuinely mastered reads gold, not muted. */
+.need-row.is-mastered b { color: var(--gold); font-weight: 800; }
+
 .resource-amount { display: flex; align-items: baseline; gap: 1px; }
 .resource-amount small { color: var(--muted); font-size: 10px; }
 .resource-chip.is-low { border-color: rgba(232, 121, 104, 0.5); }

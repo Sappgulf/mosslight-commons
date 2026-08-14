@@ -126,6 +126,21 @@ export interface Skills {
   scouting: number;
 }
 
+export type SkillKey = keyof Skills;
+
+/**
+ * A settlement-wide practice, bought once with gathered goods and kept for the
+ * rest of the run. Traditions are the long horizon the Commons was missing —
+ * somewhere for a play-through's hundreds of surplus seed pods to go, and a way
+ * for a settlement to end up meaningfully different from the one beside it.
+ */
+export type TraditionKey =
+  | "seed-vault"
+  | "lantern-vigil"
+  | "long-memory"
+  | "hearthcraft"
+  | "open-table";
+
 export interface Resident {
   id: string;
   name: string;
@@ -148,6 +163,15 @@ export interface Resident {
   distress: number;
   /** The resident's current personal request, if any. */
   want?: Want;
+  /**
+   * Highest mastery tier already announced for this resident, so a promotion is
+   * reported once rather than on every tick above the threshold.
+   */
+  masteryTier: number;
+  /** Who taught them, if an elder took them on at a workplace. */
+  mentorId?: string;
+  /** Lifetime count of sprouts this resident has brought on. */
+  taught: number;
 }
 
 export interface Building {
@@ -343,6 +367,17 @@ export interface WorldState {
   districtFocusDay: number;
   /** Day the residents last raised something on their own initiative. */
   selfBuildDay: number;
+  /** Practices the Commons has taken up for good. */
+  traditions: TraditionKey[];
+  /**
+   * Footfall per tile, flattened row-major. Well-walked ground eventually packs
+   * itself into a road, so the shape of the settlement comes from how it is
+   * actually used rather than only from where the player draws.
+   */
+  footfall: number[];
+  /** Generations born in the basin, and the best mastery ever reached. */
+  generations: number;
+  peakMastery: number;
   onboardingStep: number;
   onboardingDismissed: boolean;
   /** Per-tile water cleanliness 0–100. Farms stain it; wetlands restore it. */

@@ -462,3 +462,60 @@ hundreds of seed pods with nothing to spend them on.
 
 - 119 Vitest tests (5 new, including an end-to-end play-through that asserts
   every objective completes) and 19 Playwright tests pass.
+
+## Growth pass — the city grows, people get better, generations compound
+
+### People get better
+
+- [x] **Mastery.** Five tiers — Untrained, Hand, Keeper, Adept, Master — each
+      with a title ("Master of the Reeds"), a mark drawn beside the resident on
+      the board, and a real output multiplier. Promotions are announced once.
+- [x] **Skill actually accrues.** It used to be granted only in the tick a
+      resident happened to arrive at their workplace with `work` as their goal,
+      which almost never happened once needs steered them: a hundred and
+      seventy days in, an entire settlement was still Untrained. Everyone
+      assigned to a bench now practises daily, and learning slows near the top.
+- [x] **Mentorship.** An experienced worker at the same building brings a
+      beginner on 60% faster, and the pairing is announced.
+
+### Generations compound
+
+- [x] Children inherit a quarter of a parent's craft instead of a flat 2 in
+      everything, plus a species leaning. A hundred-day-old Commons now raises
+      visibly better workers than a young one.
+
+### The city grows
+
+- [x] The settlement builds what the report says it lacks — farms when the
+      stalls run thin, groves when the edges are dark, a market when neighbours
+      never meet — and builds ahead of the crunch rather than after it.
+- [x] **Desire paths.** Footfall is recorded per tile and well-walked ground
+      packs itself into a road, capped at one a day so the basin never paves
+      over. The map now records how it has been lived in.
+- [x] Population ceiling 60 → 110. The old cap was reached by day 74, after
+      which housing stopped meaning anything.
+
+### Traditions
+
+- [x] Five settlement-wide practices bought once with gathered goods and kept
+      for good: Seed Vault, Open Table, Hearthcraft, Lantern Vigil, Long
+      Memory. They are the sink a play-through's hundreds of surplus seed pods
+      never had, and they compete with crafting for the same materials.
+
+### The curve now
+
+Over ~180 days: population **36 → 110**, housing capacity **42 → 148**,
+buildings **6 → 8 at a combined level of 22**, average mastery **0 → 3.9** with
+99 Masters, and **38 births**. Still thriving at the end.
+
+### Bug found — the same one as last pass
+
+Adding world fields without bumping the save version broke every existing save
+again, this time on `state.traditions.includes`. `SAVE_VERSION` 6 → 7, with
+normalisation for the new fields. A test now strips every field added since the
+schema first shipped and asserts `normalizeWorld` fills them and the world
+keeps ticking, so this cannot make it three times.
+
+### Verification
+
+- 134 Vitest tests (16 new) and 19 Playwright tests pass.

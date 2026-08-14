@@ -16,6 +16,9 @@ import { crisisBanner } from "../sim/crisis";
 import { WANT_GLYPH } from "../sim/wants";
 import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
 import { isActivationOnControl, isTypingTarget, type Binding, type BindingGroup, type KeyLayer } from "./keymap";
+import { masteryTitle, tierFor } from "../sim/mastery";
+import { canAfford, isAvailable, missingFor, TRADITION_DEFINITIONS, TRADITION_ORDER } from "../sim/traditions";
+import type { TraditionKey } from "../sim/types";
 
 const shortcutGroups: BindingGroup[] = ["Time", "View", "World", "Session"];
 
@@ -237,6 +240,7 @@ export class HUD {
     this.renderBuildingInspector();
     this.renderLedger();
     this.renderPetitions();
+    this.renderTraditions();
     this.renderCouncil();
 
     const activeExpedition = state.expeditions.find((expedition) => expedition.status === "active");
@@ -529,7 +533,9 @@ export class HUD {
 
     const species = SPECIES_DEFINITIONS[resident.species];
     this.setText("[data-resident-name]", resident.name);
-    this.setText("[data-resident-species]", `${species.label} · ${species.role}`);
+    // Lead with what they have become, not only what they were born as.
+    const title = masteryTitle(resident);
+    this.setText("[data-resident-species]", title ? `${title} · ${species.label}` : `${species.label} · ${species.role}`);
     const portrait = this.root.querySelector<HTMLImageElement>("[data-resident-portrait]");
     if (portrait) {
       portrait.src = `assets/runtime/portraits/${resident.species}.webp`;
@@ -558,15 +564,20 @@ export class HUD {
       skillList.replaceChildren(...(Object.keys(resident.skills) as Array<keyof typeof resident.skills>).map((skill) => {
         const row = document.createElement("div");
         row.className = "need-row";
+        const level = resident.skills[skill];
+        const tier = tierFor(level);
         const name = document.createElement("span");
         name.textContent = skill;
         const meter = document.createElement("div");
         meter.className = "need-meter";
         const fill = document.createElement("i");
-        fill.style.width = `${Math.round(resident.skills[skill])}%`;
+        fill.style.width = `${Math.round(level)}%`;
         meter.append(fill);
         const value = document.createElement("b");
-        value.textContent = String(Math.round(resident.skills[skill]));
+        // The tier is the readable part; the number is the detail behind it.
+        value.textContent = tier.rank > 0 ? tier.label : String(Math.round(level));
+        value.title = `${Math.round(level)} / 100`;
+        row.classList.toggle("is-mastered", tier.rank >= 3);
         row.append(name, meter, value);
         return row;
       }));
@@ -714,6 +725,67 @@ export class HUD {
     this.setText("[data-diagnosis-advice]", diagnosis.advice);
   }
 
+  /** Fills the traditions panel: what the Commons keeps, and what it could. */
+  private renderTraditions(): void {
+    const list = this.root.querySelector<HTMLElement>("[data-traditions]");
+    if (!list) return;
+    const state = this.simulation.state;
+
+    const rows = TRADITION_ORDER
+      .filter((key) => state.traditions.includes(key) || isAvailable(state, key))
+      .map((key) => {
+        const definition = TRADITION_DEFINITIONS[key];
+        const kept = state.traditions.includes(key);
+        const affordable = canAfford(state, key);
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "tradition";
+        button.dataset.tradition = key;
+        button.disabled = kept || !affordable;
+        button.classList.toggle("is-kept", kept);
+        button.classList.toggle("is-unaffordable", !kept && !affordable);
+        button.title = definition.effect;
+
+        const head = document.createElement("span");
+        head.className = "tradition-head";
+        const icon = document.createElement("span");
+        icon.className = "tradition-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = definition.icon;
+        const label = document.createElement("strong");
+        label.textContent = definition.label;
+        head.append(icon, label);
+
+        const effect = document.createElement("small");
+        effect.className = "tradition-effect";
+        effect.textContent = definition.effect;
+
+        const cost = document.createElement("small");
+        cost.className = "tradition-cost";
+        if (kept) {
+          cost.textContent = "KEPT";
+        } else {
+          const missing = missingFor(state, key);
+          cost.textContent = missing.length === 0
+            ? `TAKE UP · ${this.formatItemCost(definition.cost)}`
+            : `NEEDS ${missing.map((entry) => `${entry.amount} ${ITEM_DEFINITIONS[entry.item].label}`).join(" · ")}`;
+        }
+
+        button.append(head, effect, cost);
+        return button;
+      });
+
+    if (rows.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "petition-empty";
+      empty.textContent = "No practices to take up yet. Keep gathering.";
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(...rows);
+  }
+
   private renderCouncil(): void {
     const card = this.root.querySelector<HTMLElement>("[data-council]");
     if (!card) return;
@@ -799,6 +871,14 @@ export class HUD {
     const districtButton = target.closest<HTMLButtonElement>("[data-district]");
     if (districtButton?.dataset.district) {
       this.simulation.setDistrictFocus(districtButton.dataset.district as DistrictType);
+      this.render();
+      this.callbacks.onChange();
+      return;
+    }
+
+    const traditionButton = target.closest<HTMLButtonElement>("[data-tradition]");
+    if (traditionButton?.dataset.tradition) {
+      this.simulation.adoptTradition(traditionButton.dataset.tradition as TraditionKey);
       this.render();
       this.callbacks.onChange();
       return;
@@ -1235,6 +1315,10 @@ export class HUD {
         <div class="field-section district-section" hidden>
           <div class="objective-heading"><span>DISTRICT FOCUS</span><strong data-district-focus>Commons Market</strong></div>
           <div class="district-grid" role="group" aria-label="District focus">${districtMarkup}</div>
+        </div>
+        <div class="field-section traditions-section">
+          <div class="objective-heading"><span>TRADITIONS</span><span>KEPT FOR GOOD</span></div>
+          <div class="tradition-list" data-traditions></div>
         </div>
         <div class="field-section crafting-section">
           <div class="objective-heading"><span>CRAFTING</span><span data-crafting-status>WORKSHOP IDLE</span></div>
