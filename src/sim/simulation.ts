@@ -125,6 +125,12 @@ const PROPOSAL_COST = { food: 5, warmth: 4 } as const;
 const DISTRICT_SWITCH_DAYS = 4;
 const DISTRICT_SWITCH_COST = { food: 6, warmth: 4 } as const;
 
+/** Residents a single market can comfortably serve. */
+const RESIDENTS_PER_MARKET = 34;
+
+/** How much each existing worker discourages another from joining a bench. */
+const WORKPLACE_CROWDING = 1.6;
+
 /** Which craft each workplace teaches. */
 const WORKPLACE_CRAFT: Partial<Record<BuildingType, keyof Resident["skills"]>> = {
   "reed-farm": "farming",
@@ -308,6 +314,16 @@ export class MosslightSimulation {
   private buildingIndex = new Map<string, Building>();
   /** type -> first building of that type, for the common "find the market" lookup. */
   private buildingByType = new Map<BuildingType, Building>();
+  /**
+   * Every building of a type, not just the first.
+   *
+   * Residents chose where to eat, rest and warm themselves from a map that held
+   * one building per type, so a settlement with three markets sent all ninety
+   * of its residents to the same one. The board looked like a crowd standing on
+   * a single tile rather than a town, and a second market bought the player
+   * nothing at all.
+   */
+  private buildingsByType = new Map<BuildingType, Building[]>();
   /** Packed cells occupied by a building, for pathfinding. */
   private occupiedCells = new Set<number>();
 
@@ -1338,6 +1354,7 @@ export class MosslightSimulation {
       { name: "wants", run: () => this.updateWants() },
       { name: "arrivals", run: () => this.maybeWelcomeResident() },
       { name: "self-build", dailyOnly: true, run: () => this.maybeSelfBuild() },
+      { name: "workplaces", dailyOnly: true, run: () => this.rebalanceWorkplaces() },
       { name: "mastery", run: () => this.checkMastery() },
       { name: "desire-paths", dailyOnly: true, run: () => this.wearDesirePaths() },
       { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
@@ -1548,9 +1565,6 @@ export class MosslightSimulation {
    * assigned to each workplace, so upgrades and experienced crews both matter.
    */
   private updateResidents(dayRolled: boolean): void {
-    const market = this.buildingByType.get("commons-market");
-    const farm = this.buildingByType.get("reed-farm");
-    const grove = this.buildingByType.get("lantern-grove");
     const overcrowding = Math.max(0, this.state.metrics.housingPressure - 0.9);
     const departed: Resident[] = [];
 
@@ -1618,9 +1632,21 @@ export class MosslightSimulation {
         continue;
       }
 
+      /*
+       * Nearest, not first. These were resolved once for the whole settlement
+       * from a one-per-type map, so every resident walked to the same market
+       * however many the player had built.
+       */
+      const market = this.nearestBuilding("commons-market", resident.position);
+      const farm = this.nearestBuilding("reed-farm", resident.position);
+      const grove = this.nearestBuilding("lantern-grove", resident.position);
+
       const mostPressing = this.getMostPressingNeed(resident);
       let goal: ResidentGoal = "work";
-      let target: Vec2 | undefined = this.buildingIndex.get(resident.workplaceId)?.position;
+      const workplaceBuilding = this.buildingIndex.get(resident.workplaceId);
+      let target: Vec2 | undefined = workplaceBuilding
+        ? this.standingSpotFor(resident, workplaceBuilding)
+        : undefined;
       let explanation = "Following a familiar routine.";
 
       if (this.state.phase === "night" && resident.species === "mireling") {
@@ -1637,18 +1663,19 @@ export class MosslightSimulation {
         explanation = "I am reading the weather of the Long Shade.";
       } else if (mostPressing === "food" && market) {
         goal = "forage";
-        target = market.position;
+        target = this.standingSpotFor(resident, market);
         const shortage = this.state.marketShortages.find((entry) => entry.buildingId === market.id);
         explanation = shortage && shortage.pressure > 0.4
           ? "This market street is empty. I am hoping another stall still has food."
           : "Food is becoming uncertain, so I am heading toward the market.";
       } else if (mostPressing === "safety" && grove) {
         goal = "explore";
-        target = grove.position;
+        target = this.standingSpotFor(resident, grove);
         explanation = "The lanterns are bright enough to make a safe night route.";
       } else if (mostPressing === "shelter") {
         goal = "rest";
-        target = this.buildingIndex.get(resident.homeId)?.position;
+        const home = this.buildingIndex.get(resident.homeId);
+        target = home ? this.standingSpotFor(resident, home) : undefined;
         explanation = "Warmth is low; home is the best place to recover.";
       } else if (mostPressing === "belonging") {
         // Seek out the strongest friend rather than defaulting to the market,
@@ -1660,12 +1687,12 @@ export class MosslightSimulation {
           explanation = `I have been alone too long; ${friend.name} is good company.`;
         } else if (market) {
           goal = "socialize";
-          target = market.position;
+          target = this.standingSpotFor(resident, market);
           explanation = "I have been alone too long; the Commons Market is where neighbors meet.";
         }
       } else if (resident.species === "mireling" && farm) {
         goal = "work";
-        target = farm.position;
+        target = this.standingSpotFor(resident, farm);
         explanation = "The reeds need tending before the water changes.";
       } else if (resident.traits.curiosity > 0.7 && this.rng.next() > resident.traits.routine) {
         goal = "explore";
@@ -1914,9 +1941,7 @@ export class MosslightSimulation {
       if (this.state.resources[resource] < amount * SELF_BUILD_SURPLUS) return;
     }
 
-    const heart = this.buildingByType.get("root-heart");
-    const origin = heart?.position ?? { x: Math.floor(GRID_WIDTH / 2), y: Math.floor(GRID_HEIGHT / 2) };
-    const plot = this.findBuildablePlotNear(origin);
+    const plot = this.findPlotFor(type);
     if (!plot) return;
 
     this.state.selfBuildDay = this.state.day;
@@ -1939,8 +1964,15 @@ export class MosslightSimulation {
       belonging: "commons-market",
     };
     const wanted = byNeed[diagnosis.need];
-    // One market is usually enough; more farms and groves are always welcome.
-    if (wanted === "commons-market" && this.countBuildings("commons-market") >= 2) return undefined;
+    /*
+     * Markets scale with the settlement rather than being capped at one or two.
+     * A single market served a hundred and ten residents, so everyone converged
+     * on the same handful of tiles no matter how well the rest was spread.
+     */
+    if (wanted === "commons-market") {
+      const allowed = Math.max(1, Math.ceil(this.state.residents.length / RESIDENTS_PER_MARKET));
+      if (this.countBuildings("commons-market") >= allowed) return undefined;
+    }
     return wanted;
   }
 
@@ -1971,21 +2003,94 @@ export class MosslightSimulation {
     return this.state.traditions;
   }
 
-  /** Nearest legal plot for a home, searched outward from a point. */
-  private findBuildablePlotNear(origin: Vec2): Vec2 | undefined {
-    for (let radius = 2; radius <= 9; radius += 1) {
-      for (let dy = -radius; dy <= radius; dy += 1) {
-        for (let dx = -radius; dx <= radius; dx += 1) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
-          const cell = { x: origin.x + dx, y: origin.y + dy };
-          if (!this.isInside(cell) || !this.isRevealed(cell)) continue;
-          if (this.isOccupied(cell)) continue;
-          if (this.state.grid[cell.y]?.[cell.x] !== "grass") continue;
-          return cell;
+  /**
+   * Where the Commons should put its next building.
+   *
+   * Everything used to be dropped on the first free tile spiralling out from
+   * the Root Heart, so however much the settlement grew it stayed one dense
+   * knot around its centre. Each kind of building now looks for the ground that
+   * suits it — homes at the edge of the housing so the town spreads, farms by
+   * the water, groves where the nights are darkest, markets where people
+   * actually live — and the map ends up looking like somewhere that grew.
+   */
+  private findPlotFor(type: Exclude<BuildingType, "root-heart">): Vec2 | undefined {
+    const homes = this.buildingsByType.get("burrow-home") ?? [];
+    const anchor = this.buildingByType.get("root-heart")?.position
+      ?? { x: Math.floor(GRID_WIDTH / 2), y: Math.floor(GRID_HEIGHT / 2) };
+
+    let best: Vec2 | undefined;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (let y = 1; y < GRID_HEIGHT - 1; y += 1) {
+      for (let x = 1; x < GRID_WIDTH - 1; x += 1) {
+        const cell = { x, y };
+        if (!this.isRevealed(cell) || this.isOccupied(cell)) continue;
+        const tile = this.state.grid[y]?.[x];
+        if (tile !== "grass") continue;
+
+        // Nothing should end up marooned on the far edge of the basin.
+        const reach = manhattan(cell, anchor);
+        if (reach > 16) continue;
+        let score = -reach * 0.35;
+
+        // Never wall a building in against its neighbours.
+        const crowding = this.state.buildings.filter(
+          (building) => manhattan(building.position, cell) <= 2,
+        ).length;
+        score -= crowding * 3;
+
+        switch (type) {
+          case "burrow-home": {
+            // Just beyond the current edge of housing: close enough to belong,
+            // far enough that the town actually spreads.
+            const nearestHome = homes.length
+              ? Math.min(...homes.map((home) => manhattan(home.position, cell)))
+              : 4;
+            score -= Math.abs(nearestHome - 4) * 1.4;
+            break;
+          }
+          case "reed-farm": {
+            score += this.isNearTile(cell, "water", 3) || this.isNearTile(cell, "wetland", 3) ? 8 : -6;
+            break;
+          }
+          case "lantern-grove": {
+            // The darkest ground people actually walk on.
+            score += (1 - this.lightCoverageAt(cell)) * 9;
+            score -= homes.length
+              ? Math.min(...homes.map((home) => manhattan(home.position, cell))) * 0.5
+              : 0;
+            break;
+          }
+          case "commons-market":
+          case "root-workshop":
+          default: {
+            // Central to where people live.
+            if (homes.length > 0) {
+              const average = homes.reduce((sum, home) => sum + manhattan(home.position, cell), 0) / homes.length;
+              score -= average * 0.8;
+            }
+            break;
+          }
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          best = cell;
         }
       }
     }
-    return undefined;
+    return best;
+  }
+
+  /** Whether a tile of a given kind sits within `radius` of a cell. */
+  private isNearTile(cell: Vec2, kind: TileKind, radius: number): boolean {
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const tile = this.state.grid[cell.y + dy]?.[cell.x + dx];
+        if (tile === kind) return true;
+      }
+    }
+    return false;
   }
 
   private maybeWelcomeResident(): void {
@@ -2522,10 +2627,102 @@ export class MosslightSimulation {
     this.adjacencyCacheTick = -1;
     this.buildingIndex = new Map(this.state.buildings.map((building) => [building.id, building]));
     this.buildingByType = new Map();
+    this.buildingsByType = new Map();
     this.occupiedCells = new Set();
     for (const building of this.state.buildings) {
       if (!this.buildingByType.has(building.type)) this.buildingByType.set(building.type, building);
+      const group = this.buildingsByType.get(building.type);
+      if (group) group.push(building);
+      else this.buildingsByType.set(building.type, [building]);
       this.occupiedCells.add(packCell(building.position.x, building.position.y, GRID_WIDTH));
+    }
+  }
+
+  /**
+   * Where a resident should stand when they visit a building.
+   *
+   * Everyone used to path to the building's own tile, so a market with thirty
+   * regulars rendered as thirty creatures stacked on one cell. Each resident
+   * gets a settled spot on the ring around it instead — deterministic, so they
+   * keep their usual place rather than jittering between ticks — and the same
+   * crowd reads as a gathering around a market instead of a pile on top of one.
+   */
+  private standingSpotFor(resident: Resident, building: Building): Vec2 {
+    // Two cells deep, so a busy market has two dozen places to stand rather
+    // than eight and a crowd still reads as individuals.
+    const ring: Vec2[] = [];
+    for (let dy = -2; dy <= 2; dy += 1) {
+      for (let dx = -2; dx <= 2; dx += 1) {
+        if (dx === 0 && dy === 0) continue;
+        const cell = { x: building.position.x + dx, y: building.position.y + dy };
+        if (!this.isInside(cell)) continue;
+        if (!isWalkable(this.state.grid[cell.y]?.[cell.x])) continue;
+        if (this.occupiedCells.has(packCell(cell.x, cell.y, GRID_WIDTH))) continue;
+        ring.push(cell);
+      }
+    }
+    if (ring.length === 0) return building.position;
+    // A stable hash of the pairing, so the same resident keeps the same spot.
+    let hash = 0;
+    for (let index = 0; index < resident.id.length; index += 1) hash = (hash * 31 + resident.id.charCodeAt(index)) >>> 0;
+    for (let index = 0; index < building.id.length; index += 1) hash = (hash * 31 + building.id.charCodeAt(index)) >>> 0;
+    return ring[hash % ring.length]!;
+  }
+
+  /** The closest building of a type to a point, if the settlement has one. */
+  private nearestBuilding(type: BuildingType, from: Vec2): Building | undefined {
+    const group = this.buildingsByType.get(type);
+    if (!group || group.length === 0) return undefined;
+    if (group.length === 1) return group[0];
+
+    let best = group[0]!;
+    let bestDistance = manhattan(best.position, from);
+    for (let index = 1; index < group.length; index += 1) {
+      const candidate = group[index]!;
+      const distance = manhattan(candidate.position, from);
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Spreads workers over every building that teaches their craft, nearest
+   * first, so new workplaces actually draw a crew and the settlement's daily
+   * traffic fans out instead of converging on whichever one was built first.
+   */
+  private rebalanceWorkplaces(): void {
+    const counts = new Map<string, number>();
+    for (const resident of this.state.residents) {
+      counts.set(resident.workplaceId, (counts.get(resident.workplaceId) ?? 0) + 1);
+    }
+
+    for (const resident of this.state.residents) {
+      const current = this.buildingIndex.get(resident.workplaceId);
+      const type = current?.type ?? "commons-market";
+      const group = this.buildingsByType.get(type);
+      if (!group || group.length < 2) continue;
+
+      const home = this.buildingIndex.get(resident.homeId)?.position ?? resident.position;
+      // Prefer a nearer bench, but never pile onto one that is already busier.
+      let best = current!;
+      let bestScore = Number.POSITIVE_INFINITY;
+      for (const candidate of group) {
+        const crowding = (counts.get(candidate.id) ?? 0) * WORKPLACE_CROWDING;
+        const score = manhattan(candidate.position, home) + crowding;
+        if (score < bestScore) {
+          best = candidate;
+          bestScore = score;
+        }
+      }
+      if (best.id === resident.workplaceId) continue;
+
+      counts.set(resident.workplaceId, Math.max(0, (counts.get(resident.workplaceId) ?? 1) - 1));
+      counts.set(best.id, (counts.get(best.id) ?? 0) + 1);
+      resident.workplaceId = best.id;
+      resident.mentorId = undefined;
     }
   }
 

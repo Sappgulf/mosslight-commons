@@ -135,6 +135,77 @@ describe("the city grows", () => {
   });
 });
 
+describe("the settlement reads as a town, not a pile", () => {
+  function crowding(simulation: MosslightSimulation): { tiles: number; worst: number } {
+    const cells = new Map<string, number>();
+    for (const resident of simulation.state.residents) {
+      const key = `${resident.position.x},${resident.position.y}`;
+      cells.set(key, (cells.get(key) ?? 0) + 1);
+    }
+    return { tiles: cells.size, worst: Math.max(0, ...cells.values()) };
+  }
+
+  /**
+   * Residents resolved their market, farm and grove from a map that held one
+   * building per type, then walked to that building's own tile. A settlement of
+   * ninety put twenty of them on a single cell and ignored every market after
+   * the first.
+   */
+  it("keeps residents from stacking on a single tile", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 1600);
+
+    const { tiles, worst } = crowding(simulation);
+    expect(simulation.state.residents.length).toBeGreaterThan(60);
+    expect(worst).toBeLessThan(12);
+    expect(tiles).toBeGreaterThan(30);
+  });
+
+  it("spreads its workers over every bench of the same craft", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 1600);
+
+    const counts = new Map<string, number>();
+    for (const resident of simulation.state.residents) {
+      counts.set(resident.workplaceId, (counts.get(resident.workplaceId) ?? 0) + 1);
+    }
+    // More than one workplace should actually have a crew.
+    const staffed = [...counts.values()].filter((count) => count > 0).length;
+    expect(staffed).toBeGreaterThan(2);
+  });
+
+  it("grows outward rather than knotting around the Root Heart", () => {
+    const simulation = new MosslightSimulation(SEED);
+    const span = () => {
+      const xs = simulation.state.buildings.map((building) => building.position.x);
+      const ys = simulation.state.buildings.map((building) => building.position.y);
+      return (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+    };
+    const before = span();
+    advance(simulation, 1600);
+
+    expect(simulation.state.buildings.length).toBeGreaterThan(8);
+    expect(span()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("puts reed farms on ground near water", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 1600);
+
+    const farms = simulation.state.buildings.filter((building) => building.type === "reed-farm");
+    for (const farm of farms) {
+      let nearWater = false;
+      for (let dy = -3; dy <= 3 && !nearWater; dy += 1) {
+        for (let dx = -3; dx <= 3; dx += 1) {
+          const tile = simulation.state.grid[farm.position.y + dy]?.[farm.position.x + dx];
+          if (tile === "water" || tile === "wetland") { nearWater = true; break; }
+        }
+      }
+      expect(nearWater).toBe(true);
+    }
+  });
+});
+
 describe("traditions", () => {
   it("cannot be taken up without the goods", () => {
     const simulation = new MosslightSimulation(SEED);

@@ -519,3 +519,37 @@ keeps ticking, so this cannot make it three times.
 ### Verification
 
 - 134 Vitest tests (16 new) and 19 Playwright tests pass.
+
+## Dispersal pass — a town rather than a pile
+
+Residents resolved their market, farm and grove from a map that held exactly
+one building per type, then walked to that building's own tile. A settlement of
+ninety put **twenty residents on a single cell**, and every market after the
+first was ignored entirely — building a second one bought the player nothing.
+
+- [x] **Nearest, not first.** Every building of a type is indexed now, and
+      residents route to whichever is closest to them.
+- [x] **Standing spots.** Each resident has a settled place on the two-deep
+      ring around a building they visit, hashed from their own id so they keep
+      it between visits. A crowd reads as a gathering around a market instead
+      of a pile on top of one.
+- [x] **Workplaces rebalance daily** across every bench of the same craft,
+      nearest first and weighted against crowding, so a new workshop draws a
+      crew instead of standing empty.
+- [x] **Placement suits the building.** New construction was dropped on the
+      first free tile spiralling out from the Root Heart, so the town stayed one
+      dense knot however much it grew. Homes now go just beyond the edge of the
+      housing, farms by the water, groves over the darkest inhabited ground, and
+      markets central to where people actually live.
+- [x] Markets scale with population rather than being capped at two.
+
+### Result
+
+At 110 residents: the worst-occupied tile went from **20 to 4**, residents
+spread over **53 tiles instead of 26**, and the built area grew from 16×11 to
+16×16 with fourteen buildings of five kinds.
+
+### Verification
+
+- 138 Vitest tests (4 new, including one asserting reed farms end up near
+  water) and 19 Playwright tests pass.
