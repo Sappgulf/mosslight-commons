@@ -5,6 +5,9 @@ import type { SimContext } from "./context";
 
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
 
+/** Resin the workshop will never burn, so recipes always have something to use. */
+const RESIN_RESERVE = 4;
+
 /**
  * Effective count of a building type: each building contributes its level
  * multiplier scaled by its placement bonus, then by the average relevant skill
@@ -45,7 +48,20 @@ export function updateResources(context: SimContext): void {
   const groveOutput = weightedOutput(context, "lantern-grove");
   const marketOutput = weightedOutput(context, "commons-market");
   const workshops = weightedOutput(context, "root-workshop", "crafting");
-  const craftedResin = Math.min(Math.ceil(workshops), state.items.resin);
+  /*
+   * The workshop renders *surplus* resin into warmth and light, and leaves a
+   * working reserve alone.
+   *
+   * It used to take every last one: a single workshop consumed a resin a tick
+   * and pinned the stock at zero within eight ticks of being built. Since Glow
+   * Kits and Comfort Bundles both need resin in hand, raising a Root Workshop —
+   * itself a chapter-zero objective — permanently locked the chapter-one
+   * objective that asks for two Glow Kits. The game blocked its own progression.
+   */
+  const craftedResin = Math.min(
+    Math.ceil(workshops),
+    Math.max(0, state.items.resin - RESIN_RESERVE),
+  );
   const farmFactor = state.districtFocus === "wetland" ? 1.2 : 1;
   const groveFactor = state.districtFocus === "lantern" ? 1.2 : 1;
   const marketFactor = state.seasonalEvent.effect === "festival" ? 0.16 : 0.06;

@@ -419,3 +419,46 @@ and markets is what carries it past that.
 
 - 114 Vitest tests (13 new covering supply, storage, contracts and costs) and
   19 Playwright tests pass. Two snapshots re-recorded deliberately.
+
+## Progression pass
+
+Wrote a headless "player" that plays the game properly — gathers every revealed
+node, raises the workshop, keeps a scout out, crafts what the stores allow,
+upgrades what it can, packs roads when asked. Nothing had ever tested whether
+the game can actually be finished. It could not.
+
+### Two objectives were unreachable
+
+- [x] **The workshop ate all the resin.** A Root Workshop consumed one resin a
+      tick with no floor, pinning the stock at zero eight ticks after it went
+      up. Glow Kits and Comfort Bundles both need resin in hand, so raising the
+      workshop — a chapter-zero objective — permanently blocked the chapter-one
+      objective asking for two Glow Kits. It now renders only *surplus* resin
+      above a reserve of four.
+- [x] **Opening the Old Hollow could not be credited.** Expeditions only ever
+      target an unrevealed zone, and crafting a Root Bridge reveals the Old
+      Hollow outright — so the bridge the chapter-one ledger asks for left "Open
+      the Old Hollow" stuck at 0/1 with no expedition able to reach it again.
+      Chapter two could never finish and chapter three never unlocked.
+      Crediting it at reveal was not enough on its own, because the reveal
+      happens during chapter one and objectives from a future chapter are
+      skipped; zone objectives are now swept from `revealedAreas` the way
+      population and harmony are swept from live metrics.
+
+### Result
+
+A played game now runs 3/13 objectives → **13/13, chapter 3, by day 58**. A
+passive game still sits at 0/13, which is correct: the ledger is a list of
+things the player does.
+
+### Known gap
+
+The bot finishes the ledger on day 58 and then has nothing left to pursue for
+the remaining hundred and fifty days it was run. There is no endgame past
+chapter 3, and gathered items have almost no sink — a play-through accumulates
+hundreds of seed pods with nothing to spend them on.
+
+### Verification
+
+- 119 Vitest tests (5 new, including an end-to-end play-through that asserts
+  every objective completes) and 19 Playwright tests pass.

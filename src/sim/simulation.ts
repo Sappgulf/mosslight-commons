@@ -1506,6 +1506,8 @@ export class MosslightSimulation {
     }
     this.state.revealedAreas.push(zone);
     this.invalidateAllPaths();
+    // Zone objectives are swept from `revealedAreas` in the progression system,
+    // so opening a zone counts however it was opened and whenever it happened.
   }
 
   /**

@@ -63,6 +63,16 @@ export function checkThresholdObjectives(context: SimContext): void {
       objective.progress = Math.min(objective.target, context.state.metrics.population);
     } else if (objective.kind === "harmony") {
       objective.progress = Math.min(objective.target, Math.round(context.state.metrics.harmony));
+    } else if (objective.kind === "expedition" && objective.zone) {
+      /*
+       * Swept from the world rather than credited by the event, because the
+       * event can arrive before the objective is open. Crafting a Root Bridge
+       * reveals the Old Hollow during chapter one, but "Open the Old Hollow" is
+       * a chapter-two card — the credit was discarded for being early, the zone
+       * could never be the target of another expedition once revealed, and
+       * chapter two could not be finished at all.
+       */
+      objective.progress = context.state.revealedAreas.includes(objective.zone) ? objective.target : 0;
     } else {
       continue;
     }
