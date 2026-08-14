@@ -49,6 +49,11 @@ html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body {
   background: radial-gradient(circle at 50% 0%, #153d3a 0%, var(--ink) 58%);
 }
+#hud[data-phase="dawn"] { --panel-border: rgba(244, 184, 91, 0.28); }
+#hud[data-phase="dusk"] { --panel-border: rgba(200, 169, 255, 0.3); }
+#hud[data-phase="night"] { --panel-border: rgba(99, 230, 212, 0.18); }
+#hud[data-status="failing"] .settlement-status,
+#hud[data-status="collapsed"] .settlement-status { letter-spacing: 0.04em; }
 
 button { font: inherit; }
 button:focus-visible {
@@ -203,13 +208,13 @@ kbd {
 .district-button:hover, .district-button.is-active { border-color: var(--teal); color: var(--paper); background: rgba(99, 230, 212, 0.14); }
 .district-button.is-locked { cursor: not-allowed; opacity: 0.45; }
 .district-button.is-locked:hover { border-color: rgba(245, 230, 200, 0.12); color: var(--muted); background: rgba(8, 21, 27, 0.48); }
-.craft-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.craft-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
 .craft-button { display: grid; min-width: 0; min-height: 52px; place-items: center; gap: 2px; padding: 4px 2px; border: 1px solid rgba(245, 230, 200, 0.12); border-radius: 7px; color: var(--muted); background: rgba(8, 21, 27, 0.48); cursor: pointer; font-size: 11px; text-align: center; }
 .craft-button:hover:not(:disabled), .craft-button:focus-visible:not(:disabled) { border-color: var(--teal); color: var(--paper); background: rgba(99, 230, 212, 0.14); }
 .craft-button:disabled { cursor: not-allowed; opacity: 0.62; }
 .craft-button.is-unavailable { border-color: rgba(232, 121, 104, 0.22); }
 .craft-icon { color: var(--gold); font-size: 14px; line-height: 1; }
-.craft-button span:not(.craft-icon) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.craft-button span:not(.craft-icon) { max-width: 100%; line-height: 1.2; }
 .craft-button small { max-width: 100%; color: var(--warning); font-size: 10px; line-height: 1.25; text-align: center; }
 .craft-button:not(.is-unavailable) small { color: #8dbb72; }
 
@@ -252,7 +257,7 @@ kbd {
 .dock-heading button { display: inline-flex; align-items: center; gap: 5px; border: 0; color: var(--muted); background: transparent; cursor: pointer; font-family: inherit; font-size: 10px; }
 .dock-heading button:hover { color: var(--paper); }
 .build-detail { min-height: 0; margin: 0 2px var(--s2); color: var(--muted); font-size: 11px; line-height: 1.35; }
-.build-grid { display: grid; flex: 1; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--s2); min-height: 0; }
+.build-grid { display: grid; flex: 1; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: var(--s2); min-height: 0; }
 .build-button, .control-button, .speed-group button { appearance: none; border: 1px solid rgba(245, 230, 200, 0.13); color: var(--muted); background: rgba(8, 21, 27, 0.7); cursor: pointer; transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease; }
 .build-button { display: grid; min-height: 0; grid-template-rows: auto auto 1fr auto; place-items: center; gap: 2px; padding: var(--s2) var(--s1) var(--s1); border-radius: var(--radius-md); font-size: 11px; letter-spacing: 0.06em; }
 .build-button:hover, .build-button.is-active, .control-button:hover, .speed-group button:hover, .speed-group button.is-active { border-color: var(--teal); color: var(--paper); background: rgba(99, 230, 212, 0.13); }
@@ -731,6 +736,8 @@ kbd {
 }
 .want-note.is-impatient { border-left-color: var(--warning); background: rgba(232, 121, 104, 0.12); color: #f0c4bb; }
 
+.follow-hint { margin: 4px 0 0; color: var(--muted); font-size: 10px; letter-spacing: 0.04em; }
+.save-row button.is-armed { border-color: var(--warning); color: var(--warning); }
 .resident-portrait {
   width: 44px;
   height: 44px;
@@ -741,6 +748,8 @@ kbd {
 }
 /* The settlement report: why the Commons is doing what it is doing. */
 .commons-report {
+  cursor: pointer;
+
   display: grid;
   gap: var(--s1);
   margin: var(--s2) 0 var(--s3);
@@ -749,6 +758,7 @@ kbd {
   border-radius: var(--radius-sm);
   background: rgba(99, 230, 212, 0.08);
 }
+.commons-report:hover { background: rgba(99, 230, 212, 0.14); }
 .commons-report[data-tone="warning"] { border-left-color: var(--warning); background: rgba(232, 121, 104, 0.1); }
 .commons-report .objective-heading span:first-child { color: var(--teal); font-weight: 800; }
 .commons-report[data-tone="warning"] .objective-heading span:first-child { color: var(--warning); }

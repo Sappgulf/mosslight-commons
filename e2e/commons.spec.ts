@@ -323,6 +323,16 @@ test.describe("the game is actually playable", () => {
     const after = await snapshot(page);
     expect(after.buildings.length).toBe(before.buildings.length + 1);
   });
+
+  test("the Commons report arms a building instead of only talking", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+    await page.locator('[data-action="onboarding-skip"]').click();
+
+    await page.locator("[data-diagnosis]").click();
+    const state = await snapshot(page);
+    expect(["reed-farm", "burrow-home", "lantern-grove", "commons-market"]).toContain(state.buildMode);
+  });
 });
 
 test.describe("session", () => {

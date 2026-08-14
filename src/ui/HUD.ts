@@ -90,6 +90,8 @@ export class HUD {
   private shortcutsOpen = false;
   private shortcutBindings: readonly Binding[] = [];
   private victoryDismissed = false;
+  private victoryPaused = false;
+  private resetArmedUntil = 0;
   private toastTimer: number | null = null;
 
   constructor(root: HTMLElement, simulation: MosslightSimulation, callbacks: HUDCallbacks) {
@@ -169,6 +171,8 @@ export class HUD {
   public render(): void {
     const state = this.simulation.state;
     this.applyDisclosure();
+    this.root.dataset.phase = state.phase;
+    this.root.dataset.status = state.status;
     this.setText("[data-day]", `DAY ${String(state.day).padStart(2, "0")}`);
     this.setText("[data-season]", `${state.season.toUpperCase()} ${state.seasonDay}/7`);
     this.setText("[data-settlement-summary]", `${state.metrics.population}/${state.metrics.housingCapacity} HOUSED · HARMONY ${Math.round(state.metrics.harmony)}%`);
@@ -203,6 +207,10 @@ export class HUD {
     if (victory) {
       const show = this.simulation.isLedgerComplete() && !this.victoryDismissed && state.status !== "collapsed";
       victory.hidden = !show;
+      if (show && !this.victoryPaused) {
+        this.victoryPaused = true;
+        if (!state.paused) this.simulation.togglePause();
+      }
     }
     this.setText("[data-collapse-summary]", `The Commons held for ${state.day - 8} days. ${state.departures} residents left before the light failed.`);
 
@@ -475,8 +483,16 @@ export class HUD {
     }
     this.setText(
       "[data-objective-count]",
-      `CH.${state.chapter + 1} · ${active.filter((objective) => objective.completed).length}/${active.length} DONE`,
+      this.simulation.isLedgerComplete()
+        ? "THE WATCH · LEDGER CLOSED"
+        : `CH.${state.chapter + 1} · ${active.filter((objective) => objective.completed).length}/${active.length} DONE`,
     );
+    const resetButton = this.root.querySelector<HTMLButtonElement>('[data-action="reset"]');
+    if (resetButton) {
+      const armed = Date.now() < this.resetArmedUntil;
+      resetButton.textContent = armed ? "CONFIRM" : "NEW";
+      resetButton.classList.toggle("is-armed", armed);
+    }
   }
 
   private renderResearch(): void {
@@ -621,6 +637,7 @@ export class HUD {
     this.setText("[data-resident-explanation]", resident.lastDecisionExplanation);
     this.setText("[data-resident-glyph]", resident.species === "glowtail" ? "✧" : resident.species === "mireling" ? "◌" : resident.species === "cloudmoth" ? "☽" : "●");
     this.setText("[data-resident-stage]", `${resident.stage.toUpperCase()} · ${resident.age}d`);
+    this.setText("[data-resident-follow]", "Camera follows · drag the map to look around");
 
     // A resident's personal request is the most player-actionable thing about
     // them, so it sits above the generic decision note.
@@ -916,6 +933,22 @@ export class HUD {
       return;
     }
 
+    const report = target.closest<HTMLElement>("[data-diagnosis]");
+    if (report) {
+      const need = this.simulation.state.metrics.diagnosis.need;
+      const tool: Record<typeof need, Exclude<BuildingType, "root-heart">> = {
+        food: "reed-farm",
+        shelter: "burrow-home",
+        safety: "lantern-grove",
+        belonging: "commons-market",
+      };
+      this.simulation.setBuildMode(tool[need]);
+      this.notify(`Place a ${BUILDING_DEFINITIONS[tool[need]].label}.`);
+      this.render();
+      this.callbacks.onChange();
+      return;
+    }
+
     const fieldTab = target.closest<HTMLButtonElement>("[data-field-tab]");
     if (fieldTab?.dataset.fieldTab === "field" || fieldTab?.dataset.fieldTab === "civic") {
       this.activeFieldTab = fieldTab.dataset.fieldTab;
@@ -1072,6 +1105,11 @@ export class HUD {
         this.callbacks.onLoad();
         break;
       case "reset":
+        if (Date.now() > this.resetArmedUntil) {
+          this.resetArmedUntil = Date.now() + 4000;
+          this.notify("Press NEW again to begin a new Commons.");
+          break;
+        }
         this.callbacks.onReset();
         break;
       case "export":
@@ -1388,7 +1426,7 @@ export class HUD {
       <div class="field-view" data-field-view="field">
         <div class="item-grid" aria-label="Found materials">${itemMarkup}</div>
         <div class="field-section petition-section">
-          <div class="commons-report" data-diagnosis data-tone="good">
+          <div class="commons-report" data-diagnosis data-tone="good" role="button" tabindex="0" title="Click to place what the Commons needs">
             <div class="objective-heading"><span>COMMONS REPORT</span><span data-diagnosis-need>FOOD 100</span></div>
             <p data-diagnosis-cause></p>
             <p class="report-advice" data-diagnosis-advice></p>
@@ -1471,6 +1509,7 @@ export class HUD {
       <section class="inspector-card panel" aria-labelledby="resident-heading">
         <div class="panel-eyebrow"><span>RESIDENT</span><span data-resident-goal>work</span></div>
         <div class="resident-heading"><img class="resident-portrait" data-resident-portrait alt="" width="44" height="44" /><span class="resident-glyph" data-resident-glyph aria-hidden="true">●</span><div><h2 id="resident-heading" data-resident-name>Loading</h2><p data-resident-species>Brambleback</p></div><span class="resident-stage" data-resident-stage>ADULT</span></div>
+        <p class="follow-hint" data-resident-follow></p>
         <div class="need-list">
           ${["shelter", "food", "safety", "belonging"].map((need) => `<div class="need-row"><span>${need}</span><div class="need-meter" data-need-meter="${need}" role="progressbar" aria-label="${need} need fulfilled" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-need-fill="${need}"></i></div><b data-need-value="${need}">0</b></div>`).join("")}
         </div>

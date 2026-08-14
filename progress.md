@@ -520,6 +520,18 @@ keeps ticking, so this cannot make it three times.
 
 - 134 Vitest tests (16 new) and 19 Playwright tests pass.
 
+## Playtest pass — the HUD has to hold seven tools
+
+E2E was already green (19). Playing the dock showed the new Sky Walk and the
+fourth recipe wrapping off the row, and NEW wiping a run on one click.
+
+- [x] Build dock is seven columns so PATH and Sky Walk stay on one row.
+- [x] Craft grid is 2×2 so Sky Lantern is not a leftover chip.
+- [x] NEW asks for a second press.
+- [x] Closing the ledger pauses on the victory card.
+- [x] Click the Commons Report to arm the building it is asking for.
+- [x] Phase tints the HUD; a selected resident says the camera is following.
+
 ## Polish pass — close the loop, keep the page alive
 
 - [x] Victory overlay when the ledger is finished; sandbox play continues.
