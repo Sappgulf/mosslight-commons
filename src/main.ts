@@ -68,6 +68,7 @@ const hud = new HUD(hudElement, simulation, {
   onToggleMute: () => audio.toggleMute(),
   isMuted: () => audio.isMuted,
   onFocusResident: (id) => worldScene?.focusResident(id),
+  onFocusCell: (x, y) => worldScene?.focusOn({ x, y }),
 });
 
 worldScene = new WorldScene(
@@ -419,6 +420,26 @@ const GAME_BINDINGS: Binding[] = [
     group: "World",
     run: () => { simulation.setBuildMode(null); hud.render(); worldScene?.renderNow(); },
   },
+  ...([
+    ["h", "burrow-home", "Home"],
+    ["r", "reed-farm", "Reed Farm"],
+    ["g", "lantern-grove", "Lantern Grove"],
+    ["c", "commons-market", "Market"],
+    ["t", "root-workshop", "Workshop"],
+    ["y", "sky-walk", "Sky Walk"],
+    ["n", "path", "Path"],
+  ] as const).map(([key, tool, label]) => ({
+    id: `build-${tool}`,
+    chords: [key],
+    display: key.toUpperCase(),
+    description: `Hold the ${label} tool`,
+    group: "World" as const,
+    run: () => {
+      simulation.setBuildMode(simulation.state.buildMode === tool ? null : tool);
+      hud.render();
+      worldScene?.renderNow();
+    },
+  })),
   {
     id: "save",
     chords: ["mod+s"],

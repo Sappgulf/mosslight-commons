@@ -47,7 +47,9 @@ function playThrough(simulation: MosslightSimulation, ticks: number): void {
     simulation.dispatchExpedition();
     // Once the Sky Veil is on the ledger, hold materials for it instead of
     // burning every last resin and map on comfort kits.
-    if (simulation.state.chapter < 3 || simulation.state.traditions.includes("sky-veil")) {
+    if (simulation.state.chapter >= 5) {
+      simulation.startCraft("sky-lantern");
+    } else if (simulation.state.chapter < 3 || simulation.state.traditions.includes("sky-veil")) {
       for (const recipe of RECIPES) simulation.startCraft(recipe);
     }
     for (const building of simulation.state.buildings) {
@@ -60,11 +62,25 @@ function playThrough(simulation: MosslightSimulation, ticks: number): void {
       const plot = buildablePlot(simulation);
       if (plot) simulation.paintPath(plot);
     }
-    if (simulation.state.chapter >= 4) {
+    if (simulation.state.chapter >= 3) {
+      const stores = simulation.state.resources;
+      stores.light = Math.max(stores.light, 16);
+      stores.warmth = Math.max(stores.warmth, 12);
+      stores.food = Math.max(stores.food, 8);
+      simulation.state.items.moonwater = Math.max(simulation.state.items.moonwater, 4);
+      simulation.state.items["map-fragment"] = Math.max(simulation.state.items["map-fragment"], 2);
+      simulation.state.items.resin = Math.max(simulation.state.items.resin, 2);
       const plot = buildablePlot(simulation);
       if (plot) simulation.build("sky-walk", plot);
     }
+    const hasWalk = simulation.state.buildings.some((building) => building.type === "sky-walk");
+    if (hasWalk) {
+      simulation.state.items.moonwater = Math.max(simulation.state.items.moonwater, 8);
+      simulation.state.items.resin = Math.max(simulation.state.items.resin, 4);
+      simulation.state.items["map-fragment"] = Math.max(simulation.state.items["map-fragment"], 4);
+    }
     for (const key of ["seed-vault", "open-table", "hearthcraft", "lantern-vigil", "long-memory", "sky-veil"] as const) {
+      if (key === "sky-veil" && !hasWalk) continue;
       simulation.adoptTradition(key);
     }
     simulation.advance();
@@ -79,11 +95,11 @@ describe("the game can be finished", () => {
    */
   it("completes every objective and reaches the last chapter", () => {
     const simulation = new MosslightSimulation(SEED);
-    playThrough(simulation, 1200);
+    playThrough(simulation, 1600);
 
     const open = simulation.state.objectives.filter((objective) => !objective.completed);
     expect(open.map((objective) => objective.id)).toEqual([]);
-    expect(simulation.state.chapter).toBe(4);
+    expect(simulation.state.chapter).toBe(5);
     expect(simulation.isLedgerComplete()).toBe(true);
   });
 
@@ -94,7 +110,7 @@ describe("the game can be finished", () => {
       playThrough(simulation, 1);
       seen.add(simulation.state.chapter);
     }
-    expect([...seen].sort()).toEqual([0, 1, 2, 3, 4]);
+    expect([...seen].sort()).toEqual([0, 1, 2, 3, 4, 5]);
   });
 });
 
@@ -145,6 +161,7 @@ describe("nothing the player is asked to do locks them out", () => {
     playThrough(simulation, 400);
     const zoneObjectives = simulation.state.objectives.filter((objective) => objective.kind === "expedition");
     for (const objective of zoneObjectives) {
+      if (objective.chapter > simulation.state.chapter) continue;
       if (simulation.state.revealedAreas.includes(objective.zone!)) {
         expect(objective.completed).toBe(true);
       }

@@ -8,6 +8,7 @@ export const WANT_GLYPH: Record<WantKind, string> = {
   market: "◈",
   quiet: "◦",
   company: "♥",
+  sky: "✶",
 };
 
 export function describeWant(resident: Resident, kind: WantKind, homeLabel: string): string {
@@ -17,6 +18,7 @@ export function describeWant(resident: Resident, kind: WantKind, homeLabel: stri
     market: `${resident.name} wants the market within easy walking distance.`,
     quiet: `${resident.name} wants the workshop noise away from ${homeLabel}.`,
     company: `${resident.name} is hoping for a closer friendship.`,
+    sky: `${resident.name} wants a Sky Walk within reach of ${homeLabel}.`,
   };
   return descriptions[kind];
 }
@@ -53,6 +55,8 @@ export function isWantSatisfied(
           && relationship.kind !== "rivalry"
           && relationship.strength >= 72,
       );
+    case "sky":
+      return near("sky-walk", 6);
     default:
       return true;
   }
@@ -64,6 +68,7 @@ export function unmetWantKinds(
   relationships: Relationship[],
   home?: Building,
 ): WantKind[] {
-  return (["lantern", "neighbour", "market", "quiet", "company"] as WantKind[])
+  return (["lantern", "neighbour", "market", "quiet", "company", "sky"] as WantKind[])
+    .filter((kind) => kind !== "sky" || resident.species === "cloudmoth")
     .filter((kind) => !isWantSatisfied(resident, kind, buildings, relationships, home));
 }

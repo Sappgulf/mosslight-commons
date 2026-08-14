@@ -736,6 +736,17 @@ kbd {
 }
 .want-note.is-impatient { border-left-color: var(--warning); background: rgba(232, 121, 104, 0.12); color: #f0c4bb; }
 
+.minimap {
+  display: block;
+  width: 100%;
+  height: 72px;
+  margin-top: var(--s2);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  image-rendering: pixelated;
+  cursor: crosshair;
+  background: #061018;
+}
 .follow-hint { margin: 4px 0 0; color: var(--muted); font-size: 10px; letter-spacing: 0.04em; }
 .save-row button.is-armed { border-color: var(--warning); color: var(--warning); }
 .resident-portrait {

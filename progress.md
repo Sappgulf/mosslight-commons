@@ -520,6 +520,16 @@ keeps ticking, so this cannot make it three times.
 
 - 134 Vitest tests (16 new) and 19 Playwright tests pass.
 
+## Living basin pass — a third route and a map you can click
+
+- [x] Canopy Rift: a third fogged bank, opened by a Sky Walk, a Sky Lantern,
+      or a scout.
+- [x] Chapter 5: chart the rift and hang a Sky Lantern. Craft progress now
+      sweeps from `crafted` so early work still counts.
+- [x] Cloudmoths ask for a Sky Walk. Answering pays moonwater.
+- [x] Clickable basin minimap on the brand card.
+- [x] Build hotkeys: H home, R farm, G grove, C market, T workshop, Y sky, N path.
+
 ## Playtest pass — the HUD has to hold seven tools
 
 E2E was already green (19). Playing the dock showed the new Sky Walk and the

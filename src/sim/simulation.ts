@@ -184,17 +184,28 @@ const WANT_REWARDS: Record<WantKind, { item: ItemKey; amount: number }> = {
   market: { item: "seed-pod", amount: 2 },
   quiet: { item: "resin", amount: 2 },
   company: { item: "resin", amount: 1 },
+  sky: { item: "moonwater", amount: 2 },
 };
 
 const ZONE_BOUNDS: Record<MapZoneKey, { xMin: number; xMax: number; yMin: number; yMax: number }> = {
   "sunken-reach": { xMin: 24, xMax: 31, yMin: 13, yMax: 20 },
   "old-hollow": { xMin: 19, xMax: 25, yMin: 3, yMax: 8 },
+  "canopy-rift": { xMin: 0, xMax: 6, yMin: 17, yMax: 23 },
 };
 
 const ZONE_TARGETS: Record<MapZoneKey, Vec2> = {
   "sunken-reach": { x: 27, y: 16 },
   "old-hollow": { x: 22, y: 5 },
+  "canopy-rift": { x: 3, y: 20 },
 };
+
+const ZONE_LABELS: Record<MapZoneKey, string> = {
+  "sunken-reach": "Sunken Reach",
+  "old-hollow": "Old Hollow",
+  "canopy-rift": "Canopy Rift",
+};
+
+export const ZONE_COUNT = 3;
 
 const COLLECTIBLE_REWARDS: Record<
   CollectibleTile,
@@ -689,7 +700,7 @@ export class MosslightSimulation {
       leaderId: leader.id,
       target: ZONE_TARGETS[zone],
       zone,
-      title: zone === "sunken-reach" ? "Sunken Reach Survey" : "Old Hollow Survey",
+      title: `${ZONE_LABELS[zone]} Survey`,
       progress: 0,
       duration,
       status: "active",
@@ -900,6 +911,7 @@ export class MosslightSimulation {
       : "";
     this.addMessage(`BUILD · ${definition.label} is ready${capacityNote}.`, "good");
     this.emit({ type: "build", position, label: definition.shortLabel, tone: "good" });
+    if (type === "sky-walk") this.revealZone("canopy-rift");
     this.updateForecast();
     return true;
   }
@@ -1526,6 +1538,7 @@ export class MosslightSimulation {
           resident.needs.safety = clamp(resident.needs.safety + 6);
         }
       }
+      this.revealZone("canopy-rift");
     } else {
       this.revealZone("old-hollow");
     }
@@ -3031,7 +3044,7 @@ export class MosslightSimulation {
   }
 
   private formatZone(zone: MapZoneKey): string {
-    return zone === "sunken-reach" ? "Sunken Reach" : "Old Hollow";
+    return ZONE_LABELS[zone];
   }
 
   private formatSeason(season: Season): string {
@@ -3290,6 +3303,32 @@ function createObjectives(): Objective[] {
       rewardItem: "moonwater",
       rewardAmount: 3,
       chapter: 4,
+    },
+    {
+      id: "chart-canopy-rift",
+      title: "Chart the Canopy Rift",
+      description: "Open the last hidden bank of the basin, by walkway or by scout.",
+      kind: "expedition",
+      zone: "canopy-rift",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "map-fragment",
+      rewardAmount: 2,
+      chapter: 5,
+    },
+    {
+      id: "hang-sky-lanterns",
+      title: "Hang Sky Lanterns",
+      description: "Craft a Sky Lantern so moths can find the Commons after dark.",
+      kind: "craft",
+      recipe: "sky-lantern",
+      target: 1,
+      progress: 0,
+      completed: false,
+      rewardItem: "moonwater",
+      rewardAmount: 3,
+      chapter: 5,
     },
   ];
 }

@@ -12,7 +12,7 @@ export type RelationshipKind = "friendship" | "rivalry" | "kinship" | "family";
 
 export type ExpeditionStatus = "active" | "complete";
 
-export type MapZoneKey = "sunken-reach" | "old-hollow";
+export type MapZoneKey = "sunken-reach" | "old-hollow" | "canopy-rift";
 
 export type CollectibleTile = "fern" | "mushroom" | "crystal" | "ruin";
 
@@ -77,7 +77,7 @@ export type ObjectiveKind = "collect" | "build" | "expedition" | "craft" | "upgr
 
 export type LifeStage = "sprout" | "adult" | "elder";
 
-export type WantKind = "lantern" | "neighbour" | "market" | "quiet" | "company";
+export type WantKind = "lantern" | "neighbour" | "market" | "quiet" | "company" | "sky";
 
 /**
  * A named personal desire. Wants are what stop forty residents from being forty

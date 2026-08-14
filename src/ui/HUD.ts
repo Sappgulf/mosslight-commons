@@ -11,7 +11,7 @@ import {
   SPECIES_DEFINITIONS,
   UPGRADE_COSTS,
 } from "../data/definitions";
-import { MosslightSimulation } from "../sim/simulation";
+import { MosslightSimulation, ZONE_COUNT } from "../sim/simulation";
 import { crisisBanner } from "../sim/crisis";
 import { WANT_GLYPH } from "../sim/wants";
 import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
@@ -54,6 +54,7 @@ export interface HUDCallbacks {
   onToggleMute: () => boolean;
   isMuted: () => boolean;
   onFocusResident: (id: string) => void;
+  onFocusCell: (x: number, y: number) => void;
 }
 
 const formatResourceName = (resource: ResourceKey): string => RESOURCE_DEFINITIONS[resource].label.toUpperCase();
@@ -100,6 +101,7 @@ export class HUD {
     this.callbacks = callbacks;
     this.root.innerHTML = this.template();
     this.root.addEventListener("click", (event) => this.handleClick(event));
+    this.root.addEventListener("pointerdown", (event) => this.handleMinimap(event));
     this.root.addEventListener("focusin", (event) => this.handleFocus(event));
     this.root.addEventListener("pointerover", (event) => this.handlePointerover(event));
     this.root.addEventListener("change", (event) => this.handleChange(event));
@@ -258,6 +260,7 @@ export class HUD {
     }
 
     this.renderDiagnosis();
+    this.renderMinimap();
 
     const itemTotal = itemOrder.reduce((sum, item) => sum + state.items[item], 0);
     this.setText("[data-item-summary]", `${itemTotal} FOUND`);
@@ -277,12 +280,12 @@ export class HUD {
       "[data-expedition-status]",
       activeExpedition
         ? `${activeExpedition.title} · ${activeExpedition.progress}/${activeExpedition.duration}`
-        : state.revealedAreas.length >= 2 ? "ALL ROUTES MAPPED" : "READY TO DISPATCH",
+        : state.revealedAreas.length >= ZONE_COUNT ? "ALL ROUTES MAPPED" : "READY TO DISPATCH",
     );
     const dispatchButton = this.root.querySelector<HTMLButtonElement>('[data-action="dispatch-expedition"]');
     if (dispatchButton) {
-      dispatchButton.disabled = Boolean(activeExpedition) || state.revealedAreas.length >= 2;
-      dispatchButton.textContent = activeExpedition ? "SCOUTING" : state.revealedAreas.length >= 2 ? "MAPPED" : "DISPATCH SCOUT";
+      dispatchButton.disabled = Boolean(activeExpedition) || state.revealedAreas.length >= ZONE_COUNT;
+      dispatchButton.textContent = activeExpedition ? "SCOUTING" : state.revealedAreas.length >= ZONE_COUNT ? "MAPPED" : "DISPATCH SCOUT";
     }
 
     // Re-pointing the districts is a commitment now, so show the lock-out
@@ -808,6 +811,51 @@ export class HUD {
    * explaining it — the status line said "strained" and left the player to
    * guess. This names the need in the worst shape, the cause, and the fix.
    */
+  private renderMinimap(): void {
+    const canvas = this.root.querySelector<HTMLCanvasElement>("[data-minimap]");
+    if (!canvas) return;
+    const state = this.simulation.state;
+    const width = state.grid[0]?.length ?? 32;
+    const height = state.grid.length;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    const colors: Record<string, string> = {
+      grass: "#1d4d43",
+      water: "#1a4a58",
+      wetland: "#2d8c84",
+      path: "#8a7354",
+      stone: "#3a3a3a",
+      fern: "#8dbb72",
+      mushroom: "#e98b50",
+      crystal: "#63e6d4",
+      ruin: "#b8a58a",
+    };
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if (!state.revealed[y]?.[x]) {
+          context.fillStyle = "#061018";
+        } else {
+          context.fillStyle = colors[state.grid[y]![x]!] ?? "#12352f";
+        }
+        context.fillRect(x, y, 1, 1);
+      }
+    }
+    context.fillStyle = "#f4b85b";
+    for (const building of state.buildings) {
+      context.fillRect(building.position.x, building.position.y, 1, 1);
+    }
+    const selected = this.simulation.getSelectedResident();
+    if (selected) {
+      context.fillStyle = "#c8a9ff";
+      context.fillRect(selected.position.x, selected.position.y, 1, 1);
+    }
+  }
+
   private renderDiagnosis(): void {
     const panel = this.root.querySelector<HTMLElement>("[data-diagnosis]");
     if (!panel) return;
@@ -919,6 +967,19 @@ export class HUD {
     this.setText("[data-onboarding-progress]", `${state.onboardingStep + 1} / ${ONBOARDING_STEPS.length}`);
     const next = this.root.querySelector<HTMLButtonElement>('[data-action="onboarding-next"]');
     if (next) next.textContent = state.onboardingStep === ONBOARDING_STEPS.length - 1 ? "BEGIN" : "NEXT";
+  }
+
+  private handleMinimap(event: PointerEvent): void {
+    const canvas = (event.target as HTMLElement).closest("canvas[data-minimap]");
+    if (!canvas) return;
+    const box = canvas.getBoundingClientRect();
+    const state = this.simulation.state;
+    const width = state.grid[0]?.length ?? 32;
+    const height = state.grid.length;
+    const x = Math.floor(((event.clientX - box.left) / box.width) * width);
+    const y = Math.floor(((event.clientY - box.top) / box.height) * height);
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    this.callbacks.onFocusCell(x, y);
   }
 
   private handleClick(event: Event): void {
@@ -1424,6 +1485,7 @@ export class HUD {
         <button class="field-tab" type="button" data-field-tab="civic" role="tab" aria-selected="false" hidden>CIVIC TOOLS</button>
       </div>
       <div class="field-view" data-field-view="field">
+        <canvas class="minimap" data-minimap width="32" height="24" aria-label="Basin map. Click to look."></canvas>
         <div class="item-grid" aria-label="Found materials">${itemMarkup}</div>
         <div class="field-section petition-section">
           <div class="commons-report" data-diagnosis data-tone="good" role="button" tabindex="0" title="Click to place what the Commons needs">

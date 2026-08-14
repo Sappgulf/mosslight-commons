@@ -68,6 +68,8 @@ export function checkThresholdObjectives(context: SimContext): void {
       objective.progress = context.state.traditions.includes(objective.tradition) ? objective.target : 0;
     } else if (objective.kind === "harmony") {
       objective.progress = Math.min(objective.target, Math.round(context.state.metrics.harmony));
+    } else if (objective.kind === "craft" && objective.recipe) {
+      objective.progress = Math.min(objective.target, context.state.crafted[objective.recipe] ?? 0);
     } else if (objective.kind === "expedition" && objective.zone) {
       /*
        * Swept from the world rather than credited by the event, because the
