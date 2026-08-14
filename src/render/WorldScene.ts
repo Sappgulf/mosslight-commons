@@ -7,6 +7,7 @@ import type { BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Speci
 import { Effects } from "./Effects";
 import { LightLayer, type LightSource } from "./LightLayer";
 import { TerrainPainter } from "./TerrainPainter";
+import { dismissBoot, setBootProgress } from "../ui/boot";
 
 /**
  * Tiles were 22px, which put a detailed 40px painterly building sprite across
@@ -113,6 +114,10 @@ const NODE_TEXTURE_KEYS: Partial<Record<TileKind, string>> = {
   ruin: "node-ruin",
 };
 
+/** Cell equality that tolerates either side being absent. */
+const sameCell = (a: Vec2 | null, b: Vec2 | null): boolean =>
+  a !== null && b !== null && a.x === b.x && a.y === b.y;
+
 interface BuildPreviewState {
   valid: boolean;
   reason: string;
@@ -202,6 +207,17 @@ export class WorldScene extends Phaser.Scene {
   private dragOrigin = { x: 0, y: 0 };
   private cameraOrigin = { x: 0, y: 0 };
 
+  /**
+   * Touch placement is two-stage. A mouse player sees a live preview under the
+   * cursor before committing, but a touch player has no hover at all — the
+   * first they learned of an illegal or wasteful plot was after the build had
+   * already happened. On touch the first tap arms a cell and shows the same
+   * preview, and only a second tap on that cell commits.
+   */
+  private armedCell: Vec2 | null = null;
+  /** Finger separation at the last pinch sample, or null when not pinching. */
+  private pinchDistance: number | null = null;
+
   private terrainSignature = "";
   private districtSignature = "";
   private lastHintText = "";
@@ -219,16 +235,20 @@ export class WorldScene extends Phaser.Scene {
   }
 
   preload(): void {
+    // Report real load progress to the boot splash rather than leaving the
+    // player watching an unexplained dark rectangle.
+    this.load.on("progress", (value: number) => setBootProgress(value * 0.9, "Gathering the lanterns…"));
+
     for (const [key, fileName] of Object.entries(BUILDING_TEXTURE_KEYS)) {
-      if (fileName) this.load.image(fileName, `assets/runtime/buildings/${key}.png`);
+      if (fileName) this.load.image(fileName, `assets/runtime/buildings/${key}.webp`);
     }
     for (const [species, fileName] of Object.entries(RESIDENT_TEXTURE_KEYS)) {
-      this.load.image(fileName, `assets/runtime/residents/${species}.png`);
+      this.load.image(fileName, `assets/runtime/residents/${species}.webp`);
     }
-    this.load.image("building-lantern-grove-night", "assets/runtime/buildings/lantern-grove-night.png");
-    this.load.image("tile-path", "assets/runtime/tiles/path.png");
+    this.load.image("building-lantern-grove-night", "assets/runtime/buildings/lantern-grove-night.webp");
+    this.load.image("tile-path", "assets/runtime/tiles/path.webp");
     for (const [kind, fileName] of Object.entries(NODE_TEXTURE_KEYS)) {
-      if (fileName) this.load.image(fileName, `assets/runtime/nodes/${kind}.png`);
+      if (fileName) this.load.image(fileName, `assets/runtime/nodes/${kind}.webp`);
     }
   }
 
@@ -308,6 +328,8 @@ export class WorldScene extends Phaser.Scene {
 
     this.ready = true;
     this.renderNow();
+    // The world is on screen; the splash has nothing left to cover.
+    dismissBoot();
   }
 
   shutdown(): void {
@@ -362,6 +384,17 @@ export class WorldScene extends Phaser.Scene {
       this.hoverCell = cell;
 
       const buildMode = this.simulation.state.buildMode;
+
+      // Touch has no hover, so arm the cell and show the preview first.
+      if (buildMode && pointer.wasTouch && !sameCell(this.armedCell, cell)) {
+        this.armedCell = cell;
+        this.drawHoverLayer();
+        this.drawHeader();
+        this.onStateChange();
+        return;
+      }
+      this.armedCell = null;
+
       if (buildMode === "path") {
         if (this.simulation.paintPath(cell)) this.simulation.noteTutorial("build");
       } else if (buildMode) {
@@ -382,11 +415,47 @@ export class WorldScene extends Phaser.Scene {
 
     this.input.on("pointerout", () => {
       this.dragging = false;
+      // An armed touch placement must survive the finger leaving the surface,
+      // or the preview would vanish before it could be confirmed.
+      if (this.armedCell) return;
       if (!this.hoverCell) return;
       this.hoverCell = null;
       this.drawHoverLayer();
       this.drawHeader();
       this.updateBuildingLabels();
+    });
+
+    // Pinch to zoom. Touch previously had no way to zoom at all: the wheel
+    // handler needs a wheel and the keyboard shortcuts need a keyboard, which
+    // left the HUD buttons as the only route on a phone.
+    this.input.addPointer(1);
+    this.input.on("pointermove", () => {
+      const [first, second] = [this.input.pointer1, this.input.pointer2];
+      if (!first.isDown || !second.isDown) {
+        this.pinchDistance = null;
+        return;
+      }
+      // Two fingers down is a pinch, never a camera drag.
+      this.dragging = false;
+      this.dragMoved = true;
+
+      const distance = Phaser.Math.Distance.Between(first.x, first.y, second.x, second.y);
+      if (this.pinchDistance === null) {
+        this.pinchDistance = distance;
+        return;
+      }
+      const camera = this.cameras.main;
+      const midX = (first.x + second.x) / 2;
+      const midY = (first.y + second.y) / 2;
+      const before = camera.getWorldPoint(midX, midY);
+      camera.setZoom(Phaser.Math.Clamp(camera.zoom * (distance / this.pinchDistance), MIN_ZOOM, MAX_ZOOM));
+      const after = camera.getWorldPoint(midX, midY);
+      camera.setScroll(camera.scrollX + (before.x - after.x), camera.scrollY + (before.y - after.y));
+      this.pinchDistance = distance;
+    });
+
+    this.input.on("pointerup", () => {
+      if (!this.input.pointer1.isDown || !this.input.pointer2.isDown) this.pinchDistance = null;
     });
 
     // Wheel zooms toward the cursor rather than the board centre.
@@ -503,6 +572,9 @@ export class WorldScene extends Phaser.Scene {
 
   public renderNow(): void {
     if (!this.ready) return;
+    // Leaving build mode (Escape, or toggling the button off) must also drop an
+    // armed touch placement, or a stale preview would sit on the board.
+    if (!this.simulation.state.buildMode) this.armedCell = null;
     this.input.setDefaultCursor(this.simulation.state.buildMode ? "crosshair" : "grab");
     this.repaintTerrainIfChanged();
     this.drawWaterOverlay();
@@ -593,27 +665,44 @@ export class WorldScene extends Phaser.Scene {
   // --- Camera controls ----------------------------------------------------
 
   public zoomIn(): number {
+    if (!this.hasCamera()) return 100;
     this.cameras.main.setZoom(Phaser.Math.Clamp(this.cameras.main.zoom + ZOOM_STEP, MIN_ZOOM, MAX_ZOOM));
     return this.getZoomPercent();
   }
 
   public zoomOut(): number {
+    if (!this.hasCamera()) return 100;
     this.cameras.main.setZoom(Phaser.Math.Clamp(this.cameras.main.zoom - ZOOM_STEP, MIN_ZOOM, MAX_ZOOM));
     return this.getZoomPercent();
   }
 
   public resetZoom(): number {
+    if (!this.hasCamera()) return 100;
     this.cameras.main.setZoom(this.fitZoom());
     this.cameras.main.centerOn(OFFSET_X + BOARD_W / 2, OFFSET_Y + BOARD_H / 2);
     return this.getZoomPercent();
   }
 
+  /**
+   * Phaser sets up a scene's camera manager during scene boot, which happens
+   * after `new Phaser.Game(...)` returns. `main.ts` renders the HUD once during
+   * start-up, and the HUD reads the zoom level — so on a cold load this ran
+   * before there was any camera and threw on `cameras.main`. Because that
+   * happened at module scope it aborted the rest of `main.ts`, taking the
+   * simulation clock, the key bindings, and the debug hooks down with it.
+   */
+  private hasCamera(): boolean {
+    return this.cameras?.main !== undefined;
+  }
+
   public getZoomPercent(): number {
+    if (!this.hasCamera()) return 100;
     return Math.round((this.cameras.main.zoom / this.fitZoom()) * 100);
   }
 
   /** Smoothly centres the camera on a grid cell — used to follow a resident. */
   public focusOn(position: Vec2): void {
+    if (!this.hasCamera()) return;
     const center = this.cellCenter(position);
     this.cameras.main.pan(center.x, center.y, 420, "Sine.easeInOut");
   }
@@ -1116,9 +1205,9 @@ export class WorldScene extends Phaser.Scene {
     const graphics = this.hoverLayer;
     graphics.clear();
     this.previewLabel.setVisible(false);
-    if (!this.hoverCell) return;
+    const position = this.armedCell ?? this.hoverCell;
+    if (!position) return;
 
-    const position = this.hoverCell;
     const px = OFFSET_X + position.x * TILE_SIZE;
     const py = OFFSET_Y + position.y * TILE_SIZE;
     const buildMode = this.simulation.state.buildMode;
@@ -1152,7 +1241,9 @@ export class WorldScene extends Phaser.Scene {
       graphics.lineBetween(px + 23, py + 9, px + 9, py + 23);
     }
 
-    const status = preview.valid ? "READY" : `BLOCKED · ${preview.reason}`;
+    const status = preview.valid
+      ? (this.armedCell ? "TAP AGAIN TO PLACE" : "READY")
+      : `BLOCKED · ${preview.reason}`;
     const lines = [`${definition.shortLabel} · ${status}`, `COST ${this.formatCost(definition)}`];
 
     // Show what this specific plot is worth. Placement only becomes a decision

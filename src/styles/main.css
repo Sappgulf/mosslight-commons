@@ -70,7 +70,7 @@ kbd {
   backdrop-filter: blur(12px);
 }
 
-.brand-card { position: absolute; top: 18px; left: 20px; width: 270px; min-height: 126px; padding: 18px 20px; overflow: hidden; border-radius: 18px; background-image: linear-gradient(90deg, rgba(8, 21, 27, 0.96) 0%, rgba(8, 21, 27, 0.82) 56%, rgba(8, 21, 27, 0.38) 100%), url('/assets/mosslight-key-art.png'); background-size: cover; background-position: 72% 52%; }
+.brand-card { position: absolute; top: 18px; left: 20px; width: 270px; min-height: 126px; padding: 18px 20px; overflow: hidden; border-radius: 18px; background-image: linear-gradient(90deg, rgba(8, 21, 27, 0.96) 0%, rgba(8, 21, 27, 0.82) 56%, rgba(8, 21, 27, 0.38) 100%), url('/assets/mosslight-key-art.webp'); background-size: cover; background-position: 72% 52%; }
 .brand-card::after { content: ""; position: absolute; right: 15px; bottom: 12px; width: 24px; height: 24px; border: 1px solid var(--teal); border-radius: 50%; box-shadow: 0 0 20px var(--teal); opacity: 0.5; }
 .brand-kicker, .panel-eyebrow { color: var(--teal); font-size: 9px; font-weight: 800; letter-spacing: 0.18em; text-transform: uppercase; }
 .brand-card h1 { position: relative; z-index: 1; margin: 9px 0 4px; color: var(--paper); font-family: Georgia, serif; font-size: 28px; line-height: 0.9; letter-spacing: -0.06em; }
@@ -421,6 +421,22 @@ kbd {
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
 }
 .overlay-card--narrow { width: min(420px, 100%); }
+
+/* Keyboard shortcuts card, built from the router's own binding list. */
+.shortcuts-overlay .overlay-card { width: min(520px, 100%); max-height: 80vh; overflow-y: auto; }
+.shortcut-groups { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.shortcut-group h3 {
+  margin: 0 0 6px;
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.shortcut-group ul { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.shortcut-group li { display: flex; gap: 9px; align-items: baseline; color: var(--paper); font-size: 11px; }
+.shortcut-group li kbd { flex: 0 0 auto; min-width: 58px; text-align: center; }
+.shortcut-group li span { color: var(--muted); line-height: 1.45; }
 .overlay-card h2 { margin: 0; font-family: Georgia, serif; font-size: 19px; font-weight: 500; }
 .overlay-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 

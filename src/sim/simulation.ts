@@ -25,6 +25,14 @@ import { beginLongShade, crisisBanner, tickLongShade } from "./crisis";
 import { annotateForecast, calculateLocalForecast, compareForecasts } from "./forecast";
 import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
 import { describeWant, isWantSatisfied, unmetWantKinds } from "./wants";
+import type { SimContext } from "./systems/context";
+import {
+  activeObjectives,
+  advanceObjectives,
+  checkThresholdObjectives,
+  updateChapter,
+} from "./systems/progression";
+import { updateResources } from "./systems/production";
 import type {
   Building,
   BuildingType,
@@ -116,6 +124,20 @@ export interface SimEvent {
 
 export type SimEventListener = (event: SimEvent) => void;
 
+/** What a stage learns about the tick it is running inside. */
+export interface TickInfo {
+  readonly dayRolled: boolean;
+  readonly previousSeason: Season;
+}
+
+/** One named step of the per-tick pipeline. */
+export interface TickStage {
+  readonly name: string;
+  /** Stages that only make sense once a day, like births and council business. */
+  readonly dailyOnly?: boolean;
+  run(info: TickInfo): void;
+}
+
 export class SeededRandom {
   private value: number;
 
@@ -150,7 +172,6 @@ export class SeededRandom {
 }
 
 const speciesOrder: Species[] = ["brambleback", "glowtail", "mireling"];
-let nextProposalId = 1;
 
 const names = [
   "Pip", "Mallow", "Tallow", "Nix", "Pebble", "Lumen", "Sedge", "Bramble", "Clover", "Moss",
@@ -167,6 +188,16 @@ export class MosslightSimulation {
   private nextMessageId = 1;
   private nextResidentId = 1;
   private nextBuildingId = 1;
+  /**
+   * Which council proposal comes next. This used to be a module-level counter
+   * shared by every simulation in the process, and `nextProposal` picks the
+   * proposal kind with `id % kinds.length` — so the council's agenda depended
+   * on how many other worlds had been constructed first rather than on this
+   * world. Two runs from the same seed diverged into different politics, and a
+   * reloaded save resumed a different agenda than the one it left. Per instance
+   * and serialized, both hold.
+   */
+  private nextProposalId = 1;
   private localForecast: Forecast | undefined;
   private resourceWarningLevels: Record<ResourceKey, number> = {
     food: 0,
@@ -191,6 +222,31 @@ export class MosslightSimulation {
   private buildingByType = new Map<BuildingType, Building>();
   /** Packed cells occupied by a building, for pathfinding. */
   private occupiedCells = new Set<number>();
+
+  /**
+   * The narrow surface handed to extracted tick systems. Built once and reused,
+   * so a system never gets a reference to the whole class.
+   */
+  private readonly context: SimContext = ((owner: MosslightSimulation): SimContext => ({
+    // `state` and `rng` are getters, not captured values: `restore()` swaps the
+    // whole state object, and a snapshot taken at construction would leave every
+    // system writing into the discarded world.
+    get state() {
+      return owner.state;
+    },
+    get rng() {
+      return owner.rng;
+    },
+    addMessage: (text, tone) => owner.addMessage(text, tone),
+    emit: (event) => owner.emit(event),
+    markMetricsDirty: () => {
+      owner.metricsDirty = true;
+    },
+    adjacencyFor: (building) => owner.adjacencyFor(building),
+    hasPolicy: (kind) => owner.hasPolicy(kind),
+    averageWaterQuality: () => owner.averageWaterQuality(),
+    buildingOfType: (type) => owner.buildingByType.get(type),
+  }))(this);
 
   constructor(seed = 20260811) {
     this.rng = new SeededRandom(seed);
@@ -437,7 +493,7 @@ export class MosslightSimulation {
       building.upgrading = false;
       building.upgradeProgress = 0;
       this.metricsDirty = true;
-      this.advanceObjectives("upgrade", undefined, building.type);
+      advanceObjectives(this.context, "upgrade", { building: building.type });
       this.addMessage(
         `UPGRADE · ${BUILDING_DEFINITIONS[building.type].label} is now level ${building.level}. Output rises to ${Math.round(OUTPUT_MULTIPLIER[building.level]! * 100)}%.`,
         "good",
@@ -667,7 +723,7 @@ export class MosslightSimulation {
     this.reindexBuildings();
     this.state.buildMode = null;
     this.metricsDirty = true;
-    this.advanceObjectives("build", undefined, type);
+    advanceObjectives(this.context, "build", { building: type });
     this.updateMetrics();
     // A new building changes the walkable graph, so every in-flight route is stale.
     this.invalidateAllPaths();
@@ -709,7 +765,7 @@ export class MosslightSimulation {
       );
     }
     this.metricsDirty = true;
-    this.advanceObjectives("collect", tile);
+    advanceObjectives(this.context, "collect", { tile });
     this.updateMetrics();
     this.addMessage(
       `GATHER · ${this.formatCollectibleTile(tile)} → +${itemAmount} ${ITEM_DEFINITIONS[reward.item].label}${
@@ -765,6 +821,7 @@ export class MosslightSimulation {
       nextMessageId: this.nextMessageId,
       nextResidentId: this.nextResidentId,
       nextBuildingId: this.nextBuildingId,
+      nextProposalId: this.nextProposalId,
       resourceWarningLevels: this.resourceWarningLevels,
       housingMessageBand: this.housingMessageBand,
       state: this.state,
@@ -776,6 +833,7 @@ export class MosslightSimulation {
     this.nextMessageId = payload.nextMessageId;
     this.nextResidentId = payload.nextResidentId;
     this.nextBuildingId = payload.nextBuildingId;
+    this.nextProposalId = payload.nextProposalId;
     this.resourceWarningLevels = payload.resourceWarningLevels;
     this.housingMessageBand = payload.housingMessageBand;
     this.state = normalizeWorld(payload.state, payload.state.grid);
@@ -1079,6 +1137,56 @@ export class MosslightSimulation {
 
   // --- Tick ---------------------------------------------------------------
 
+  /**
+   * The tick order, as data.
+   *
+   * This used to be a bare run of thirty statements, which meant the ordering
+   * constraints between them — and there are real ones, like residents reading
+   * housing pressure so metrics must be fresh before they act — were invisible
+   * unless you already knew them. Naming each stage lets those constraints be
+   * written down next to the thing they constrain, and lets a test assert the
+   * order instead of trusting that nobody reshuffles the list.
+   */
+  private get pipeline(): TickStage[] {
+    return this.tickStages ??= [
+      { name: "seasonal-event", run: ({ previousSeason }) => this.updateSeasonalEvent(previousSeason) },
+      { name: "policies", run: ({ dayRolled }) => this.updatePolicies(dayRolled) },
+      { name: "long-shade", run: ({ dayRolled, previousSeason }) => this.updateLongShade(previousSeason, dayRolled) },
+      { name: "regrowth", run: () => this.updateRegrowth() },
+      { name: "expeditions", run: () => this.updateExpeditions() },
+      { name: "crafting", run: () => this.updateCrafting() },
+      { name: "upgrades", run: () => this.updateUpgrades() },
+      { name: "water-habitat", run: () => this.updateWaterAndHabitat() },
+      { name: "production", run: () => updateResources(this.context) },
+      // Residents read housing pressure, so metrics must be fresh before they act.
+      { name: "metrics-pre", run: () => this.updateMetrics() },
+      { name: "residents", run: ({ dayRolled }) => this.updateResidents(dayRolled) },
+      { name: "relationships", run: () => this.updateRelationships() },
+      { name: "assign-wants", run: () => this.maybeAssignWant() },
+      { name: "wants", run: () => this.updateWants() },
+      { name: "arrivals", run: () => this.maybeWelcomeResident() },
+      { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
+      { name: "issue-proposal", dailyOnly: true, run: () => this.maybeIssueProposal() },
+      { name: "expire-proposal", dailyOnly: true, run: () => this.expireProposal() },
+      { name: "cloudmoths", dailyOnly: true, run: () => this.maybeArriveCloudmoths() },
+      // Everything that could change population, needs, or buildings has now run.
+      { name: "metrics-post", run: () => this.updateMetrics() },
+      { name: "resource-warnings", run: () => this.checkResourceWarnings() },
+      { name: "housing-pressure", run: () => this.checkHousingPressure() },
+      { name: "settlement-status", run: () => this.updateSettlementStatus() },
+      { name: "threshold-objectives", run: () => checkThresholdObjectives(this.context) },
+      { name: "chapter", run: () => updateChapter(this.context) },
+      { name: "forecast", run: () => this.updateForecast() },
+    ];
+  }
+
+  /** Stage names in execution order. Exposed so a test can pin the order. */
+  public getPipelineOrder(): string[] {
+    return this.pipeline.map((stage) => stage.name);
+  }
+
+  private tickStages: TickStage[] | null = null;
+
   private tickOnce(): void {
     this.state.tick += 1;
     const previousDay = this.state.day;
@@ -1091,36 +1199,10 @@ export class MosslightSimulation {
     this.state.phase = phaseIndex < 2 ? "dawn" : phaseIndex < 7 ? "day" : phaseIndex < 10 ? "dusk" : "night";
     const dayRolled = this.state.day !== previousDay;
 
-    this.updateSeasonalEvent(previousSeason);
-    this.updatePolicies(dayRolled);
-    this.updateLongShade(previousSeason, dayRolled);
-    this.updateRegrowth();
-    this.updateExpeditions();
-    this.updateCrafting();
-    this.updateUpgrades();
-    this.updateWaterAndHabitat();
-    this.updateResources();
-    // Residents read metrics (housing pressure), so refresh once before they act.
-    this.updateMetrics();
-    this.updateResidents(dayRolled);
-    this.updateRelationships();
-    this.maybeAssignWant();
-    this.updateWants();
-    this.maybeWelcomeResident();
-    if (dayRolled) {
-      this.maybeBirth();
-      this.maybeIssueProposal();
-      this.expireProposal();
-      this.maybeArriveCloudmoths();
+    for (const stage of this.pipeline) {
+      if (stage.dailyOnly && !dayRolled) continue;
+      stage.run({ dayRolled, previousSeason });
     }
-    // Everything that could change population, needs, or buildings has now run.
-    this.updateMetrics();
-    this.checkResourceWarnings();
-    this.checkHousingPressure();
-    this.updateSettlementStatus();
-    this.checkThresholdObjectives();
-    this.updateChapter();
-    this.updateForecast();
 
     if (this.state.tick % TICKS_PER_DAY === 0) {
       this.addMessage(
@@ -1188,7 +1270,7 @@ export class MosslightSimulation {
       expedition.status = "complete";
       this.revealZone(expedition.zone);
       this.state.items[expedition.rewardItem] += expedition.rewardAmount;
-      this.advanceObjectives("expedition", undefined, undefined, expedition.zone);
+      advanceObjectives(this.context, "expedition", { zone: expedition.zone });
       this.addMessage(
         `EXPEDITION · ${expedition.title} complete · +${expedition.rewardAmount} ${this.formatItem(expedition.rewardItem)}. ${this.formatZone(expedition.zone)} is mapped.`,
         "good",
@@ -1224,7 +1306,7 @@ export class MosslightSimulation {
       }
     }
     this.metricsDirty = true;
-    this.advanceObjectives("craft", undefined, undefined, undefined, order.recipe);
+    advanceObjectives(this.context, "craft", { recipe: order.recipe });
     this.addMessage(`CRAFT · ${definition.label} is complete. ${definition.description}`, "good");
     if (workshop) {
       this.emit({ type: "craft", position: workshop.position, label: definition.label, tone: "good" });
@@ -1288,76 +1370,6 @@ export class MosslightSimulation {
    * Production scales with building level and with the skill of the residents
    * assigned to each workplace, so upgrades and experienced crews both matter.
    */
-  private updateResources(): void {
-    const farmOutput = this.weightedOutput("reed-farm", "farming");
-    const homeOutput = this.weightedOutput("burrow-home");
-    const groveOutput = this.weightedOutput("lantern-grove");
-    const marketOutput = this.weightedOutput("commons-market");
-    const workshops = this.weightedOutput("root-workshop", "crafting");
-    const population = this.state.residents.length;
-    const craftedResin = Math.min(Math.ceil(workshops), this.state.items.resin);
-    const farmFactor = this.state.districtFocus === "wetland" ? 1.2 : 1;
-    const groveFactor = this.state.districtFocus === "lantern" ? 1.2 : 1;
-    const marketFactor = this.state.seasonalEvent.effect === "festival" ? 0.16 : 0.06;
-    const seasonalWarmth = this.state.seasonalEvent.effect === "bloom" ? 0.25 : 0;
-    const seasonalDrain = this.state.seasonalEvent.effect === "watch" ? 0.18 : 0;
-    const lanternPolicy = this.hasPolicy("lantern-first") ? 1.18 : 1;
-    const farmPolicy = this.hasPolicy("wetland-first") ? 1.12 : 1;
-    const marketPolicy = this.hasPolicy("market-first") ? 1.16 : 1;
-
-    // Rivalries in the settlement drag on every workplace.
-    const rivalryDrag = clamp(
-      1 - this.state.relationships.filter((relationship) => relationship.kind === "rivalry" && relationship.strength > 60).length * 0.015,
-      0.75,
-      1,
-    );
-
-    const basinQuality = this.averageWaterQuality();
-    const habitatPenalty = 1 - Math.min(0.28, this.state.habitatStress * 0.012);
-    this.state.resources.food = clamp(
-      this.state.resources.food + farmOutput * 1.0 * farmFactor * farmPolicy * rivalryDrag * habitatPenalty - population * 0.022,
-    );
-    this.state.resources.water = clamp(
-      this.state.resources.water
-        + farmOutput * 0.58 * farmFactor * rivalryDrag * (0.65 + basinQuality / 280)
-        - population * 0.014
-        - this.state.habitatStress * 0.02,
-    );
-    this.state.marketShortages = marketShortages(this.state.buildings, this.state.resources.food);
-    this.state.resources.warmth = clamp(
-      this.state.resources.warmth + homeOutput * 0.55 - population * 0.012 + craftedResin * 0.18 + seasonalWarmth - seasonalDrain,
-    );
-    this.state.resources.light = clamp(
-      this.state.resources.light + groveOutput * 0.72 * groveFactor * lanternPolicy - population * 0.009 + marketOutput * marketFactor * marketPolicy + craftedResin * 0.12 - seasonalDrain,
-    );
-    this.state.items.resin = Math.max(0, this.state.items.resin - craftedResin);
-    // Resource security feeds metrics, and resources move every single tick.
-    this.metricsDirty = true;
-  }
-
-  /**
-   * Effective count of a building type: each building contributes its level
-   * multiplier, scaled by the average relevant skill of its workers.
-   */
-  private weightedOutput(type: BuildingType, skill?: keyof Resident["skills"]): number {
-    let total = 0;
-    for (const building of this.state.buildings) {
-      if (building.type !== type) continue;
-      // Where a building sits now matters as much as what level it is.
-      let contribution = (OUTPUT_MULTIPLIER[building.level] ?? 1) * this.adjacencyFor(building).multiplier;
-      if (skill) {
-        const workers = this.state.residents.filter((resident) => resident.workplaceId === building.id);
-        if (workers.length > 0) {
-          const average = workers.reduce((sum, resident) => sum + resident.skills[skill], 0) / workers.length;
-          // Skill swings output between 85% and 130%.
-          contribution *= 0.85 + (average / 100) * 0.45;
-        }
-      }
-      total += contribution;
-    }
-    return total;
-  }
-
   private updateResidents(dayRolled: boolean): void {
     const market = this.buildingByType.get("commons-market");
     const farm = this.buildingByType.get("reed-farm");
@@ -1913,7 +1925,7 @@ export class MosslightSimulation {
   private maybeIssueProposal(): void {
     if (this.state.day % 7 !== 0) return;
     if (this.state.proposal?.status === "pending") return;
-    this.state.proposal = nextProposal(this.state.day, this.state.chapter, nextProposalId++, this.state.residents);
+    this.state.proposal = nextProposal(this.state.day, this.state.chapter, this.nextProposalId++, this.state.residents);
     this.addMessage(`COUNCIL · ${this.state.proposal.title} · vote by day ${this.state.proposal.deadlineDay}.`, "info");
   }
 
@@ -2084,73 +2096,9 @@ export class MosslightSimulation {
     if (state.history.length > HISTORY_LIMIT) state.history.length = HISTORY_LIMIT;
   }
 
-  /** Objectives unlock one chapter at a time as the previous chapter completes. */
-  private updateChapter(): void {
-    const current = this.state.chapter;
-    const chapterObjectives = this.state.objectives.filter((objective) => objective.chapter === current);
-    if (chapterObjectives.length === 0) return;
-    if (!chapterObjectives.every((objective) => objective.completed)) return;
-
-    const nextChapter = current + 1;
-    const hasNext = this.state.objectives.some((objective) => objective.chapter === nextChapter);
-    if (!hasNext) return;
-
-    this.state.chapter = nextChapter;
-    this.addMessage(`CHAPTER · New work is open in the Commons ledger.`, "good");
-  }
-
+  /** Objectives the player can currently see. Delegates to the progression system. */
   public getActiveObjectives(): Objective[] {
-    return this.state.objectives.filter((objective) => objective.chapter <= this.state.chapter);
-  }
-
-  private advanceObjectives(
-    kind: Objective["kind"],
-    tile?: CollectibleTile,
-    building?: BuildingType,
-    zone?: MapZoneKey,
-    recipe?: RecipeKey,
-  ): void {
-    for (const objective of this.state.objectives) {
-      if (objective.completed || objective.kind !== kind) continue;
-      if (objective.chapter > this.state.chapter) continue;
-      if (kind === "collect" && objective.tile && objective.tile !== tile) continue;
-      if (kind === "build" && objective.building !== building) continue;
-      if (kind === "upgrade" && objective.building && objective.building !== building) continue;
-      if (kind === "expedition" && objective.zone !== zone) continue;
-      if (kind === "craft" && objective.recipe !== recipe) continue;
-
-      objective.progress = Math.min(objective.target, objective.progress + 1);
-      if (objective.progress < objective.target) continue;
-
-      this.completeObjective(objective);
-    }
-  }
-
-  private completeObjective(objective: Objective): void {
-    objective.completed = true;
-    const rewardText = objective.rewardItem && objective.rewardAmount
-      ? ` · reward +${objective.rewardAmount} ${ITEM_DEFINITIONS[objective.rewardItem].label}`
-      : "";
-    if (objective.rewardItem && objective.rewardAmount) {
-      this.state.items[objective.rewardItem] += objective.rewardAmount;
-    }
-    this.addMessage(`OBJECTIVE · ${objective.title} complete${rewardText}.`, "good");
-    this.emit({ type: "objective", label: objective.title, tone: "good" });
-  }
-
-  /** Threshold objectives are checked against live metrics rather than events. */
-  private checkThresholdObjectives(): void {
-    for (const objective of this.state.objectives) {
-      if (objective.completed || objective.chapter > this.state.chapter) continue;
-      if (objective.kind === "population") {
-        objective.progress = Math.min(objective.target, this.state.metrics.population);
-      } else if (objective.kind === "harmony") {
-        objective.progress = Math.min(objective.target, Math.round(this.state.metrics.harmony));
-      } else {
-        continue;
-      }
-      if (objective.progress >= objective.target) this.completeObjective(objective);
-    }
+    return activeObjectives(this.context);
   }
 
   private countBuildings(type: BuildingType, state: WorldState = this.state): number {
@@ -2218,7 +2166,7 @@ function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 5;
 
 export interface SavePayload {
   version: number;
@@ -2226,6 +2174,7 @@ export interface SavePayload {
   nextMessageId: number;
   nextResidentId: number;
   nextBuildingId: number;
+  nextProposalId: number;
   resourceWarningLevels: Record<ResourceKey, number>;
   housingMessageBand: number;
   state: WorldState;

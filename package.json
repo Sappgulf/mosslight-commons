@@ -5,8 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vitest run && vite build",
+    "build": "npm run lint && tsc --noEmit && vitest run && vite build",
     "preview": "vite preview",
+    "lint": "oxlint",
+    "format": "prettier --write \"src/**/*.{ts,css}\" \"e2e/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.{ts,css}\" \"e2e/**/*.ts\"",
+    "assets": "./scripts/optimize-assets.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test"
@@ -15,10 +19,13 @@
     "phaser": "^4.2.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "@types/node": "^26.2.0",
+    "jsdom": "^30.0.1",
+    "oxlint": "^1.78.0",
+    "prettier": "^3.9.6",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
-    "vitest": "^4.1.10",
-    "@playwright/test": "^1.55.0"
+    "vitest": "^4.1.10"
   }
 }

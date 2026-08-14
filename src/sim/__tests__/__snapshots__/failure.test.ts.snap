@@ -1,0 +1,32 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`tick pipeline > runs stages in the recorded order 1`] = `
+[
+  "seasonal-event",
+  "policies",
+  "long-shade",
+  "regrowth",
+  "expeditions",
+  "crafting",
+  "upgrades",
+  "water-habitat",
+  "production",
+  "metrics-pre",
+  "residents",
+  "relationships",
+  "assign-wants",
+  "wants",
+  "arrivals",
+  "births",
+  "issue-proposal",
+  "expire-proposal",
+  "cloudmoths",
+  "metrics-post",
+  "resource-warnings",
+  "housing-pressure",
+  "settlement-status",
+  "threshold-objectives",
+  "chapter",
+  "forecast",
+]
+`;

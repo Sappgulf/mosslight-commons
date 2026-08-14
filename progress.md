@@ -163,3 +163,81 @@ Addressed the fourteen findings from the codebase audit.
 - A CSS `display: grid` rule silently defeated the `hidden` attribute on the
   building inspector.
 - `Scene.events` was accessed before the scene had booted inside a Game.
+
+## P0–P5 overhaul pass
+
+Addressed the six priorities from the codebase audit.
+
+### P0 · Asset pipeline
+
+- [x] Removed the duplicated art tree. `assets/runtime/` and
+      `public/assets/runtime/` held byte-identical copies of every sprite;
+      originals now live in `assets/source/` and the shipped set is generated.
+- [x] Added `scripts/optimize-assets.sh` (`npm run assets`). Each family is
+      resampled to 2× its real draw size and encoded as WebP. Buildings were
+      ~350px textures drawn at 40px; portraits were 844KB drawn at 44px.
+- [x] Shipped art dropped from **7.9MB to 185KB (-98%)**, and the ~16MB of
+      art-direction reference boards are untracked.
+
+### P1 · Keyboard
+
+- [x] Fixed a real bug: the HUD listened on both `#hud` and `window`, so keys
+      pressed inside the HUD ran its handler twice and the first-run coach
+      advanced two cards per Enter.
+- [x] Added `src/ui/keymap.ts` — one listener, one precedence chain, bindings
+      declared as data with modal layers ranked above game bindings.
+- [x] Added a shortcuts card (`?`) generated from the binding list.
+
+### P2 · Simulation decomposition
+
+- [x] Extracted `src/sim/systems/` (`context`, `production`, `progression`)
+      as plain functions over a narrow `SimContext`.
+- [x] Replaced the 30-statement tick body with a named, ordered pipeline;
+      `getPipelineOrder()` exposes it and tests pin the ordering constraints.
+- [x] This is a first pass, not a finished decomposition: `simulation.ts` is
+      down from 2,405 to ~2,290 lines and residents, relationships, wants,
+      civics, and crisis remain on the class.
+
+### P3 · Lint and test coverage
+
+- [x] Added oxlint (typescript-eslint does not yet support TypeScript 7) and
+      Prettier; lint runs in `npm run build` and in CI.
+- [x] Unit tests 63 → 100: determinism with a golden snapshot, save/load
+      round-trip and continued-evolution fidelity, corrupt-save rejection,
+      collapse and departure behaviour, tick ordering, and the keyboard router.
+- [x] End-to-end tests 1 → 12: boot splash teardown, console cleanliness,
+      asset payload budget, every keybinding, reload resume, mobile layout,
+      and the touch build flow.
+
+### P4 · Boot experience
+
+- [x] Added an inline boot splash with real Phaser load progress, so the first
+      paint is not an unexplained dark rectangle.
+- [x] Added a `<noscript>` message and a WebGL/canvas capability check that
+      explains itself instead of leaving a permanently blank page.
+
+### P5 · Touch
+
+- [x] Two-stage build placement on touch: first tap arms and previews a cell,
+      second tap commits. Previously a tap built immediately with no preview.
+- [x] Added pinch-to-zoom; touch previously had no zoom outside the HUD buttons.
+- [x] The build detail panel now fills in on tap, not only on hover/focus.
+
+### Bugs found and fixed during this pass
+
+- **Council proposals were not deterministic.** `nextProposalId` was a
+  module-level counter shared by every simulation in the process, and
+  `nextProposal` picks the proposal kind with `id % kinds.length`. Two runs
+  from the same seed diverged into different politics and different
+  populations. Now per-instance and serialized; `SAVE_VERSION` 4 → 5.
+- **A cold boot threw and silently disabled the game.** `main.ts` renders the
+  HUD once at start-up, the HUD reads the zoom level, and Phaser had not yet
+  created the scene's camera. The throw happened at module scope, so
+  everything below it — the simulation clock, the key bindings, and the debug
+  hooks — never ran. Caught by the new end-to-end console check.
+
+### Verification
+
+- `npm run build` passes: oxlint clean, `tsc --noEmit` clean, 100 Vitest tests,
+  and `vite build`.
+- 12 Playwright tests pass against the real game, desktop and mobile.

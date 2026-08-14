@@ -7,12 +7,18 @@ import { SaveManager } from "./sim/persistence";
 import { SimulationClock, TICK_MS } from "./sim/clock";
 import { TorxThrmlBridge } from "./sim/bridge";
 import { VIEW_H, VIEW_W, WorldScene } from "./render/WorldScene";
+import { KeyboardRouter, bindingLayer, type Binding } from "./ui/keymap";
+import { canRenderGame, showBootError } from "./ui/boot";
 import "./styles/main.css";
 
-let simulation = new MosslightSimulation(2048);
+const simulation = new MosslightSimulation(2048);
 const bridge = new TorxThrmlBridge();
 const audio = new AudioEngine();
-let saves = new SaveManager(simulation);
+const saves = new SaveManager(simulation);
+// Declared before the HUD and assigned after it: the HUD's zoom callbacks read
+// `worldScene`, and the HUD constructor renders immediately, so a `const`
+// declared further down would be in its temporal dead zone on that first render.
+// oxlint-disable-next-line prefer-const
 let worldScene: WorldScene | undefined;
 
 const hudElement = document.querySelector<HTMLElement>("#hud");
@@ -55,6 +61,14 @@ worldScene = new WorldScene(
   () => hud.render(),
   (buildingId) => hud.selectBuilding(buildingId),
 );
+
+if (!canRenderGame()) {
+  showBootError(
+    "This browser cannot open a drawing surface for the basin. Mosslight Commons needs WebGL or canvas — "
+    + "try a current browser, or enable hardware acceleration.",
+  );
+  throw new Error("No WebGL or canvas context available");
+}
 
 const game = new Phaser.Game({
   type: Phaser.AUTO,
@@ -237,72 +251,113 @@ const unlockAudio = () => {
 window.addEventListener("pointerdown", unlockAudio);
 window.addEventListener("keydown", unlockAudio);
 
-window.addEventListener("keydown", (event) => {
-  if (
-    event.target instanceof HTMLInputElement
-    || event.target instanceof HTMLTextAreaElement
-    || event.target instanceof HTMLButtonElement
-    || (event.target instanceof HTMLElement && event.target.isContentEditable)
-  ) return;
+// --- Keyboard -------------------------------------------------------------
 
-  if (event.key === " " || event.key.toLowerCase() === "p") {
-    event.preventDefault();
-    simulation.togglePause();
-    hud.render();
-    return;
-  }
+/**
+ * Every binding in the game, declared once. The router walks layers by
+ * priority, so the HUD's modal layer sees Enter/Space/Escape first and these
+ * only run when no card is open. The shortcuts overlay renders from this same
+ * list, so it cannot drift.
+ */
+const GAME_BINDINGS: Binding[] = [
+  {
+    id: "pause",
+    chords: ["space", "p"],
+    display: "Space / P",
+    description: "Pause or resume the Commons",
+    group: "Time",
+    preventDefault: true,
+    run: () => { simulation.togglePause(); hud.render(); },
+  },
+  ...([1, 2, 4] as const).map((speed) => ({
+    id: `speed-${speed}`,
+    chords: [String(speed)],
+    display: String(speed),
+    description: `Run at ${speed}× speed`,
+    group: "Time" as const,
+    run: () => { simulation.setSpeed(speed); hud.render(); },
+  })),
+  {
+    id: "zoom-in",
+    chords: ["+", "="],
+    display: "+",
+    description: "Zoom in",
+    group: "View",
+    preventDefault: true,
+    run: () => { worldScene?.zoomIn(); hud.render(); },
+  },
+  {
+    id: "zoom-out",
+    chords: ["-", "_"],
+    display: "−",
+    description: "Zoom out",
+    group: "View",
+    preventDefault: true,
+    run: () => { worldScene?.zoomOut(); hud.render(); },
+  },
+  {
+    id: "zoom-reset",
+    chords: ["0"],
+    display: "0",
+    description: "Reset zoom to fit",
+    group: "View",
+    preventDefault: true,
+    run: () => { worldScene?.resetZoom(); hud.render(); },
+  },
+  {
+    id: "fullscreen",
+    chords: ["f"],
+    display: "F",
+    description: "Toggle fullscreen",
+    group: "View",
+    preventDefault: true,
+    run: () => game.scale.toggleFullscreen(),
+  },
+  {
+    id: "mute",
+    chords: ["m"],
+    display: "M",
+    description: "Mute or unmute",
+    group: "View",
+    run: () => { audio.toggleMute(); hud.render(); },
+  },
+  {
+    id: "cancel-build",
+    chords: ["escape"],
+    display: "Esc",
+    description: "Cancel the current build",
+    group: "World",
+    run: () => { simulation.setBuildMode(null); hud.render(); worldScene?.renderNow(); },
+  },
+  {
+    id: "save",
+    chords: ["mod+s"],
+    display: "⌘/Ctrl S",
+    description: "Save the Commons",
+    group: "Session",
+    preventDefault: true,
+    // Saving from a focused button is still saving; never swallow it.
+    allowOnControl: true,
+    run: () => { saves.save(); },
+  },
+  {
+    id: "shortcuts",
+    chords: ["?", "shift+/"],
+    display: "?",
+    description: "Show this card",
+    group: "Session",
+    preventDefault: true,
+    allowOnControl: true,
+    run: () => hud.toggleShortcuts(),
+  },
+];
 
-  if (event.key === "1" || event.key === "2" || event.key === "4") {
-    simulation.setSpeed(Number(event.key) as 1 | 2 | 4);
-    hud.render();
-    return;
-  }
-
-  if (event.key === "+" || event.key === "=") {
-    event.preventDefault();
-    worldScene?.zoomIn();
-    hud.render();
-    return;
-  }
-
-  if (event.key === "-" || event.key === "_") {
-    event.preventDefault();
-    worldScene?.zoomOut();
-    hud.render();
-    return;
-  }
-
-  if (event.key === "0") {
-    event.preventDefault();
-    worldScene?.resetZoom();
-    hud.render();
-    return;
-  }
-
-  if (event.key.toLowerCase() === "m") {
-    audio.toggleMute();
-    hud.render();
-    return;
-  }
-
-  if (event.key.toLowerCase() === "s" && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    saves.save();
-    return;
-  }
-
-  if (event.key === "Escape") {
-    simulation.setBuildMode(null);
-    hud.render();
-    worldScene?.renderNow();
-    return;
-  }
-
-  if (event.key.toLowerCase() === "f") {
-    event.preventDefault();
-    game.scale.toggleFullscreen();
-  }
-});
+const keyboard = new KeyboardRouter();
+// Modal cards outrank world bindings; 100 leaves room for layers between.
+keyboard.register(hud.keyLayer(100));
+keyboard.register(bindingLayer("game", 0, GAME_BINDINGS));
+keyboard.attach();
+hud.setShortcutBindings(GAME_BINDINGS);
 
 window.addEventListener("beforeunload", () => {
   saves.save();

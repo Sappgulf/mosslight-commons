@@ -15,6 +15,9 @@ import { MosslightSimulation } from "../sim/simulation";
 import { crisisBanner } from "../sim/crisis";
 import { WANT_GLYPH } from "../sim/wants";
 import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
+import { isActivationOnControl, isTypingTarget, type Binding, type BindingGroup, type KeyLayer } from "./keymap";
+
+const shortcutGroups: BindingGroup[] = ["Time", "View", "World", "Session"];
 
 const resourceOrder: ResourceKey[] = ["food", "water", "warmth", "light"];
 const buildOrder: Exclude<BuildingType, "root-heart">[] = [
@@ -51,6 +54,22 @@ export interface HUDCallbacks {
 
 const formatResourceName = (resource: ResourceKey): string => RESOURCE_DEFINITIONS[resource].label.toUpperCase();
 
+/**
+ * Binding text is authored in this repo, not by a player, but the shortcuts
+ * card builds markup by concatenation and there is no reason to leave a hole
+ * open for whatever ends up flowing through here later.
+ */
+const escapeHtml = (value: string): string =>
+  value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&": return "&amp;";
+      case "<": return "&lt;";
+      case ">": return "&gt;";
+      case '"': return "&quot;";
+      default: return "&#39;";
+    }
+  });
+
 export class HUD {
   private readonly root: HTMLElement;
   private readonly simulation: MosslightSimulation;
@@ -60,6 +79,8 @@ export class HUD {
   private selectedBuildingId: string | null = null;
   private ledgerOpen = false;
   private ledgerFilter: LedgerFilter = "all";
+  private shortcutsOpen = false;
+  private shortcutBindings: readonly Binding[] = [];
 
   constructor(root: HTMLElement, simulation: MosslightSimulation, callbacks: HUDCallbacks) {
     this.root = root;
@@ -67,8 +88,6 @@ export class HUD {
     this.callbacks = callbacks;
     this.root.innerHTML = this.template();
     this.root.addEventListener("click", (event) => this.handleClick(event));
-    this.root.addEventListener("keydown", (event) => this.handleKeydown(event));
-    window.addEventListener("keydown", (event) => this.handleKeydown(event));
     this.root.addEventListener("focusin", (event) => this.handleFocus(event));
     this.root.addEventListener("pointerover", (event) => this.handlePointerover(event));
     this.root.addEventListener("change", (event) => this.handleChange(event));
@@ -303,6 +322,7 @@ export class HUD {
     this.renderResident();
     this.renderMessages();
     this.renderOnboarding();
+    this.renderShortcuts();
 
     this.root.querySelectorAll<HTMLButtonElement>("[data-build]").forEach((button) => {
       const build = button.dataset.build as BuildChoice;
@@ -471,7 +491,7 @@ export class HUD {
     this.setText("[data-resident-species]", `${species.label} · ${species.role}`);
     const portrait = this.root.querySelector<HTMLImageElement>("[data-resident-portrait]");
     if (portrait) {
-      portrait.src = `assets/runtime/portraits/${resident.species}.png`;
+      portrait.src = `assets/runtime/portraits/${resident.species}.webp`;
       portrait.alt = species.label;
     }
     this.setText("[data-resident-goal]", resident.goal);
@@ -691,6 +711,10 @@ export class HUD {
     const buildButton = target.closest<HTMLButtonElement>("[data-build]");
     if (buildButton) {
       const build = buildButton.dataset.build as BuildChoice;
+      // The detail panel used to fill in on hover or focus only. Touch has no
+      // hover, and iOS does not focus a button on tap, so tapping a build
+      // option left the player with no description of what they had selected.
+      this.updateBuildDetail(build);
       this.simulation.setBuildMode(this.simulation.state.buildMode === build ? null : build);
       this.render();
       this.callbacks.onChange();
@@ -768,6 +792,12 @@ export class HUD {
       case "close-ledger":
         this.ledgerOpen = false;
         break;
+      case "shortcuts":
+        this.shortcutsOpen = !this.shortcutsOpen;
+        break;
+      case "shortcuts-close":
+        this.shortcutsOpen = false;
+        break;
       case "onboarding-next":
         this.simulation.advanceOnboarding();
         break;
@@ -823,31 +853,102 @@ export class HUD {
     input.value = "";
   }
 
-  private handleKeydown(event: KeyboardEvent): void {
-    if (event.key === " " || event.key === "Enter") {
-      if (event.target instanceof HTMLButtonElement) event.stopPropagation();
-    }
-    const state = this.simulation.state;
-    if (!state.titleSeen && (event.key === "Enter" || event.key === " " || event.key === "Escape")) {
-      event.preventDefault();
-      event.stopPropagation();
-      this.simulation.dismissTitle();
-      this.render();
-      return;
-    }
-    if (!state.onboardingDismissed && state.onboardingStep < ONBOARDING_STEPS.length) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        this.simulation.dismissOnboarding();
-        this.render();
-        return;
-      }
-      if (event.key === "Enter" && !(event.target instanceof HTMLButtonElement)) {
-        event.preventDefault();
-        this.simulation.advanceOnboarding();
-        this.render();
-      }
-    }
+  /**
+   * The HUD's modal keys, as a layer for the shared router. This sits above the
+   * global game bindings so the title card and the first-run coach get first
+   * refusal on Enter, Space, and Escape — but it is reached exactly once per
+   * press, which is what the two old listeners could not promise.
+   */
+  public keyLayer(priority: number): KeyLayer {
+    return {
+      name: "hud-modal",
+      priority,
+      handle: (event: KeyboardEvent, chord: string): boolean => {
+        if (isTypingTarget(event.target)) return false;
+        const state = this.simulation.state;
+
+        if (this.shortcutsOpen) {
+          if (chord === "escape" || chord === "?" || chord === "shift+/") {
+            event.preventDefault();
+            this.shortcutsOpen = false;
+            this.render();
+            return true;
+          }
+          return false;
+        }
+
+        if (!state.titleSeen) {
+          if (chord === "enter" || chord === "space" || chord === "escape") {
+            event.preventDefault();
+            this.simulation.dismissTitle();
+            this.render();
+            return true;
+          }
+          return false;
+        }
+
+        if (!state.onboardingDismissed && state.onboardingStep < ONBOARDING_STEPS.length) {
+          if (chord === "escape") {
+            event.preventDefault();
+            this.simulation.dismissOnboarding();
+            this.render();
+            return true;
+          }
+          // Enter on a focused button is that button's own activation.
+          if (chord === "enter" && !isActivationOnControl(event.target, chord)) {
+            event.preventDefault();
+            this.simulation.advanceOnboarding();
+            this.render();
+            return true;
+          }
+        }
+
+        if (this.ledgerOpen && chord === "escape") {
+          event.preventDefault();
+          this.ledgerOpen = false;
+          this.render();
+          return true;
+        }
+
+        return false;
+      },
+    };
+  }
+
+  /**
+   * Renders the shortcuts card straight from the router's binding list, so a
+   * new binding documents itself and the card can never drift out of date.
+   */
+  private renderShortcuts(): void {
+    const overlay = this.root.querySelector<HTMLElement>("[data-shortcuts-overlay]");
+    if (!overlay) return;
+    overlay.hidden = !this.shortcutsOpen;
+    if (!this.shortcutsOpen) return;
+
+    const container = this.root.querySelector<HTMLElement>("[data-shortcut-groups]");
+    if (!container) return;
+    container.innerHTML = shortcutGroups
+      .map((group) => {
+        const rows = this.shortcutBindings.filter((binding) => binding.group === group);
+        if (rows.length === 0) return "";
+        const items = rows
+          .map((binding) => `<li><kbd>${escapeHtml(binding.display)}</kbd><span>${escapeHtml(binding.description)}</span></li>`)
+          .join("");
+        return `<div class="shortcut-group"><h3>${group}</h3><ul>${items}</ul></div>`;
+      })
+      .join("");
+  }
+
+  /** Opens or closes the keyboard shortcuts card. */
+  public toggleShortcuts(): void {
+    this.shortcutsOpen = !this.shortcutsOpen;
+    this.render();
+  }
+
+  /** Fills the shortcuts overlay from the router's own binding list. */
+  public setShortcutBindings(bindings: readonly Binding[]): void {
+    this.shortcutBindings = bindings;
+    this.render();
   }
 
   private handleFocus(event: FocusEvent): void {
@@ -981,6 +1082,7 @@ export class HUD {
         <button type="button" data-action="export" title="Download this world as a file">EXPORT</button>
         <button type="button" data-action="import" title="Load a world from a file">IMPORT</button>
         <button type="button" data-action="reset" title="Start a new Commons">NEW</button>
+        <button type="button" data-action="shortcuts" title="Keyboard shortcuts (?)" aria-haspopup="dialog">?</button>
         <input type="file" accept="application/json,.json" data-import-input hidden aria-label="Import a saved world" />
       </div>
       <p class="settlement-status" data-settlement-status role="status" aria-live="polite" hidden></p>
@@ -1144,6 +1246,13 @@ export class HUD {
         <button class="dispatch-button" type="button" data-action="onboarding-next">NEXT</button>
       </div>
     </aside>
+
+    <div class="overlay shortcuts-overlay" data-shortcuts-overlay hidden role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="overlay-card">
+        <div class="panel-eyebrow"><span id="shortcuts-title">KEYBOARD</span><button type="button" class="mini-close" data-action="shortcuts-close" aria-label="Close shortcuts">×</button></div>
+        <div class="shortcut-groups" data-shortcut-groups></div>
+      </div>
+    </div>
 
     <div class="overlay collapse-overlay" data-collapse-overlay hidden role="dialog" aria-modal="true" aria-labelledby="collapse-title">
       <div class="overlay-card overlay-card--narrow">
