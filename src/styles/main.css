@@ -201,6 +201,8 @@ kbd {
 .district-button span { color: var(--gold); font-size: 14px; line-height: 1; }
 .district-button small { max-width: 100%; color: inherit; font-size: 10px; line-height: 1.2; text-align: center; text-transform: uppercase; }
 .district-button:hover, .district-button.is-active { border-color: var(--teal); color: var(--paper); background: rgba(99, 230, 212, 0.14); }
+.district-button.is-locked { cursor: not-allowed; opacity: 0.45; }
+.district-button.is-locked:hover { border-color: rgba(245, 230, 200, 0.12); color: var(--muted); background: rgba(8, 21, 27, 0.48); }
 .craft-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
 .craft-button { display: grid; min-width: 0; min-height: 52px; place-items: center; gap: 2px; padding: 4px 2px; border: 1px solid rgba(245, 230, 200, 0.12); border-radius: 7px; color: var(--muted); background: rgba(8, 21, 27, 0.48); cursor: pointer; font-size: 11px; text-align: center; }
 .craft-button:hover:not(:disabled), .craft-button:focus-visible:not(:disabled) { border-color: var(--teal); color: var(--paper); background: rgba(99, 230, 212, 0.14); }
@@ -729,6 +731,37 @@ kbd {
   border: 1px solid rgba(245, 230, 200, 0.25);
   background: #12352f;
 }
+/* The settlement report: why the Commons is doing what it is doing. */
+.commons-report {
+  display: grid;
+  gap: var(--s1);
+  margin: var(--s2) 0 var(--s3);
+  padding: var(--s2) var(--s3);
+  border-left: 2px solid var(--teal);
+  border-radius: var(--radius-sm);
+  background: rgba(99, 230, 212, 0.08);
+}
+.commons-report[data-tone="warning"] { border-left-color: var(--warning); background: rgba(232, 121, 104, 0.1); }
+.commons-report .objective-heading span:first-child { color: var(--teal); font-weight: 800; }
+.commons-report[data-tone="warning"] .objective-heading span:first-child { color: var(--warning); }
+.commons-report .objective-heading span:last-child { color: var(--gold); font-weight: 800; }
+.commons-report p { margin: 0; color: var(--paper); font-size: 11px; line-height: 1.45; }
+.commons-report .report-advice { color: var(--muted); }
+
+.resource-amount { display: flex; align-items: baseline; gap: 1px; }
+.resource-amount small { color: var(--muted); font-size: 10px; }
+.resource-chip.is-low { border-color: rgba(232, 121, 104, 0.5); }
+.resource-chip.is-low .resource-amount strong { color: var(--warning); }
+.resource-chip.is-full .resource-amount small { color: var(--gold); }
+
+/* A petition is a contract: what is asked, how long is left, what it pays. */
+.petition { display: grid; gap: 3px; }
+.petition-text { display: block; }
+.petition-terms { display: flex; justify-content: space-between; gap: var(--s2); font-size: 10px; }
+.petition-terms strong { color: var(--gold); font-weight: 800; letter-spacing: 0.06em; }
+.petition.is-impatient .petition-terms strong { color: var(--warning); }
+.petition-terms em { color: var(--teal); font-style: normal; }
+
 .petition, .petition-empty { margin: 6px 0 0; color: var(--paper); font-size: 10px; line-height: 1.45; }
 .petition {
   display: block;

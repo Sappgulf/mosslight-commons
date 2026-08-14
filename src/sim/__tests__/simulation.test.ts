@@ -487,6 +487,9 @@ describe("MosslightSimulation · personal wants", () => {
       kind: "lantern",
       description: `${resident.name} would like a Lantern Grove nearby.`,
       createdDay: simulation.state.day,
+      deadlineDay: simulation.state.day + 6,
+      rewardItem: "moonwater",
+      rewardAmount: 2,
       fulfilled: false,
     };
     resident.needs.belonging = 40;

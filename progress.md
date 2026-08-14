@@ -346,3 +346,76 @@ opening view from 14px tiles to 26px.
 ### Verification
 
 - 100 Vitest tests and 19 Playwright tests pass, twice in a row.
+
+## Gameplay pass
+
+Measured first. A headless 1,200-tick run with no player input showed the
+settlement collapsing on day 94 with **every stockpile at 100** — 48 residents
+gone, zero of thirteen objectives touched, and the four bars the player watches
+all the way through reading full. Average food *need* fell 72 → 23 while the
+food *store* was pinned at max. The two halves of the economy were unrelated.
+
+### 1 · The stores actually feed the settlement
+
+- [x] Stores were a threshold, not a supply: `food < 25` made needs drain
+      faster and that was the whole of the relationship. Eating, resting and
+      lighting the routes now draw real stock, so an empty granary is felt.
+- [x] Consumption moved out of the production step. It was a flat per-head
+      subtraction disconnected from anything a resident did; it is now the
+      residents doing it, at the moment they do it.
+- [x] **Fixed a one-way ratchet:** safety had no recovery path outside
+      expedition leaders. It fell 0.2 a tick forever, so every resident was on a
+      silent countdown to leaving that no play could interrupt. Standing in
+      lantern light restores it and burns light — which is what groves are for.
+- [x] Satiety thresholds: a resident who reached the market used to eat on
+      every tick they lingered, emptying a full granary in twenty days.
+
+### 2 · Storage is built, not given
+
+- [x] Everything capped at a flat 100, which food reached by day 24 and never
+      left. Capacity now comes from buildings, so surplus needs somewhere to go.
+
+### 3 · Requests are contracts
+
+- [x] Wants carry a deadline and a payout. Twenty-six could sit open at once
+      for a twentieth of a belonging point a tick; answering one now pays items
+      and species standing, and letting one lapse costs both.
+- [x] The petition list shows the clock and the reward, and focuses the map.
+
+### 4 · The settlement can help itself
+
+- [x] Building count sat at five for the whole 1,200-tick run. When the burrows
+      are full and there is a real surplus, residents now raise a home
+      themselves — slowly, and out of stock, so the player still builds better.
+
+### 5 · Choices cost something
+
+- [x] District focus was a free toggle with pure upside; it now takes days to
+      settle and costs the changeover, and the HUD shows the lock-out.
+- [x] Approving a council proposal costs stores, so the council is a decision
+      rather than a formality.
+- [x] Roads are visibly faster to walk. The pathfinder already preferred them,
+      but a preference the player cannot see is not a mechanic.
+
+### 6 · The decline explains itself
+
+- [x] A Commons Report naming the need in the worst shape, its cause and its
+      fix, and warning on a shortage *before* needs fall.
+
+### The curve now
+
+Grows 36 → 60 over ~80 days, self-builds when housing binds, then the economy
+cannot feed sixty on one farm: strained around day 95, departures from day 100.
+Passive play survives roughly a hundred days and then declines; building farms
+and markets is what carries it past that.
+
+### Bug found
+
+- Adding fields to `Want` without bumping the save version meant every existing
+  save crashed the HUD on first render (`reading 'label'` on an undefined
+  reward). `SAVE_VERSION` 5 → 6 plus normalisation for wants carried over.
+
+### Verification
+
+- 114 Vitest tests (13 new covering supply, storage, contracts and costs) and
+  19 Playwright tests pass. Two snapshots re-recorded deliberately.

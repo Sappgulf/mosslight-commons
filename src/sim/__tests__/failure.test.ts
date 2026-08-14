@@ -38,30 +38,50 @@ describe("the settlement can actually fail", () => {
   });
 
   /**
-   * Departure and collapse are separate clocks, and collapse is much the
-   * faster one: four days of a failing settlement ends the run, while a
-   * resident needs sustained personal hardship before giving up on the basin.
-   * Emptying the stores therefore never produces a departure — it collapses the
-   * Commons first. Residents leaving is a slow-burn outcome of an ordinary run.
+   * A settlement left alone no longer dies on a timer.
+   *
+   * It used to: safety had no recovery path, so every resident drained toward
+   * the departure threshold no matter what the player did, and an unattended
+   * run reached collapse with all four stockpiles full. Residents now light
+   * their own routes and raise their own shelter when the burrows fill, so an
+   * unmanaged Commons holds — it simply stops growing well.
    */
-  it("loses residents over a long unmanaged run", () => {
+  it("survives a long unmanaged run", () => {
     const simulation = new MosslightSimulation(SEED);
-    const before = simulation.state.residents.length;
-    advance(simulation, 500);
-    expect(simulation.state.departures).toBeGreaterThan(0);
-    expect(simulation.state.residents.length).toBeLessThan(before);
+    advance(simulation, 900);
+
+    expect(simulation.state.status).not.toBe("collapsed");
+    expect(simulation.state.residents.length).toBeGreaterThan(20);
+    expect(simulation.state.metrics.averageWellbeing).toBeGreaterThan(40);
   });
 
-  it("collapses before anyone has time to leave when the stores are emptied", () => {
+  it("raises shelter for itself once the burrows are full", () => {
     const simulation = new MosslightSimulation(SEED);
-    starve(simulation, 200);
-    expect(simulation.state.status).toBe("collapsed");
-    expect(simulation.state.departures).toBe(0);
+    const before = simulation.state.buildings.length;
+    advance(simulation, 900);
+
+    expect(simulation.state.buildings.length).toBeGreaterThan(before);
+  });
+
+  /**
+   * Emptying the stores is no longer a collapse trigger in itself. It stops the
+   * meals, the meals stop the recovery, and the needs fall — the settlement
+   * fails through its residents rather than through a number on a bar.
+   */
+  it("turns empty stores into falling needs rather than instant failure", () => {
+    const simulation = new MosslightSimulation(SEED);
+    advance(simulation, 20);
+    const before = simulation.state.metrics.averageWellbeing;
+
+    starve(simulation, 160);
+
+    expect(simulation.state.metrics.averageWellbeing).toBeLessThan(before);
+    expect(simulation.state.metrics.diagnosis.tone).toBe("warning");
   });
 
   it("collapses, and a collapsed world stops advancing", () => {
     const simulation = new MosslightSimulation(SEED);
-    starve(simulation, 900);
+    starve(simulation, 1400);
     expect(simulation.state.status).toBe("collapsed");
 
     const frozenTick = simulation.state.tick;

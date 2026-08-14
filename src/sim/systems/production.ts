@@ -1,6 +1,6 @@
 import { OUTPUT_MULTIPLIER } from "../../data/definitions";
 import { marketShortages } from "../civic";
-import type { BuildingType, Resident } from "../types";
+import type { BuildingType, Resident, ResourceKey } from "../types";
 import type { SimContext } from "./context";
 
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
@@ -45,7 +45,6 @@ export function updateResources(context: SimContext): void {
   const groveOutput = weightedOutput(context, "lantern-grove");
   const marketOutput = weightedOutput(context, "commons-market");
   const workshops = weightedOutput(context, "root-workshop", "crafting");
-  const population = state.residents.length;
   const craftedResin = Math.min(Math.ceil(workshops), state.items.resin);
   const farmFactor = state.districtFocus === "wetland" ? 1.2 : 1;
   const groveFactor = state.districtFocus === "lantern" ? 1.2 : 1;
@@ -65,22 +64,32 @@ export function updateResources(context: SimContext): void {
 
   const basinQuality = context.averageWaterQuality();
   const habitatPenalty = 1 - Math.min(0.28, state.habitatStress * 0.012);
+  const storage = state.metrics.storage;
 
-  state.resources.food = clamp(
-    state.resources.food + farmOutput * 1.0 * farmFactor * farmPolicy * rivalryDrag * habitatPenalty - population * 0.022,
-  );
-  state.resources.water = clamp(
-    state.resources.water
-      + farmOutput * 0.58 * farmFactor * rivalryDrag * (0.65 + basinQuality / 280)
-      - population * 0.014
-      - state.habitatStress * 0.02,
+  /*
+   * Production only. Consumption is no longer a flat per-head subtraction
+   * here — residents draw food, water and warmth from the stores when they
+   * actually eat, rest and light their routes, so the two sides of the economy
+   * finally describe the same thing. What is left in this step is what the
+   * settlement makes, capped by what it can hold.
+   */
+  const store = (resource: ResourceKey, delta: number) => {
+    state.resources[resource] = clamp(state.resources[resource] + delta, 0, storage[resource]);
+  };
+
+  store("food", farmOutput * 1.0 * farmFactor * farmPolicy * rivalryDrag * habitatPenalty);
+  store(
+    "water",
+    farmOutput * 0.9 * farmFactor * rivalryDrag * (0.65 + basinQuality / 280) - state.habitatStress * 0.02,
   );
   state.marketShortages = marketShortages(state.buildings, state.resources.food);
-  state.resources.warmth = clamp(
-    state.resources.warmth + homeOutput * 0.55 - population * 0.012 + craftedResin * 0.18 + seasonalWarmth - seasonalDrain,
-  );
-  state.resources.light = clamp(
-    state.resources.light + groveOutput * 0.72 * groveFactor * lanternPolicy - population * 0.009 + marketOutput * marketFactor * marketPolicy + craftedResin * 0.12 - seasonalDrain,
+  store("warmth", homeOutput * 0.55 + craftedResin * 0.18 + seasonalWarmth - seasonalDrain);
+  store(
+    "light",
+    groveOutput * 0.72 * groveFactor * lanternPolicy
+      + marketOutput * marketFactor * marketPolicy
+      + craftedResin * 0.12
+      - seasonalDrain,
   );
   state.items.resin = Math.max(0, state.items.resin - craftedResin);
   // Resource security feeds metrics, and resources move every single tick.

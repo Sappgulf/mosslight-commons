@@ -46,6 +46,7 @@ import type {
   LifeStage,
   MapZoneKey,
   Message,
+  NeedKey,
   Objective,
   RecipeKey,
   Regrowth,
@@ -55,6 +56,7 @@ import type {
   RelationshipKind,
   ResourceKey,
   Season,
+  SettlementDiagnosis,
   SettlementMetrics,
   SettlementStatus,
   Species,
@@ -67,6 +69,18 @@ import type {
 export const GRID_WIDTH = 32;
 export const GRID_HEIGHT = 24;
 const MAX_RESOURCE = 100;
+/** Storage every settlement has before it builds anything to hold more. */
+const BASE_STORAGE = 38;
+
+/** How much each building adds to what the Commons can hold. */
+const STORAGE_YIELD: Partial<Record<BuildingType, Partial<Record<ResourceKey, number>>>> = {
+  "root-heart": { food: 8, water: 8, warmth: 8, light: 8 },
+  "commons-market": { food: 26, water: 14 },
+  "reed-farm": { food: 12, water: 20 },
+  "burrow-home": { warmth: 14 },
+  "lantern-grove": { light: 26 },
+  "root-workshop": { warmth: 10, light: 10 },
+};
 const START_DAY = 8;
 const TICKS_PER_DAY = 12;
 const DAYS_PER_SEASON = 7;
@@ -83,10 +97,59 @@ const DEPARTURE_THRESHOLD = 26;
 const COLLAPSE_THRESHOLD = TICKS_PER_DAY * 4;
 const ADULT_AGE = 6;
 const ELDER_AGE = 42;
+/**
+ * What one visit to a stall, a hearth or a lit path actually costs the stores.
+ * Consumption used to be a flat per-head subtraction in the production step,
+ * disconnected from anything a resident did; now it is the residents doing it.
+ */
+const MEAL_FOOD = 0.42;
+const MEAL_WATER = 0.2;
+const REST_WARMTH = 0.32;
+/** Light burned per resident per tick standing inside a lit area, after dusk. */
+const LANTERN_UPKEEP = 0.02;
+/** A need above this is comfortable, and the resident stops drawing on stores. */
+const SATED = 72;
+/** What the Commons spends to put a council decision into effect. */
+const PROPOSAL_COST = { food: 5, warmth: 4 } as const;
+
+/** A district focus has to be lived with for a while before it can change. */
+const DISTRICT_SWITCH_DAYS = 4;
+const DISTRICT_SWITCH_COST = { food: 6, warmth: 4 } as const;
+
+/** Days between the residents raising shelter for themselves. */
+const SELF_BUILD_INTERVAL = 4;
+/** Multiple of a home's cost the stores must hold before residents spend it. */
+const SELF_BUILD_SURPLUS = 2.2;
+
+/**
+ * How far a building's light reaches, in tiles.
+ *
+ * Safety had no recovery path at all outside expedition leaders: it drained
+ * 0.2 a tick forever and nothing put it back, so every resident was on a
+ * silent countdown to leaving that no play could interrupt. Standing in lit
+ * ground now restores it, which is what lantern groves are for.
+ */
+const LIGHT_RADIUS: Partial<Record<BuildingType, number>> = {
+  "lantern-grove": 6,
+  "root-heart": 5,
+  "commons-market": 4,
+  "burrow-home": 2,
+  "root-workshop": 3,
+};
+
 /** How often a resident without a want may develop one. */
 const WANT_INTERVAL = TICKS_PER_DAY;
-/** Days a resident will wait before an unmet want starts to weigh on them. */
+/** Days a resident will wait before giving up on an unanswered request. */
 const WANT_PATIENCE = 6;
+
+/** What answering a request pays out. */
+const WANT_REWARDS: Record<WantKind, { item: ItemKey; amount: number }> = {
+  lantern: { item: "moonwater", amount: 2 },
+  neighbour: { item: "seed-pod", amount: 3 },
+  market: { item: "seed-pod", amount: 2 },
+  quiet: { item: "resin", amount: 2 },
+  company: { item: "resin", amount: 1 },
+};
 
 const ZONE_BOUNDS: Record<MapZoneKey, { xMin: number; xMax: number; yMin: number; yMax: number }> = {
   "sunken-reach": { xMin: 24, xMax: 31, yMin: 13, yMax: 20 },
@@ -347,6 +410,17 @@ export class MosslightSimulation {
   public approveProposal(): boolean {
     const proposal = this.state.proposal;
     if (!proposal || proposal.status !== "pending") return false;
+    /*
+     * Enacting a policy costs labour. Approving used to be pure upside — a
+     * resource gift plus a mood bonus — so there was never a reason to say no
+     * and the council was a formality rather than a decision.
+     */
+    if (this.state.resources.food < PROPOSAL_COST.food || this.state.resources.warmth < PROPOSAL_COST.warmth) {
+      this.addMessage("COUNCIL · There is not enough in the stores to enact this yet.", "warning");
+      return false;
+    }
+    this.state.resources.food -= PROPOSAL_COST.food;
+    this.state.resources.warmth -= PROPOSAL_COST.warmth;
     proposal.status = "approved";
     proposal.votes = tallyVotes(proposal.kind, this.state.residents);
     if (proposal.kind === "shelter-first") {
@@ -410,14 +484,46 @@ export class MosslightSimulation {
     return this.state.residents.filter((resident) => resident.want && !resident.want.fulfilled);
   }
 
-  public setDistrictFocus(type: DistrictType): void {
-    if (!this.state.districts.some((district) => district.type === type)) return;
+  /**
+   * Commits the Commons to a district.
+   *
+   * This used to be a free toggle with a pure upside — there was no reason not
+   * to flip it to whatever the moment favoured. Re-pointing the whole
+   * settlement now takes a few days to settle and costs the labour of the
+   * changeover, so a focus is a bet rather than a switch.
+   */
+  public setDistrictFocus(type: DistrictType): boolean {
+    if (!this.state.districts.some((district) => district.type === type)) return false;
+    if (type === this.state.districtFocus) return false;
+
+    const daysSince = this.state.day - this.state.districtFocusDay;
+    if (daysSince < DISTRICT_SWITCH_DAYS) {
+      this.addMessage(
+        `DISTRICT · The Commons is still turning toward its last focus. ${DISTRICT_SWITCH_DAYS - daysSince} more days.`,
+        "warning",
+      );
+      return false;
+    }
+    if (this.state.resources.food < DISTRICT_SWITCH_COST.food || this.state.resources.warmth < DISTRICT_SWITCH_COST.warmth) {
+      this.addMessage("DISTRICT · Re-pointing the neighborhoods needs food and warmth in hand.", "warning");
+      return false;
+    }
+
+    this.state.resources.food -= DISTRICT_SWITCH_COST.food;
+    this.state.resources.warmth -= DISTRICT_SWITCH_COST.warmth;
     this.state.districtFocus = type;
+    this.state.districtFocusDay = this.state.day;
     const district = this.state.districts.find((candidate) => candidate.type === type);
     this.addMessage(`DISTRICT · ${district?.label ?? type} is now the Commons focus.`, "info");
     this.metricsDirty = true;
     this.updateMetrics();
     this.updateForecast();
+    return true;
+  }
+
+  /** Days remaining before the district focus may change again. */
+  public districtSwitchDaysLeft(): number {
+    return Math.max(0, DISTRICT_SWITCH_DAYS - (this.state.day - this.state.districtFocusDay));
   }
 
   public advanceOnboarding(): void {
@@ -736,6 +842,26 @@ export class MosslightSimulation {
     return true;
   }
 
+  /**
+   * Takes what it can of `amount` from a stockpile and reports the fraction it
+   * managed to cover, 0-1.
+   *
+   * This is the join that was missing between the economy and the population.
+   * Stores used to be a threshold — food below 25 made needs drain faster, and
+   * that was the whole of it — so a granary at 100 fed nobody and a settlement
+   * could collapse with every bar full. Now eating, resting and lighting the
+   * paths all draw on real stock, and running dry is felt directly.
+   */
+  private drawFromStore(resource: ResourceKey, amount: number): number {
+    if (amount <= 0) return 1;
+    const available = this.state.resources[resource];
+    if (available <= 0) return 0;
+    const taken = Math.min(available, amount);
+    this.state.resources[resource] = available - taken;
+    this.metricsDirty = true;
+    return taken / amount;
+  }
+
   public collectAt(position: Vec2): boolean {
     if (!this.isInside(position)) return false;
     if (!this.isRevealed(position)) return false;
@@ -898,6 +1024,14 @@ export class MosslightSimulation {
         harmony: 0,
         resourceSecurity: 0,
         activeBuildings: 0,
+        storage: { food: BASE_STORAGE, water: BASE_STORAGE, warmth: BASE_STORAGE, light: BASE_STORAGE },
+        diagnosis: {
+          need: "food",
+          level: 100,
+          cause: "The basin is waking.",
+          advice: "Gather what the wild offers and see who arrives.",
+          tone: "good",
+        },
       },
       forecast: {
         title: "Lantern Festival",
@@ -917,6 +1051,13 @@ export class MosslightSimulation {
       status: "thriving",
       collapseTimer: 0,
       departures: 0,
+      wantsMet: 0,
+      wantsMissed: 0,
+      // Back-dated so the opening focus can be set immediately; the cooldown is
+      // meant to make changing your mind a commitment, not to lock the player
+      // out of the system for the first four days of the game.
+      districtFocusDay: START_DAY - DISTRICT_SWITCH_DAYS,
+      selfBuildDay: START_DAY,
       onboardingStep: 0,
       onboardingDismissed: false,
       waterQuality: createWaterQuality(grid),
@@ -1165,6 +1306,7 @@ export class MosslightSimulation {
       { name: "assign-wants", run: () => this.maybeAssignWant() },
       { name: "wants", run: () => this.updateWants() },
       { name: "arrivals", run: () => this.maybeWelcomeResident() },
+      { name: "self-build", dailyOnly: true, run: () => this.maybeSelfBuild() },
       { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
       { name: "issue-proposal", dailyOnly: true, run: () => this.maybeIssueProposal() },
       { name: "expire-proposal", dailyOnly: true, run: () => this.expireProposal() },
@@ -1397,6 +1539,15 @@ export class MosslightSimulation {
       resident.needs.food = clamp(resident.needs.food - (this.state.resources.food < 25 ? 1.1 : 0.55) * drainScale);
       resident.needs.shelter = clamp(resident.needs.shelter - ((this.state.resources.warmth < 20 ? 0.9 : 0.3) + overcrowding * 0.8) * drainScale);
       resident.needs.safety = clamp(resident.needs.safety - (this.state.resources.light < 20 ? 0.7 : 0.2) * drainScale);
+
+      // Lit ground is what makes the basin feel safe. Away from the lanterns
+      // safety only falls; inside their reach it recovers, and burns light.
+      const coverage = resident.needs.safety < SATED ? this.lightCoverageAt(resident.position) : 0;
+      if (coverage > 0) {
+        const dark = this.state.phase === "dusk" || this.state.phase === "night";
+        const fuelled = dark ? this.drawFromStore("light", LANTERN_UPKEEP * coverage) : 1;
+        resident.needs.safety = clamp(resident.needs.safety + 0.55 * coverage * fuelled);
+      }
       resident.needs.belonging = clamp(resident.needs.belonging - ((this.state.phase === "night" ? 0.25 : 0.1) + overcrowding * 0.2) * drainScale);
 
       // Sustained hardship eventually drives a resident out. This is the
@@ -1483,8 +1634,22 @@ export class MosslightSimulation {
       this.stepAlongPath(resident);
 
       if (target && sameCell(resident.position, target)) {
-        if (goal === "forage") resident.needs.food = clamp(resident.needs.food + 5);
-        if (goal === "rest") resident.needs.shelter = clamp(resident.needs.shelter + 6);
+        // Satiety thresholds. Without them a resident who reached the market
+        // simply stood there eating on every tick for as long as they lingered,
+        // which emptied a full granary in about twenty days.
+        if (goal === "forage" && resident.needs.food < SATED) {
+          // A meal is food out of the granary and water out of the cistern.
+          const fed = this.drawFromStore("food", MEAL_FOOD);
+          const watered = this.drawFromStore("water", MEAL_WATER);
+          resident.needs.food = clamp(resident.needs.food + 9 * Math.min(1, fed * 0.7 + watered * 0.3));
+          if (fed < 0.5) resident.lastDecisionExplanation = "The stalls are bare. I went hungry.";
+        }
+        if (goal === "rest" && resident.needs.shelter < SATED) {
+          // A warm burrow burns fuel.
+          const warmed = this.drawFromStore("warmth", REST_WARMTH);
+          resident.needs.shelter = clamp(resident.needs.shelter + 4 + 5 * warmed);
+          if (warmed < 0.5) resident.lastDecisionExplanation = "There was no fuel left for the hearth.";
+        }
         if (goal === "socialize") resident.needs.belonging = clamp(resident.needs.belonging + 7);
         if (goal === "explore") {
           resident.needs.safety = clamp(resident.needs.safety + 3);
@@ -1530,6 +1695,23 @@ export class MosslightSimulation {
     this.emit({ type: "departure", position: resident.position, label: resident.name, tone: "warning" });
   }
 
+  /**
+   * How well-lit a cell is, 0-1, taken from the strongest nearby light source.
+   * Upgraded buildings throw their light further.
+   */
+  private lightCoverageAt(position: Vec2): number {
+    let best = 0;
+    for (const building of this.state.buildings) {
+      const radius = LIGHT_RADIUS[building.type];
+      if (!radius) continue;
+      const reach = radius * (1 + (building.level - 1) * 0.25);
+      const distance = manhattan(building.position, position);
+      if (distance > reach) continue;
+      best = Math.max(best, 1 - distance / (reach + 1));
+    }
+    return best;
+  }
+
   private findClosestFriend(resident: Resident): Resident | undefined {
     let best: Resident | undefined;
     let bestScore = -Infinity;
@@ -1547,6 +1729,56 @@ export class MosslightSimulation {
       }
     }
     return best;
+  }
+
+  /**
+   * The Commons raising a burrow on its own initiative when it is over
+   * capacity.
+   *
+   * Building count sat at five for a twelve-hundred tick run: residents never
+   * built anything, so a player who set the game down watched a settlement that
+   * could not help itself. It is deliberately slow and it spends real stores —
+   * the player still builds far better and far faster, and choosing *where* is
+   * still theirs — but the basin is no longer incapable of housing itself.
+   */
+  private maybeSelfBuild(): void {
+    if (this.state.metrics.housingPressure <= 1.02) return;
+    if (this.state.day - this.state.selfBuildDay < SELF_BUILD_INTERVAL) return;
+
+    const definition = BUILDING_DEFINITIONS["burrow-home"];
+    // Only from genuine surplus, so the residents never build themselves hungry.
+    for (const [resource, amount] of Object.entries(definition.cost) as Array<[ResourceKey, number]>) {
+      if (this.state.resources[resource] < amount * SELF_BUILD_SURPLUS) return;
+    }
+
+    const heart = this.buildingByType.get("root-heart");
+    const origin = heart?.position ?? { x: Math.floor(GRID_WIDTH / 2), y: Math.floor(GRID_HEIGHT / 2) };
+    const plot = this.findBuildablePlotNear(origin);
+    if (!plot) return;
+
+    this.state.selfBuildDay = this.state.day;
+    if (!this.build("burrow-home", plot)) return;
+    this.addMessage(
+      "COMMONS · With the burrows full, the residents raised one of their own.",
+      "good",
+    );
+  }
+
+  /** Nearest legal plot for a home, searched outward from a point. */
+  private findBuildablePlotNear(origin: Vec2): Vec2 | undefined {
+    for (let radius = 2; radius <= 9; radius += 1) {
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+          const cell = { x: origin.x + dx, y: origin.y + dy };
+          if (!this.isInside(cell) || !this.isRevealed(cell)) continue;
+          if (this.isOccupied(cell)) continue;
+          if (this.state.grid[cell.y]?.[cell.x] !== "grass") continue;
+          return cell;
+        }
+      }
+    }
+    return undefined;
   }
 
   private maybeWelcomeResident(): void {
@@ -1590,16 +1822,23 @@ export class MosslightSimulation {
   private updateSettlementStatus(): void {
     if (this.state.status === "collapsed") return;
 
-    const { averageWellbeing, resourceSecurity, population } = this.state.metrics;
+    const { averageWellbeing, resourceSecurity, population, housingPressure } = this.state.metrics;
     const starving = Object.values(this.state.resources).filter((value) => value < 12).length;
     const previous = this.state.status;
 
+    /*
+     * Failure is measured in residents, not in numbers on a bar. An empty
+     * granary used to be enough on its own to run the collapse timer, so the
+     * Commons could end with forty-two content residents still living in it and
+     * nobody having left. Empty stores are a warning; they become a failure by
+     * way of the meals they stop serving and the needs that then fall.
+     */
     let status: SettlementStatus;
     if (population === 0) {
       status = "collapsed";
-    } else if (starving >= 2 || averageWellbeing < 28) {
+    } else if (averageWellbeing < 30) {
       status = "failing";
-    } else if (starving >= 1 || averageWellbeing < 48 || resourceSecurity < 35) {
+    } else if (starving >= 1 || averageWellbeing < 52 || resourceSecurity < 35 || housingPressure > 1) {
       status = "strained";
     } else {
       status = "thriving";
@@ -1622,8 +1861,9 @@ export class MosslightSimulation {
           "warning",
         );
       } else if (status === "failing") {
+        const { diagnosis } = this.state.metrics;
         this.addMessage(
-          "CRISIS · The Commons is failing. Restore food, water, warmth, and light within four days or it will empty.",
+          `CRISIS · The Commons is failing. ${diagnosis.cause} ${diagnosis.advice}`,
           "warning",
         );
       } else if (status === "strained" && previous === "failing") {
@@ -1654,13 +1894,20 @@ export class MosslightSimulation {
     const where = home ? `plot ${home.position.x + 1}:${home.position.y + 1}` : "the Commons";
     const description = describeWant(resident, kind, where);
 
+    const reward = WANT_REWARDS[kind];
     resident.want = {
       kind,
       description,
       createdDay: this.state.day,
+      deadlineDay: this.state.day + WANT_PATIENCE,
+      rewardItem: reward.item,
+      rewardAmount: reward.amount,
       fulfilled: false,
     };
-    this.addMessage(`REQUEST · ${description}`, "info");
+    this.addMessage(
+      `REQUEST · ${description} Answer within ${WANT_PATIENCE} days for ${reward.amount} ${ITEM_DEFINITIONS[reward.item].label}.`,
+      "info",
+    );
   }
 
   /** Only offer a want the resident does not already have satisfied. */
@@ -1693,16 +1940,39 @@ export class MosslightSimulation {
       if (this.residentWantSatisfied(resident, want.kind)) {
         want.fulfilled = true;
         resident.needs.belonging = clamp(resident.needs.belonging + 18);
+        this.state.items[want.rewardItem] += want.rewardAmount;
+        this.state.wantsMet += 1;
+        // A kept promise is remembered by the whole species, not just the asker.
+        this.applySpeciesMood(resident.species, 4, 0);
         this.metricsDirty = true;
-        this.addMessage(`REQUEST MET · ${resident.name} got their wish. The Commons feels a little kinder.`, "good");
+        this.addMessage(
+          `REQUEST MET · ${resident.name} got their wish · +${want.rewardAmount} ${ITEM_DEFINITIONS[want.rewardItem].label}.`,
+          "good",
+        );
         this.emit({ type: "want", position: resident.position, label: "♥", tone: "good" });
         // Clear it so the resident can want something else later.
         resident.want = undefined;
         continue;
       }
 
-      if (this.state.day - want.createdDay > WANT_PATIENCE) {
-        resident.needs.belonging = clamp(resident.needs.belonging - 0.06);
+      /*
+       * A lapsed request is the cost of ignoring the ledger. Wants used to sit
+       * open forever for a fraction of a belonging point a tick — twenty-six of
+       * them were outstanding by day 35 with nothing to show for it either way.
+       */
+      if (this.state.day > want.deadlineDay) {
+        resident.needs.belonging = clamp(resident.needs.belonging - 14);
+        resident.distress += 4;
+        this.state.wantsMissed += 1;
+        this.applySpeciesMood(resident.species, -5, 0);
+        this.state.metrics.harmony = clamp(this.state.metrics.harmony - 3);
+        this.metricsDirty = true;
+        this.addMessage(
+          `REQUEST LAPSED · ${resident.name} waited ${WANT_PATIENCE} days and gave up asking.`,
+          "warning",
+        );
+        this.emit({ type: "want", position: resident.position, label: "✕", tone: "warning" });
+        resident.want = undefined;
       }
     }
   }
@@ -1756,7 +2026,137 @@ export class MosslightSimulation {
       harmony,
       resourceSecurity,
       activeBuildings: state.buildings.length,
+      storage: this.calculateStorage(state),
+      diagnosis: this.diagnose(state, housingPressure),
     };
+  }
+
+  /**
+   * How much of each resource the settlement can hold.
+   *
+   * Everything used to cap at a flat 100, which food reached inside twenty days
+   * and never left — a solved problem for the rest of the run, and no reason to
+   * build anything that touched it. Capacity comes from buildings now, so a
+   * surplus needs somewhere to go and growth has to be built for.
+   */
+  private calculateStorage(state: WorldState): Record<ResourceKey, number> {
+    const storage: Record<ResourceKey, number> = {
+      food: BASE_STORAGE,
+      water: BASE_STORAGE,
+      warmth: BASE_STORAGE,
+      light: BASE_STORAGE,
+    };
+    for (const building of state.buildings) {
+      const yields = STORAGE_YIELD[building.type];
+      if (!yields) continue;
+      const multiplier = OUTPUT_MULTIPLIER[building.level] ?? 1;
+      for (const [resource, amount] of Object.entries(yields) as Array<[ResourceKey, number]>) {
+        storage[resource] += amount * multiplier;
+      }
+    }
+    for (const resource of Object.keys(storage) as ResourceKey[]) {
+      storage[resource] = Math.min(MAX_RESOURCE, Math.round(storage[resource]));
+    }
+    return storage;
+  }
+
+  /**
+   * Names the need in the worst shape and what would lift it. Without this the
+   * settlement declined silently behind four full bars, and a player had no way
+   * to tell what was going wrong, let alone what to do about it.
+   */
+  private diagnose(state: WorldState, housingPressure: number): SettlementDiagnosis {
+    const population = state.residents.length;
+    if (population === 0) {
+      return {
+        need: "belonging",
+        level: 0,
+        cause: "The basin is empty.",
+        advice: "Begin again, or load a save from before the quiet.",
+        tone: "warning",
+      };
+    }
+
+    const totals: Record<NeedKey, number> = { food: 0, shelter: 0, safety: 0, belonging: 0 };
+    for (const resident of state.residents) {
+      totals.food += resident.needs.food;
+      totals.shelter += resident.needs.shelter;
+      totals.safety += resident.needs.safety;
+      totals.belonging += resident.needs.belonging;
+    }
+    const averages = Object.fromEntries(
+      (Object.keys(totals) as NeedKey[]).map((need) => [need, totals[need] / population]),
+    ) as Record<NeedKey, number>;
+
+    const need = (Object.keys(averages) as NeedKey[]).reduce((worst, candidate) =>
+      averages[candidate] < averages[worst] ? candidate : worst,
+    );
+    const level = averages[need];
+
+    /*
+     * Stores run dry before needs do, so a shortage is the earlier and more
+     * actionable warning. Reporting "everyone is fine" while the lanterns have
+     * a fifth of their fuel left is how a settlement gets to the edge without
+     * the player being told anything was wrong.
+     */
+    const storage = state.metrics.storage;
+    const short = (Object.keys(state.resources) as ResourceKey[])
+      .map((resource) => ({ resource, ratio: state.resources[resource] / Math.max(1, storage[resource]) }))
+      .filter((entry) => entry.ratio < 0.2)
+      .sort((a, b) => a.ratio - b.ratio)[0];
+
+    if (short) {
+      const shortfall: Record<ResourceKey, { need: NeedKey; cause: string; advice: string }> = {
+        food: { need: "food", cause: "The granary is nearly out and meals are getting thin.", advice: "Raise a Reed Farm, or upgrade one, before the stalls empty." },
+        water: { need: "food", cause: "The cistern is nearly dry.", advice: "Raise a Reed Farm near clean water to refill the basin stores." },
+        warmth: { need: "shelter", cause: "There is barely any fuel left for the hearths.", advice: "Raise or upgrade a Burrow Home, and keep resin coming from the workshop." },
+        light: { need: "safety", cause: "The lanterns are nearly out of fuel and the night routes are going dark.", advice: "Raise a Lantern Grove, or craft a Glow Kit to recharge the routes." },
+      };
+      const entry = shortfall[short.resource];
+      return { need: entry.need, level: averages[entry.need], cause: entry.cause, advice: entry.advice, tone: "warning" };
+    }
+
+    if (level > 62) {
+      return {
+        need,
+        level,
+        cause: "Everyone is getting what they need.",
+        advice: "Room to grow: raise a home, or push into the unmapped basin.",
+        tone: "good",
+      };
+    }
+
+    const crowded = housingPressure > 0.95;
+    const reasons: Record<NeedKey, { cause: string; advice: string }> = {
+      food: {
+        cause: state.resources.food < 12
+          ? "The granary is empty, so trips to the market come back with nothing."
+          : "More mouths are arriving at the stalls than the farms are filling them.",
+        advice: "Raise a Reed Farm, or a Commons Market so food reaches the far neighborhoods.",
+      },
+      shelter: {
+        cause: crowded
+          ? "Homes are over capacity and nobody is resting properly."
+          : "Hearths are burning more warmth than the Commons is making.",
+        advice: crowded
+          ? "Raise a Burrow Home — housing is the binding constraint right now."
+          : "Raise or upgrade a Burrow Home to bring warmth back up.",
+      },
+      safety: {
+        cause: state.resources.light < 12
+          ? "The lanterns have no fuel and the routes go dark after dusk."
+          : "Too much of the settlement sits outside the lantern light.",
+        advice: "Raise a Lantern Grove near the outer homes, or upgrade the one you have.",
+      },
+      belonging: {
+        cause: crowded
+          ? "Crowding is wearing on everyone, and requests are going unanswered."
+          : "Neighbors are not meeting often enough, and requests are going unanswered.",
+        advice: "Answer an open request, and keep a Commons Market within easy walking distance.",
+      },
+    };
+
+    return { need, level, ...reasons[need], tone: "warning" };
   }
 
   private checkResourceWarnings(): void {
@@ -1844,7 +2244,22 @@ export class MosslightSimulation {
   }
 
   /** Advances one tile along the resident's route, repathing if it has gone stale. */
+  /**
+   * Advances a resident one step, or two when they are travelling on a packed
+   * road.
+   *
+   * Roads already carried a lower cost inside the pathfinder, so residents
+   * preferred them — but preferring a route the player cannot see the benefit
+   * of is not a mechanic. Walking a road is now visibly faster, which is what
+   * makes spending food and warmth on one worth doing.
+   */
   private stepAlongPath(resident: Resident): void {
+    this.takeStep(resident);
+    const tile = this.state.grid[resident.position.y]?.[resident.position.x];
+    if (tile === "path") this.takeStep(resident);
+  }
+
+  private takeStep(resident: Resident): void {
     if (!resident.target) return;
     if (resident.path.length === 0) {
       if (sameCell(resident.position, resident.target)) return;
@@ -2166,7 +2581,7 @@ function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;
 
 export interface SavePayload {
   version: number;

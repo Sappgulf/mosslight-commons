@@ -180,6 +180,23 @@ export function normalizeWorld(state: WorldState, grid: TileKind[][]): WorldStat
     state.proposal.votes ??= [];
   }
   state.activePolicies ??= [];
+  state.wantsMet ??= 0;
+  state.wantsMissed ??= 0;
+  state.districtFocusDay ??= state.day;
+  state.selfBuildDay ??= state.day;
+  /*
+   * Requests gained a deadline and a payout. A resident carrying a want from
+   * before that change would have had neither, and the petition list reads the
+   * reward's label directly — an undefined item there took the whole HUD down
+   * on the first render.
+   */
+  for (const resident of state.residents) {
+    const want = resident.want;
+    if (!want) continue;
+    want.deadlineDay ??= (want.createdDay ?? state.day) + 6;
+    want.rewardItem ??= "seed-pod";
+    want.rewardAmount ??= 2;
+  }
   state.forecastHistory ??= [state.forecast];
   state.forecastCursor ??= Math.max(0, state.forecastHistory.length - 1);
   state.marketShortages ??= [];

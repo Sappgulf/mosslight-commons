@@ -83,11 +83,20 @@ export type WantKind = "lantern" | "neighbour" | "market" | "quiet" | "company";
  * copies of the same four need bars — they give individuals something the
  * player can actually do for them, and they generate the settlement's stories.
  */
+/**
+ * A resident's personal request, and the closest thing the Commons has to a
+ * quest. A want now carries a deadline and a payout, so answering one is a
+ * decision with a return rather than a line of flavour text.
+ */
 export interface Want {
   kind: WantKind;
   description: string;
   /** Day the want appeared, used for patience and for ledger copy. */
   createdDay: number;
+  /** Day the request lapses. Missing it costs standing across the species. */
+  deadlineDay: number;
+  rewardItem: ItemKey;
+  rewardAmount: number;
   fulfilled: boolean;
 }
 
@@ -186,7 +195,30 @@ export interface SettlementMetrics {
   harmony: number;
   resourceSecurity: number;
   activeBuildings: number;
+  /** How much of each resource the settlement can actually hold. */
+  storage: Record<ResourceKey, number>;
+  /** Plain reading of what is hurting the Commons, and what would fix it. */
+  diagnosis: SettlementDiagnosis;
 }
+
+/**
+ * The settlement used to fail silently: every stockpile read full while
+ * residents left, because stores and needs were unrelated. This is the readout
+ * that explains the decline in the terms the player can act on.
+ */
+export interface SettlementDiagnosis {
+  /** The need in the worst shape across the population. */
+  need: NeedKey;
+  /** Average level of that need, 0-100. */
+  level: number;
+  /** One sentence naming the cause. */
+  cause: string;
+  /** One sentence naming the fix. */
+  advice: string;
+  tone: "good" | "warning";
+}
+
+export type NeedKey = "food" | "shelter" | "safety" | "belonging";
 
 export interface Objective {
   id: string;
@@ -304,6 +336,13 @@ export interface WorldState {
   /** Ticks spent in a failing state; at the limit the settlement collapses. */
   collapseTimer: number;
   departures: number;
+  /** Requests answered and requests allowed to lapse, for the record. */
+  wantsMet: number;
+  wantsMissed: number;
+  /** Day the district focus last changed, so switching has a cost in time. */
+  districtFocusDay: number;
+  /** Day the residents last raised something on their own initiative. */
+  selfBuildDay: number;
   onboardingStep: number;
   onboardingDismissed: boolean;
   /** Per-tile water cleanliness 0–100. Farms stain it; wetlands restore it. */

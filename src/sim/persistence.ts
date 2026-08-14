@@ -1,6 +1,6 @@
 import { MosslightSimulation, SAVE_VERSION, type SavePayload } from "./simulation";
 
-const STORAGE_KEY = "mosslight.save.v5";
+const STORAGE_KEY = "mosslight.save.v6";
 const AUTOSAVE_INTERVAL_MS = 20000;
 
 export interface SaveMeta {

@@ -90,16 +90,16 @@ describe("SaveManager", () => {
     const saves = new SaveManager(simulation);
     saves.save();
 
-    const raw = JSON.parse(localStorage.getItem("mosslight.save.v5")!);
+    const raw = JSON.parse(localStorage.getItem("mosslight.save.v6")!);
     raw.payload.version = SAVE_VERSION - 1;
-    localStorage.setItem("mosslight.save.v5", JSON.stringify(raw));
+    localStorage.setItem("mosslight.save.v6", JSON.stringify(raw));
 
     expect(saves.load()).toBe(false);
     expect(saves.hasSave()).toBe(false);
   });
 
   it("rejects malformed JSON rather than throwing", () => {
-    localStorage.setItem("mosslight.save.v5", "{ not json");
+    localStorage.setItem("mosslight.save.v6", "{ not json");
     const saves = new SaveManager(new MosslightSimulation(SEED));
     expect(saves.peek()).toBeNull();
     expect(saves.load()).toBe(false);
@@ -110,9 +110,9 @@ describe("SaveManager", () => {
     const saves = new SaveManager(simulation);
     saves.save();
 
-    const raw = JSON.parse(localStorage.getItem("mosslight.save.v5")!);
+    const raw = JSON.parse(localStorage.getItem("mosslight.save.v6")!);
     delete raw.payload.state.grid;
-    localStorage.setItem("mosslight.save.v5", JSON.stringify(raw));
+    localStorage.setItem("mosslight.save.v6", JSON.stringify(raw));
 
     expect(saves.load()).toBe(false);
   });

@@ -201,15 +201,31 @@ export class HUD {
 
     for (const resource of resourceOrder) {
       const value = Math.round(state.resources[resource]);
+      // Stores are held against what the settlement can actually hold, which is
+      // built rather than given. A full bar now means "this is all we can keep",
+      // not "we reached the number every settlement reaches".
+      const capacity = Math.max(1, Math.round(state.metrics.storage[resource]));
+      const percent = Math.min(100, Math.round((value / capacity) * 100));
       this.setText(`[data-resource-value="${resource}"]`, String(value));
+      this.setText(`[data-resource-cap="${resource}"]`, `/${capacity}`);
       const fill = this.root.querySelector<HTMLElement>(`[data-resource-fill="${resource}"]`);
-      if (fill) fill.style.width = `${value}%`;
+      if (fill) fill.style.width = `${percent}%`;
+      const chip = this.root.querySelector<HTMLElement>(`[data-resource-chip="${resource}"]`);
+      if (chip) {
+        chip.classList.toggle("is-low", percent < 25);
+        chip.classList.toggle("is-full", percent >= 99);
+      }
       const meter = this.root.querySelector<HTMLElement>(`[data-resource-meter="${resource}"]`);
       if (meter) {
-        meter.setAttribute("aria-valuenow", String(value));
-        meter.setAttribute("aria-valuetext", `${value} percent ${RESOURCE_DEFINITIONS[resource].label.toLowerCase()} in stores`);
+        meter.setAttribute("aria-valuenow", String(percent));
+        meter.setAttribute(
+          "aria-valuetext",
+          `${value} of ${capacity} ${RESOURCE_DEFINITIONS[resource].label.toLowerCase()} stored`,
+        );
       }
     }
+
+    this.renderDiagnosis();
 
     const itemTotal = itemOrder.reduce((sum, item) => sum + state.items[item], 0);
     this.setText("[data-item-summary]", `${itemTotal} FOUND`);
@@ -236,14 +252,27 @@ export class HUD {
       dispatchButton.textContent = activeExpedition ? "SCOUTING" : state.revealedAreas.length >= 2 ? "MAPPED" : "DISPATCH SCOUT";
     }
 
+    // Re-pointing the districts is a commitment now, so show the lock-out
+    // rather than letting the player click into a refusal.
+    const switchDays = this.simulation.districtSwitchDaysLeft();
     this.root.querySelectorAll<HTMLButtonElement>("[data-district]").forEach((button) => {
       const district = button.dataset.district as DistrictType;
       const active = district === state.districtFocus;
+      const locked = !active && switchDays > 0;
       button.classList.toggle("is-active", active);
+      button.classList.toggle("is-locked", locked);
+      button.disabled = locked;
       button.setAttribute("aria-pressed", active ? "true" : "false");
-      button.title = `${DISTRICT_DEFINITIONS[district].label}: ${DISTRICT_DEFINITIONS[district].bonus}`;
+      button.title = locked
+        ? `${DISTRICT_DEFINITIONS[district].label}: settling for ${switchDays} more day${switchDays === 1 ? "" : "s"}`
+        : `${DISTRICT_DEFINITIONS[district].label}: ${DISTRICT_DEFINITIONS[district].bonus}`;
     });
-    this.setText("[data-district-focus]", DISTRICT_DEFINITIONS[state.districtFocus].label);
+    this.setText(
+      "[data-district-focus]",
+      switchDays > 0
+        ? `${DISTRICT_DEFINITIONS[state.districtFocus].label} · ${switchDays}d`
+        : DISTRICT_DEFINITIONS[state.districtFocus].label,
+    );
 
     const crafting = state.crafting;
     this.setText(
@@ -640,15 +669,49 @@ export class HUD {
       return;
     }
     list.replaceChildren(...open.map((resident) => {
+      const want = resident.want!;
       const item = document.createElement("button");
       item.type = "button";
       item.className = "petition";
       item.dataset.focusResident = resident.id;
-      const waited = this.simulation.state.day - (resident.want?.createdDay ?? 0);
-      item.classList.toggle("is-impatient", waited > 6);
-      item.textContent = `${WANT_GLYPH[resident.want!.kind]} ${resident.want?.description ?? ""}`;
+      const daysLeft = want.deadlineDay - this.simulation.state.day;
+      item.classList.toggle("is-impatient", daysLeft <= 2);
+
+      const text = document.createElement("span");
+      text.className = "petition-text";
+      text.textContent = `${WANT_GLYPH[want.kind]} ${want.description}`;
+
+      // A request is a small contract, so show both halves of the bargain.
+      const terms = document.createElement("span");
+      terms.className = "petition-terms";
+      const clock = document.createElement("strong");
+      clock.textContent = daysLeft <= 0
+        ? "LAST DAY"
+        : `${daysLeft} DAY${daysLeft === 1 ? "" : "S"} LEFT`;
+      const reward = document.createElement("em");
+      reward.textContent = `+${want.rewardAmount} ${ITEM_DEFINITIONS[want.rewardItem].label}`;
+      terms.append(clock, reward);
+
+      item.append(text, terms);
       return item;
     }));
+  }
+
+  /**
+   * The plain reading of why the Commons is doing well or badly.
+   *
+   * The settlement used to decline behind four full bars with nothing
+   * explaining it — the status line said "strained" and left the player to
+   * guess. This names the need in the worst shape, the cause, and the fix.
+   */
+  private renderDiagnosis(): void {
+    const panel = this.root.querySelector<HTMLElement>("[data-diagnosis]");
+    if (!panel) return;
+    const { diagnosis } = this.simulation.state.metrics;
+    panel.dataset.tone = diagnosis.tone;
+    this.setText("[data-diagnosis-need]", `${diagnosis.need.toUpperCase()} ${Math.round(diagnosis.level)}`);
+    this.setText("[data-diagnosis-cause]", diagnosis.cause);
+    this.setText("[data-diagnosis-advice]", diagnosis.advice);
   }
 
   private renderCouncil(): void {
@@ -1086,9 +1149,9 @@ export class HUD {
   private template(): string {
     const resourceMarkup = resourceOrder.map((resource) => {
       const definition = RESOURCE_DEFINITIONS[resource];
-      return `<div class="resource-chip" style="--resource-color: ${definition.color}">
+      return `<div class="resource-chip" data-resource-chip="${resource}" style="--resource-color: ${definition.color}">
         <span class="resource-icon" aria-hidden="true">${definition.icon}</span>
-        <div class="resource-copy"><span>${definition.label}</span><strong data-resource-value="${resource}">0</strong></div>
+        <div class="resource-copy"><span>${definition.label}</span><span class="resource-amount"><strong data-resource-value="${resource}">0</strong><small data-resource-cap="${resource}">/0</small></span></div>
         <div class="resource-meter" data-resource-meter="${resource}" role="progressbar" aria-label="${definition.label} in stores" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-resource-fill="${resource}"></i></div>
       </div>`;
     }).join("");
@@ -1152,6 +1215,12 @@ export class HUD {
       <div class="field-view" data-field-view="field">
         <div class="item-grid" aria-label="Found materials">${itemMarkup}</div>
         <div class="field-section petition-section">
+          <div class="commons-report" data-diagnosis data-tone="good">
+            <div class="objective-heading"><span>COMMONS REPORT</span><span data-diagnosis-need>FOOD 100</span></div>
+            <p data-diagnosis-cause></p>
+            <p class="report-advice" data-diagnosis-advice></p>
+          </div>
+
           <div class="objective-heading"><span>PETITIONS</span><span>FROM THE MOTES</span></div>
           <div data-petitions></div>
         </div>
