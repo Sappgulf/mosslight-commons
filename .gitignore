@@ -13,3 +13,7 @@ sim/__pycache__/
 # Art-direction reference boards: ~16MB of 2-3MB PNGs that nothing loads at
 # runtime. Kept on disk and in history, out of the working tree's weight.
 assets/generated/
+
+# Playwright run artifacts
+test-results/
+playwright-report/

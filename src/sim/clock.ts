@@ -1,4 +1,13 @@
-export const TICK_MS = 520;
+/**
+ * Wall time per simulation tick.
+ *
+ * This was 520ms, which put a whole day in 6.2 seconds and a season in 44. The
+ * world moved faster than anyone could read it: residents teleported between
+ * cells, the ledger scrolled past unread, and a forecast expired before the
+ * player had finished the sentence. At 900ms a day takes about eleven seconds
+ * and the 2x and 4x controls still exist for anyone who wants the old pace.
+ */
+export const TICK_MS = 900;
 
 /**
  * The maximum amount of wall time a single frame is allowed to convert into
@@ -16,7 +25,7 @@ export interface ClockHandlers {
 /**
  * Fixed-step simulation clock, deliberately independent of Phaser's scene
  * timer. The renderer can stall, the tab can blur, and the world still
- * advances in whole 520ms steps — which is what makes `advanceTime` in the QA
+ * advances in whole fixed steps — which is what makes `advanceTime` in the QA
  * hooks produce exactly the same state as real elapsed time.
  */
 export class SimulationClock {

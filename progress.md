@@ -241,3 +241,54 @@ Addressed the six priorities from the codebase audit.
 - `npm run build` passes: oxlint clean, `tsc --noEmit` clean, 100 Vitest tests,
   and `vite build`.
 - 12 Playwright tests pass against the real game, desktop and mobile.
+
+## Pace and layout pass
+
+### Gameplay pace
+
+- [x] `TICK_MS` 520 → 900. A day was 6.2 seconds and a season 44; residents
+      teleported between cells and the ledger scrolled past unread. A day is
+      now about eleven seconds, and 2×/4× still exist for the old pace.
+
+### Layout
+
+- [x] Replaced the absolutely positioned HUD with a real grid shell. The map's
+      position was hardcoded (`inset: 118px 300px 90px`) and had to be kept in
+      sync by hand with the width of every floating panel; there were three
+      such sets at different breakpoints, disagreeing with each other. The HUD
+      grid and the map now read the same four tokens.
+- [x] Deleted a stale second layout pass that re-positioned every panel
+      absolutely at `min-width: 901px`, which was fighting the first set.
+- [x] Panels no longer float over the board — the map has its own cell.
+- [x] Added a spacing scale and radius scale; gaps had been drawn ad hoc from
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, and 14px.
+
+### Sizing and readability
+
+- [x] Raised the type floor. 66 declarations sat between 5px and 9px, including
+      5px craft-cost labels and 6px item names. Nothing is below 10px now.
+- [x] Removed the truncation those sizes forced: item, district, craft, and
+      build labels wrapped or ellipsed to "SEED…", "COST F…", "MOO…".
+- [x] Build chips show costs as icon-and-number pairs; the itemised wording
+      stays in the detail line and the tooltip. The Root Workshop's four-part
+      cost had pushed its button out of the dock.
+- [x] All six build options fit one row; the sixth used to wrap out of view.
+- [x] Rebuilt the control dock as a single grouped column instead of a loose
+      strip, and widened the day card, which had been stacking one word a line.
+- [x] Fixed the mobile column, where panels collapsed under their own content
+      and overlapped: the desktop rules' `min-height: 0` was being inherited
+      into the flex column, and two new breakpoint blocks were overriding the
+      mobile rules because they were not bounded below.
+
+### Bug found
+
+- Missing-cost text always used the plural item label, so a single missing
+  fragment read "1 MAP FRAGMENTS".
+
+### Verification
+
+- 100 Vitest tests and 14 Playwright tests pass.
+- Two new end-to-end layout tests assert that no HUD panel clips its own
+  content and that no panel overlaps the board. They check the symptom rather
+  than pixel values, so the design can still be tuned freely.
+- Inspected at 1440×900, 1280×800, and 375×812.

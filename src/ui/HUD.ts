@@ -54,6 +54,10 @@ export interface HUDCallbacks {
 
 const formatResourceName = (resource: ResourceKey): string => RESOURCE_DEFINITIONS[resource].label.toUpperCase();
 
+/** Drops a trailing S when the count is one. */
+const singularise = (label: string, amount: number): string =>
+  amount === 1 && label.endsWith("S") ? label.slice(0, -1) : label;
+
 /**
  * Binding text is authored in this repo, not by a player, but the shortcuts
  * card builds markup by concatenation and there is no reason to leave a hole
@@ -337,10 +341,18 @@ export class HUD {
       const definition = BUILDING_DEFINITIONS[build];
       const missing: MissingCost[] = [...this.getMissingResources(build), ...this.getMissingItems(build)];
       const affordable = missing.length === 0;
-      const status = affordable ? "READY" : `NEEDS ${this.formatMissingCosts(missing)}`;
+      /*
+       * The chip has room for a short verdict, not a full shopping list. The
+       * Root Workshop needs four things, which spilled the button out of the
+       * dock; the itemised list is still in the detail line and the tooltip.
+       */
+      const shortfall = missing.length === 1
+        ? this.formatMissingCosts(missing)
+        : `${missing.length} MATERIALS`;
+      const status = affordable ? "READY" : `NEEDS ${shortfall}`;
       button.classList.toggle("is-unavailable", !affordable);
       button.setAttribute("aria-label", definition.label);
-      this.setText(`[data-build-cost="${build}"]`, `COST · ${this.formatCost(definition)}`);
+      this.setText(`[data-build-cost="${build}"]`, this.formatCostCompact(definition));
       this.setText(`[data-build-status="${build}"]`, status);
       this.setText(`[data-build-description="${build}"]`, definition.description);
     });
@@ -992,11 +1004,33 @@ export class HUD {
     return [...resourceCosts, ...itemCosts].join(" · ") || "NONE";
   }
 
+  /**
+   * A compact cost for the build chip. The full form ("COST · FOOD 10 · WATER 6
+   * · AMBER RESIN 2 · MAP FRAGMENTS 1") wrapped to four lines and pushed the
+   * Root Workshop button out of the dock. The chip now shows icon-and-number
+   * pairs; the full wording is still spelled out in the detail line above the
+   * grid, in the tooltip, and in the button's accessible description.
+   */
+  private formatCostCompact(definition: {
+    cost: Partial<Record<ResourceKey, number>>;
+    itemCost?: Partial<Record<ItemKey, number>>;
+  }): string {
+    const resourceCosts = resourceOrder
+      .filter((resource) => (definition.cost[resource] ?? 0) > 0)
+      .map((resource) => `${RESOURCE_DEFINITIONS[resource].icon}${definition.cost[resource]}`);
+    const itemCosts = itemOrder
+      .filter((item) => (definition.itemCost?.[item] ?? 0) > 0)
+      .map((item) => `${ITEM_DEFINITIONS[item].icon}${definition.itemCost?.[item]}`);
+    return [...resourceCosts, ...itemCosts].join("  ") || "FREE";
+  }
+
   private formatMissingCosts(missing: MissingCost[]): string {
     return missing
       .map((cost) => "resource" in cost
         ? `${cost.amount} ${formatResourceName(cost.resource)}`
-        : `${cost.amount} ${ITEM_DEFINITIONS[cost.item].label.toUpperCase()}`)
+        // Item labels are stored plural ("Map Fragments"), which read as
+        // "1 MAP FRAGMENTS" whenever exactly one was missing.
+        : `${cost.amount} ${singularise(ITEM_DEFINITIONS[cost.item].label.toUpperCase(), cost.amount)}`)
       .join(" · ");
   }
 
@@ -1060,7 +1094,7 @@ export class HUD {
       return `<button class="craft-button" type="button" data-craft="${recipe}" aria-label="${definition.label}: ${definition.description}" title="${definition.description}"><span class="craft-icon" aria-hidden="true">${definition.icon}</span><span>${definition.label}</span><small data-craft-cost="${recipe}">NEEDS MATERIALS</small></button>`;
     }).join("");
 
-    const pathButton = `<button class="build-button" type="button" data-build="path" aria-pressed="false" aria-label="Packed path" title="Lay a road motes prefer"><span class="build-icon" aria-hidden="true">≈</span><span class="build-name">PATH</span><span class="build-cost">FOOD 1 · WARMTH 2</span><span class="build-status">ROAD</span></button>`;
+    const pathButton = `<button class="build-button" type="button" data-build="path" aria-pressed="false" aria-label="Packed path" title="Lay a road motes prefer"><span class="build-icon" aria-hidden="true">≈</span><span class="build-name">PATH</span><span class="build-cost">${RESOURCE_DEFINITIONS.food.icon}${PATH_COST.food}  ${RESOURCE_DEFINITIONS.warmth.icon}${PATH_COST.warmth}</span><span class="build-status">ROAD</span></button>`;
     const buildMarkup = buildOrder.map((type) => {
       const definition = BUILDING_DEFINITIONS[type];
       return `<button class="build-button" type="button" data-build="${type}" aria-pressed="false" aria-label="${definition.label}" aria-describedby="build-${type}-description build-${type}-cost build-${type}-status" title="${definition.description}">
@@ -1193,7 +1227,10 @@ export class HUD {
     </section>
 
     <section class="control-dock panel" aria-label="Simulation controls">
-      <button class="control-button control-button--pause" type="button" data-action="pause" aria-pressed="false" aria-keyshortcuts="Space P" title="Pause simulation (Space or P)"><span class="control-icon" data-pause-icon aria-hidden="true">Ⅱ</span><span class="control-label" data-pause-label>PAUSE</span></button>
+      <div class="control-row">
+        <button class="control-button control-button--pause" type="button" data-action="pause" aria-pressed="false" aria-keyshortcuts="Space P" title="Pause simulation (Space or P)"><span class="control-icon" data-pause-icon aria-hidden="true">Ⅱ</span><span class="control-label" data-pause-label>PAUSE</span></button>
+        <button class="zoom-button mute-button" type="button" data-action="mute" aria-pressed="false" aria-keyshortcuts="M" title="Mute audio (M)">♪</button>
+      </div>
       <div class="speed-group" role="group" aria-label="Simulation speed"><button type="button" data-speed="1" class="is-active" aria-pressed="true" aria-keyshortcuts="1">1×</button><button type="button" data-speed="2" aria-pressed="false" aria-keyshortcuts="2">2×</button><button type="button" data-speed="4" aria-pressed="false" aria-keyshortcuts="4">4×</button></div>
       <div class="zoom-group" role="group" aria-label="Map zoom">
         <span class="zoom-label">VIEW</span>
@@ -1202,7 +1239,6 @@ export class HUD {
         <button class="zoom-button" type="button" data-zoom="in" aria-label="Zoom map in" title="Zoom map in (plus)">+</button>
         <button class="zoom-reset" type="button" data-zoom="reset" aria-label="Reset map zoom" title="Reset map zoom (0)">RESET</button>
       </div>
-      <button class="zoom-button mute-button" type="button" data-action="mute" aria-pressed="false" aria-keyshortcuts="M" title="Mute audio (M)">♪</button>
       <span class="control-hint">SPACE pause · 1/2/4 speed · −/+ zoom · M mute</span>
     </section>
 

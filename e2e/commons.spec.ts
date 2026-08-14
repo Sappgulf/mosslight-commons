@@ -155,6 +155,66 @@ test.describe("keyboard", () => {
   });
 });
 
+test.describe("layout", () => {
+  const PANELS = [
+    ".brand-card",
+    ".resource-strip",
+    ".field-panel",
+    ".right-stack",
+    ".build-dock",
+    ".control-dock",
+    ".message-log",
+  ];
+
+  /**
+   * The HUD was a stack of absolutely positioned cards whose insets had to be
+   * kept in sync with the map's by hand. They drifted: the build dock clipped
+   * its last button, the brand card clipped its save row, and panels sat on top
+   * of the board. The shell is a grid now, and these two tests are what keep it
+   * honest — they fail on the symptom (clipped or overlapping) rather than on
+   * any particular pixel value, so tuning the design stays free.
+   */
+  test("no HUD panel clips its own content", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+    await page.locator('[data-action="onboarding-skip"]').click();
+
+    const clipped = await page.evaluate((selectors) => {
+      return selectors
+        .map((selector) => {
+          const element = document.querySelector(selector);
+          if (!element) return { selector, overflow: -1 };
+          // Scrollable rails are allowed to overflow; fixed panels are not.
+          const scrolls = getComputedStyle(element).overflowY === "auto";
+          return { selector, overflow: scrolls ? 0 : element.scrollHeight - element.clientHeight };
+        })
+        .filter((entry) => entry.overflow > 1);
+    }, PANELS);
+
+    expect(clipped).toEqual([]);
+  });
+
+  test("no HUD panel covers the map", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+    await page.locator('[data-action="onboarding-skip"]').click();
+
+    const overlapping = await page.evaluate((selectors) => {
+      const board = document.querySelector("#game")!.getBoundingClientRect();
+      const intersects = (r: DOMRect) =>
+        r.width > 0 && r.height > 0
+        && r.left < board.right && r.right > board.left
+        && r.top < board.bottom && r.bottom > board.top;
+      return selectors.filter((selector) => {
+        const element = document.querySelector(selector);
+        return element ? intersects(element.getBoundingClientRect()) : false;
+      });
+    }, PANELS);
+
+    expect(overlapping).toEqual([]);
+  });
+});
+
 test.describe("session", () => {
   test("resumes the same world after a reload", async ({ page }) => {
     await freshStart(page);
