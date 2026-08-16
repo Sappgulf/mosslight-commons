@@ -1,11 +1,18 @@
 import Phaser from "phaser";
 
+
 import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS } from "../data/definitions";
 import { MosslightSimulation, type SimEvent } from "../sim/simulation";
 import { WANT_GLYPH } from "../sim/wants";
 import { masteryMark } from "../sim/mastery";
 import type { BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
 import { Effects } from "./Effects";
+import {
+  applyResidentAnimation,
+  createResidentAnimations,
+  sheetKeyFor,
+  type AnimState,
+} from "./ResidentAnimator";
 import { LightLayer, type LightSource } from "./LightLayer";
 import { TerrainPainter } from "./TerrainPainter";
 import { WeatherLayer } from "./WeatherLayer";
@@ -170,7 +177,7 @@ interface ResidentView {
   marker: Phaser.GameObjects.Graphics;
   shadow: Phaser.GameObjects.Ellipse;
   body: Phaser.GameObjects.Container;
-  sprite: Phaser.GameObjects.Image | null;
+  sprite: Phaser.GameObjects.Sprite | null;
   label: Phaser.GameObjects.Text;
   wantMark: Phaser.GameObjects.Text;
   masteryText: Phaser.GameObjects.Text;
@@ -181,6 +188,10 @@ interface ResidentView {
   walking: boolean;
   /** Per-resident phase offset so the idle bob is not in lockstep. */
   bobPhase: number;
+  /** Which way they were last travelling, so facing survives a pause. */
+  facing: number;
+  /** Board x last tick, used to derive facing from actual movement. */
+  lastX: number;
 }
 
 interface BuildingView {
@@ -282,6 +293,8 @@ export class WorldScene extends Phaser.Scene {
   /** Resident the camera should keep framed; cleared when the player pans. */
   private followId: string | null = null;
   private reduceMotion = false;
+  /** Species that have a generated sheet; the rest stay on the vector fallback. */
+  private animatedSpecies = new Set<Species>();
 
   constructor(
     simulation: MosslightSimulation,
@@ -389,6 +402,10 @@ export class WorldScene extends Phaser.Scene {
       fontFamily: "system-ui, sans-serif",
       fontSize: "11px",
     }).setDepth(DEPTH.labels).setScrollFactor(0);
+
+    // Sheets are generated from the loaded base textures, so this must run
+    // after preload and before the first resident is drawn.
+    this.animatedSpecies = createResidentAnimations(this, RESIDENT_TEXTURE_KEYS);
 
     this.reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     this.bindInput();
@@ -762,23 +779,14 @@ export class WorldScene extends Phaser.Scene {
 
     const t = this.time.now / 1000;
 
-    // Idle bob keeps the board alive between ticks.
+    /*
+     * Residents are driven by real animations now. The body container still
+     * carries the gentle vertical bob — it moves the creature without lifting
+     * its shadow — but the creature's own motion is frame-based rather than a
+     * squash applied to one static image.
+     */
     for (const view of this.residentViews.values()) {
-      if (view.walking) {
-        const frame = Math.floor(t * 8 + view.bobPhase) % 4;
-        const lift = frame === 1 || frame === 3 ? -7.2 : -5.2;
-        view.body.y = lift;
-        if (view.sprite) {
-          view.sprite.setDisplaySize(frame === 2 ? 28 : 30, frame === 0 ? 34 : 38);
-          view.sprite.rotation = (frame === 1 ? 0.08 : frame === 3 ? -0.08 : 0);
-        }
-      } else {
-        view.body.y = Math.sin(t * 2.4 + view.bobPhase) * 1.6 - 5;
-        if (view.sprite) {
-          view.sprite.setDisplaySize(30, 37);
-          view.sprite.rotation = 0;
-        }
-      }
+      view.body.y = view.walking ? -6.2 : Math.sin(t * 2.4 + view.bobPhase) * 1.6 - 5;
     }
     for (const view of this.nodeViews.values()) {
       view.sprite.rotation = Math.sin(t * 1.1 + view.bobPhase) * 0.045;
@@ -1296,10 +1304,11 @@ export class WorldScene extends Phaser.Scene {
         const body = this.add.container(0, -5);
         const marker = this.add.graphics();
 
-        const textureKey = RESIDENT_TEXTURE_KEYS[resident.species];
-        let sprite: Phaser.GameObjects.Image | null = null;
-        if (textureKey && this.textures.exists(textureKey)) {
-          sprite = this.add.image(0, 0, textureKey).setDisplaySize(30, 37);
+        // An animated sheet when one was generated for this species, and the
+        // hand-drawn vector otherwise, exactly as before.
+        let sprite: Phaser.GameObjects.Sprite | null = null;
+        if (this.animatedSpecies.has(resident.species)) {
+          sprite = this.add.sprite(0, 0, sheetKeyFor(resident.species), 0).setDisplaySize(30, 37);
           body.add(sprite);
         } else {
           this.drawResidentVector(marker, resident.species);
@@ -1349,6 +1358,8 @@ export class WorldScene extends Phaser.Scene {
           lastWant: null,
           walking: false,
           bobPhase: Math.random() * Math.PI * 2,
+          facing: 1,
+          lastX: resident.position.x,
         };
         this.residentViews.set(resident.id, view);
       }
@@ -1369,6 +1380,22 @@ export class WorldScene extends Phaser.Scene {
       view.container.setDepth(center.y + 1);
 
       view.walking = resident.path.length > 0 || resident.goal === "explore";
+
+      /*
+       * The animation state comes from what the resident is actually doing.
+       * A resident standing at their bench with `work` as their goal now works
+       * visibly, which is the whole point of having a sheet: the simulation has
+       * always known this and had no way to show it.
+       */
+      if (view.sprite) {
+        const state: AnimState = view.walking ? "walk" : resident.goal === "work" ? "work" : "idle";
+        // Facing is derived from real movement, and held through a stop so a
+        // resident who pauses does not snap back to a default direction.
+        const delta = resident.position.x - view.lastX;
+        if (delta !== 0) view.facing = delta > 0 ? 1 : -1;
+        view.lastX = resident.position.x;
+        applyResidentAnimation(view.sprite, resident.species, state, resident.stage, view.facing);
+      }
       const wantKey = resident.want && !resident.want.fulfilled ? `${resident.want.kind}:${resident.want.createdDay}` : "";
       if (view.lastWant !== wantKey) {
         view.lastWant = wantKey;

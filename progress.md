@@ -849,3 +849,61 @@ to a shared module rather than retyping them at each call site.
   byte-identical.
 - Browser-driven on a live game: 40 days in, harmony 85, housing 55/78, storage
   and diagnosis all reading correctly, console clean.
+
+## Animation pass — frames instead of a squashed image
+
+There was no animation system. Every resident was one static WebP, and
+"walking" was that image squashed and rotated on a four-step counter inside the
+scene's `update`. It reads acceptably in motion and it was the ceiling: a
+resident could never show anything a single texture cannot, so the work loops,
+life stages and facing the simulation already tracked had no way to reach the
+screen.
+
+- [x] **`render/ResidentAnimator.ts`.** Generated sheets — a row per state, a
+      column per frame — registered as real Phaser animations, with a state
+      machine per resident.
+- [x] **Three states, driven by the simulation.** `walk` when a resident has a
+      route, `work` when they are at their bench with `work` as their goal,
+      `idle` otherwise. The work loop is new: the simulation has always known
+      this and had no way to show it.
+- [x] **Facing** from real movement, held through a stop so a resident who
+      pauses does not snap back to a default direction.
+- [x] **Life stages are visible at last.** Sprouts draw at 0.72, adults at 1,
+      elders at 0.94 — measured on the board at 22, 30 and 28 pixels.
+- [x] The inline squash/rotate block is gone; the body container keeps only the
+      gentle vertical bob, which moves the creature without lifting its shadow.
+
+### PLACEHOLDER ART
+
+Nothing here draws a new creature. Each frame is the existing sprite redrawn
+under a transform, so the *motion* is frame-based and real while the *art* is
+still one pose. When hand-drawn sheets arrive, `buildPlaceholderSheet` is
+replaced by a `load.spritesheet` call and everything else is untouched: same
+keys, same frame counts, same states. Sheets should be 4 frames per state, in
+the order idle / walk / work.
+
+### A phantom bug, chased and dismissed
+
+Residents appeared frozen on frame one with `isPlaying` reporting true, and the
+scene's update list held 72 sprites in `_pending` with none active. That looks
+exactly like the well-known "a sprite in a Container is off the update list"
+trap, and a fix for it was written.
+
+It was wrong. The scene clock was not advancing *at all* — `time.now` was
+static and the pre-existing idle bob was frozen too, which no change of mine
+could cause. The automation browser runs the page in a background tab, where
+`requestAnimationFrame` is throttled to nothing while `setInterval` keeps
+firing, so every sample landed on a frame the engine had never stepped. Driving
+`game.loop.step()` by hand promoted all 72 sprites to active and advanced the
+frames correctly.
+
+The "fix" was removed. Had it shipped, the engine and the manual call would
+both have stepped every animation — every resident at double speed.
+
+### Verification
+
+- 205 Vitest and 20 Playwright tests pass; the build is clean.
+- Browser-driven: all four species build a sheet and register idle/walk/work;
+  72 residents animate across the three states; forcing a `work` goal produces
+  `brambleback-work`; stage widths measure 22/30/28; stepping the engine cycles
+  frames 1→2→3→4→1.
