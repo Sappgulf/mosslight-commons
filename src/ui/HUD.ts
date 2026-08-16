@@ -280,13 +280,15 @@ export class HUD {
     this.setText(
       "[data-expedition-status]",
       activeExpedition
-        ? `${activeExpedition.title} · ${activeExpedition.progress}/${activeExpedition.duration}`
+        // The counter meant nothing to a player: it measured a timer, not the
+        // trek. Say where the scout actually is instead.
+        ? `${activeExpedition.title} · ${activeExpedition.phase === "outbound" ? "OUTBOUND" : "RETURNING"}`
         : state.revealedAreas.length >= ZONE_COUNT ? "ALL ROUTES MAPPED" : "READY TO DISPATCH",
     );
     const dispatchButton = this.root.querySelector<HTMLButtonElement>('[data-action="dispatch-expedition"]');
     if (dispatchButton) {
       dispatchButton.disabled = Boolean(activeExpedition) || state.revealedAreas.length >= ZONE_COUNT;
-      dispatchButton.textContent = activeExpedition ? "SCOUTING" : state.revealedAreas.length >= ZONE_COUNT ? "MAPPED" : "DISPATCH SCOUT";
+      dispatchButton.textContent = activeExpedition ? (activeExpedition.phase === "outbound" ? "SCOUTING" : "HOMEWARD") : state.revealedAreas.length >= ZONE_COUNT ? "MAPPED" : "DISPATCH SCOUT";
     }
 
     // Re-pointing the districts is a commitment now, so show the lock-out

@@ -35,6 +35,7 @@ import {
   findWalkableNear,
   invalidateAllPaths,
   isInside,
+  reachableNear,
   isRevealed,
   setResidentTarget,
   stepAlongPath,
@@ -151,6 +152,24 @@ const WORKPLACE_CROWDING = 1.6;
  * bonds that actually deepened, rather than on the first morning.
  */
 const KINSHIP_MOVE_THRESHOLD = 70;
+/** How much one builder standing at a site adds to a tick of progress. */
+const CREW_CONTRIBUTION = 0.34;
+/** However big the crowd, a raising cannot go more than this much faster. */
+const MAX_CREW_BONUS = 2;
+/**
+ * How readily a resident with nothing pressing joins a raising.
+ *
+ * Deliberately low, and gated on distance and on the site still wanting hands.
+ * The first cut had two thirds of the free settlement downing tools for any
+ * site anywhere on the board — and since something is nearly always being
+ * upgraded, that emptied the farms and benches and slowed the whole economy
+ * enough to push the ledger past its budget.
+ */
+const CREW_INTEREST = 0.18;
+/** How far a resident will walk to help with a raising. */
+const CREW_RANGE = 7;
+/** Hands a site wants before it stops drawing more. */
+const CREW_WANTED = 4;
 
 /** Which craft each workplace teaches. */
 const WORKPLACE_CRAFT: Partial<Record<BuildingType, keyof Resident["skills"]>> = {
@@ -665,7 +684,17 @@ export class MosslightSimulation {
         building.upgrading = false;
         continue;
       }
-      building.upgradeProgress += 1;
+      /*
+       * The crew that turned up decides how fast it goes.
+       *
+       * Base progress is unchanged, so a raising nobody attends still finishes
+       * on its original schedule and no objective can stall. Builders standing
+       * at the site add to it, which is what makes the gathering worth
+       * watching rather than decorative.
+       */
+      const crew = this.crewAt(building);
+      building.crew = crew;
+      building.upgradeProgress += 1 + Math.min(MAX_CREW_BONUS, crew * CREW_CONTRIBUTION);
       if (building.upgradeProgress < plan.duration) continue;
 
       building.level += 1;
@@ -703,18 +732,40 @@ export class MosslightSimulation {
       return false;
     }
 
-    // A practised scout shortens the route, as does staging from the ruins.
-    const skillBonus = Math.floor(leader.skills.scouting / 40);
-    const duration = Math.max(3, 6 - (this.state.districtFocus === "ruin" ? 1 : 0) - skillBonus);
+    /*
+     * The estimate is now a distance, not a flat timer.
+     *
+     * `duration` used to be three to six ticks — half a day — and the survey
+     * completed on that count wherever the scout stood. Now it is a patience
+     * scaled to how far they actually have to walk, which is what the overdue
+     * fallbacks below are measured against. A practised scout, or one staging
+     * from the ruins, still shortens the trip.
+     */
+    /*
+     * Aim at ground a scout can actually stand on.
+     *
+     * The Canopy Rift's zone marker sits on open water with water on every
+     * side, so a survey there could never arrive and only ever resolved on its
+     * fallback timer — the reveal happened, but no journey did. The marker
+     * still names the zone; the scout walks to the nearest reachable ground
+     * beside it.
+     */
+    const destination = reachableNear(this.scoutTerrain, leader.position, ZONE_TARGETS[zone]);
+    const legDistance = manhattan(leader.position, destination);
+    const skillBonus = 1 - Math.min(0.3, leader.skills.scouting / 300);
+    const ruinBonus = this.state.districtFocus === "ruin" ? 0.9 : 1;
+    const duration = Math.max(8, Math.round(legDistance * skillBonus * ruinBonus));
     const expedition: Expedition = {
       id: `expedition-${this.state.expeditions.length + 1}`,
       leaderId: leader.id,
-      target: ZONE_TARGETS[zone],
+      target: destination,
       zone,
       title: `${ZONE_LABELS[zone]} Survey`,
       progress: 0,
       duration,
       status: "active",
+      phase: "outbound",
+      home: { x: leader.position.x, y: leader.position.y },
       rewardItem: "map-fragment",
       rewardAmount: 1,
     };
@@ -1508,26 +1559,73 @@ export class MosslightSimulation {
     this.state.regrowth = remaining;
   }
 
+  /**
+   * Scouts crossing the basin.
+   *
+   * The survey used to complete on a timer: the zone was revealed on the tick
+   * the counter ran out, wherever the scout was standing, and they never came
+   * home. Now the reveal waits for the scout to actually reach the place, and
+   * then they walk back, so a dispatched expedition is a journey you can watch
+   * cross the map rather than a progress bar in a panel.
+   *
+   * `progress` survives as a patience, not as the completion condition: if a
+   * scout somehow cannot reach the target — an unlucky reveal, a blocked route
+   * — the survey still resolves at twice its estimate rather than stranding
+   * the objective and soft-locking the ledger.
+   */
   private updateExpeditions(): void {
     for (const expedition of this.state.expeditions) {
       if (expedition.status !== "active") continue;
-      expedition.progress = Math.min(expedition.duration, expedition.progress + 1);
+      expedition.progress += 1;
       const leader = this.buildingIndexResident(expedition.leaderId);
-      if (leader) {
-        leader.skills.scouting = clamp(leader.skills.scouting + 0.6);
-        this.stepAlongPath(leader);
-      }
-      if (expedition.progress < expedition.duration) continue;
 
-      expedition.status = "complete";
+      // A scout who left the Commons and then departed it entirely cannot
+      // finish the survey; resolve it so nothing waits on them forever.
+      if (!leader) {
+        this.completeExpedition(expedition, "The scout never came back.");
+        continue;
+      }
+
+      leader.goal = "explore";
+      leader.skills.scouting = clamp(leader.skills.scouting + 0.6);
+      const destination = expedition.phase === "outbound" ? expedition.target : expedition.home;
+      // A scout routes through unmapped ground; everyone else stays on the map.
+      setResidentTarget(this.scoutTerrain, leader, destination);
+      stepAlongPath(this.scoutTerrain, leader);
+
+      const arrived = manhattan(leader.position, destination) <= 1;
+      const overdue = expedition.progress >= expedition.duration * 3;
+
+      if (expedition.phase === "outbound" && (arrived || overdue)) {
+        expedition.phase = "returning";
+        this.revealZone(expedition.zone);
+        this.state.items[expedition.rewardItem] += expedition.rewardAmount;
+        advanceObjectives(this.context, "expedition", { zone: expedition.zone });
+        this.addMessage(
+          `EXPEDITION · ${leader.name} reached the ${this.formatZone(expedition.zone)} · +${expedition.rewardAmount} ${this.formatItem(expedition.rewardItem)}. They are heading home.`,
+          "good",
+        );
+        this.emit({ type: "want", position: leader.position, label: "✦", tone: "good" });
+        this.setResidentTarget(leader, expedition.home);
+        continue;
+      }
+
+      if (expedition.phase === "returning" && (arrived || expedition.progress >= expedition.duration * 6)) {
+        leader.needs.belonging = clamp(leader.needs.belonging + 10);
+        this.completeExpedition(expedition, `${leader.name} is home with the ${this.formatZone(expedition.zone)} mapped.`);
+      }
+    }
+  }
+
+  private completeExpedition(expedition: Expedition, note: string): void {
+    expedition.status = "complete";
+    // A survey that was never walked still owes the Commons its map.
+    if (!this.state.revealedAreas.includes(expedition.zone)) {
       this.revealZone(expedition.zone);
       this.state.items[expedition.rewardItem] += expedition.rewardAmount;
       advanceObjectives(this.context, "expedition", { zone: expedition.zone });
-      this.addMessage(
-        `EXPEDITION · ${expedition.title} complete · +${expedition.rewardAmount} ${this.formatItem(expedition.rewardItem)}. ${this.formatZone(expedition.zone)} is mapped.`,
-        "good",
-      );
     }
+    this.addMessage(`EXPEDITION · ${expedition.title} complete · ${note}`, "good");
   }
 
   private updateCrafting(): void {
@@ -1636,6 +1734,9 @@ export class MosslightSimulation {
   private updateResidents(dayRolled: boolean): void {
     const overcrowding = Math.max(0, this.state.metrics.housingPressure - 0.9);
     const departed: Resident[] = [];
+    const activeScouts = new Set(
+      this.state.expeditions.filter((entry) => entry.status === "active").map((entry) => entry.leaderId),
+    );
 
     for (const resident of this.state.residents) {
       if (dayRolled) {
@@ -1691,13 +1792,23 @@ export class MosslightSimulation {
         continue;
       }
 
+      /*
+       * A scout on a survey is committed, and the expedition owns their route.
+       *
+       * This branch used to re-target them here every tick with ordinary
+       * routing — which refuses unmapped ground, the exact ground a survey is
+       * sent across. It quietly overwrote the permissive route the expedition
+       * had just set, so scouts thrashed a few tiles short of the place they
+       * were sent to and every survey ended on its fallback timer instead of
+       * on an arrival. Their needs still drain; they simply do not get to
+       * change their mind mid-journey.
+       */
       const activeExpedition = this.state.expeditions.find(
         (expedition) => expedition.status === "active" && expedition.leaderId === resident.id,
       );
       if (activeExpedition) {
-        resident.goal = "explore";
-        this.setResidentTarget(resident, activeExpedition.target);
-        resident.lastDecisionExplanation = `Leading ${activeExpedition.title.toLowerCase()} · ${activeExpedition.progress}/${activeExpedition.duration} route steps.`;
+        const leg = activeExpedition.phase === "outbound" ? "outward" : "homeward";
+        resident.lastDecisionExplanation = `Leading ${activeExpedition.title.toLowerCase()} · ${leg}.`;
         continue;
       }
 
@@ -1709,6 +1820,7 @@ export class MosslightSimulation {
       const market = this.nearestBuilding("commons-market", resident.position);
       const farm = this.nearestBuilding("reed-farm", resident.position);
       const grove = this.nearestBuilding("lantern-grove", resident.position);
+      const site = this.nearestConstructionSite(resident.position);
 
       const mostPressing = this.getMostPressingNeed(resident);
       let goal: ResidentGoal = "work";
@@ -1763,9 +1875,23 @@ export class MosslightSimulation {
         goal = "work";
         target = this.standingSpotFor(resident, farm);
         explanation = "The reeds need tending before the water changes.";
+      } else if (site && this.rng.next() < CREW_INTEREST) {
+        /*
+         * A raising is something the settlement turns out for.
+         *
+         * An upgrade used to be a timer nobody attended: the building simply
+         * became level two on a tick with every resident elsewhere doing
+         * something else. Residents with nothing more pressing now walk to the
+         * site and work it, which is both the crew you can watch gather and
+         * the reason the work goes faster.
+         */
+        goal = "work";
+        target = this.standingSpotFor(resident, site);
+        explanation = `The ${BUILDING_DEFINITIONS[site.type].label} is being raised. I am carrying for the crew.`;
       } else if (resident.traits.curiosity > 0.7 && this.rng.next() > resident.traits.routine) {
         goal = "explore";
-        target = this.findWalkableNear({ x: this.rng.int(4, 28), y: this.rng.int(5, 20) });
+        // Ranging means the frontier, not a random spot inside the town.
+        target = this.wanderTarget(resident);
         explanation = "A new path appeared on the edge of the neighborhood.";
       }
 
@@ -2324,6 +2450,11 @@ export class MosslightSimulation {
     return { state: this.state, blocked: this.occupiedCells };
   }
 
+  /** The board as a scout sees it: the unmapped basin is walkable. */
+  private get scoutTerrain(): Terrain {
+    return { state: this.state, blocked: this.occupiedCells, ignoreRevealed: true };
+  }
+
   private setResidentTarget(resident: Resident, target: Vec2): void {
     setResidentTarget(this.terrain, resident, target);
   }
@@ -2574,6 +2705,60 @@ export class MosslightSimulation {
         "good",
       );
     }
+  }
+
+  /** Residents standing close enough to a site to be working on it. */
+  private crewAt(building: Building): number {
+    let crew = 0;
+    for (const resident of this.state.residents) {
+      if (resident.goal !== "work") continue;
+      if (manhattan(resident.position, building.position) <= 2) crew += 1;
+    }
+    return crew;
+  }
+
+  /** The nearest building currently being raised, if any. */
+  private nearestConstructionSite(position: Vec2): Building | undefined {
+    let best: Building | undefined;
+    let bestDistance = CREW_RANGE;
+    for (const building of this.state.buildings) {
+      if (!building.upgrading) continue;
+      // A site that already has hands on it does not need the whole settlement.
+      if ((building.crew ?? 0) >= CREW_WANTED) continue;
+      const distance = manhattan(building.position, position);
+      if (distance <= bestDistance) {
+        bestDistance = distance;
+        best = building;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Somewhere worth ranging to.
+   *
+   * Wandering used to pick any cell on the board, which mostly meant walking
+   * to another spot inside the settlement. A resident who ranges should be
+   * heading for the edges of what the Commons knows, so this prefers revealed
+   * ground far from the Root.
+   */
+  private wanderTarget(resident: Resident): Vec2 {
+    const heart = this.buildingByType.get("root-heart")?.position ?? resident.position;
+    let best = resident.position;
+    let bestScore = -1;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const candidate = this.findWalkableNear({
+        x: this.rng.int(1, GRID_WIDTH - 2),
+        y: this.rng.int(1, GRID_HEIGHT - 2),
+      });
+      if (!this.isRevealed(candidate)) continue;
+      const score = manhattan(candidate, heart);
+      if (score > bestScore) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+    return best;
   }
 
   private buildingIndexResident(id: string): Resident | undefined {
@@ -2859,7 +3044,7 @@ function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-export const SAVE_VERSION = 8;
+export const SAVE_VERSION = 9;
 
 export interface SavePayload {
   version: number;

@@ -1,11 +1,11 @@
 import Phaser from "phaser";
 
 
-import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS } from "../data/definitions";
+import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS, UPGRADE_COSTS } from "../data/definitions";
 import { MosslightSimulation, type SimEvent } from "../sim/simulation";
 import { WANT_GLYPH } from "../sim/wants";
 import { masteryMark } from "../sim/mastery";
-import type { BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
+import type { Building, BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
 import { Effects } from "./Effects";
 import {
   applyResidentAnimation,
@@ -200,6 +200,8 @@ interface BuildingView {
   shadow: Phaser.GameObjects.Ellipse;
   baseSize: { width: number; height: number } | null;
   levelPips: Phaser.GameObjects.Graphics;
+  /** Redrawn every tick while a raising is under way. */
+  scaffold: Phaser.GameObjects.Graphics;
   label: Phaser.GameObjects.Text;
   lastLevel: number;
   lastUpgrading: boolean;
@@ -1153,6 +1155,7 @@ export class WorldScene extends Phaser.Scene {
         }
 
         const levelPips = this.add.graphics();
+        const scaffold = this.add.graphics();
         const label = this.add.text(0, 20, definition.shortLabel, {
           color: "#f5e6c8",
           fontFamily: "Georgia, serif",
@@ -1161,9 +1164,9 @@ export class WorldScene extends Phaser.Scene {
           strokeThickness: 3,
         }).setOrigin(0.5).setVisible(false);
 
-        container.add([shadow, art, levelPips, label]);
+        container.add([shadow, art, levelPips, scaffold, label]);
         this.entityLayer.add(container);
-        view = { container, art, shadow, baseSize, levelPips, label, lastLevel: -1, lastUpgrading: false };
+        view = { container, art, shadow, baseSize, levelPips, scaffold, label, lastLevel: -1, lastUpgrading: false };
         this.buildingViews.set(building.id, view);
 
         // Placement pop.
@@ -1197,10 +1200,6 @@ export class WorldScene extends Phaser.Scene {
             view.levelPips.fillCircle(-7 + index * 7, 14, 2.2);
           }
         }
-        if (building.upgrading) {
-          view.levelPips.lineStyle(2, 0x63e6d4, 0.7);
-          view.levelPips.strokeCircle(0, -4, 24);
-        }
         const scale = 1 + (building.level - 1) * 0.12;
         if (view.baseSize && view.art instanceof Phaser.GameObjects.Image) {
           view.art.setDisplaySize(view.baseSize.width * scale, view.baseSize.height * scale);
@@ -1209,12 +1208,50 @@ export class WorldScene extends Phaser.Scene {
         }
         view.shadow.setScale(scale);
       }
+
+      this.drawScaffold(view, building);
     }
 
     for (const [id, view] of this.buildingViews) {
       if (seen.has(id)) continue;
       view.container.destroy(true);
       this.buildingViews.delete(id);
+    }
+  }
+
+  /**
+   * A building being raised, and the crew raising it.
+   *
+   * An upgrade used to be a thin teal ring and a number ticking somewhere in a
+   * panel. Now the site wears scaffolding that fills as the work goes, and a
+   * count of the builders actually standing on it — which is the thing the
+   * player can change, by leaving the crew alone to finish.
+   */
+  private drawScaffold(view: BuildingView, building: Building): void {
+    const scaffold = view.scaffold;
+    scaffold.clear();
+    if (!building.upgrading) return;
+
+    const plan = UPGRADE_COSTS[building.level + 1];
+    const fraction = plan ? Math.max(0, Math.min(1, building.upgradeProgress / plan.duration)) : 0;
+    const width = 30;
+    const height = 34;
+    const top = -height + 6;
+
+    // Posts and rails: a frame around the building rather than over it.
+    scaffold.lineStyle(1.5, 0xc8a97a, 0.85);
+    scaffold.strokeRect(-width / 2, top, width, height);
+    scaffold.lineBetween(-width / 2, top + height / 2, width / 2, top + height / 2);
+
+    // The lift fills from the bottom as the work goes.
+    scaffold.fillStyle(0x63e6d4, 0.22);
+    scaffold.fillRect(-width / 2, top + height * (1 - fraction), width, height * fraction);
+
+    // One mark per builder present, so a crowd reads as a crew.
+    const crew = Math.min(6, building.crew ?? 0);
+    for (let index = 0; index < crew; index += 1) {
+      scaffold.fillStyle(0xf4b85b, 0.95);
+      scaffold.fillCircle(-width / 2 + 4 + index * 4.5, top - 4, 1.8);
     }
   }
 

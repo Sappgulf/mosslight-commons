@@ -907,3 +907,66 @@ both have stepped every animation — every resident at double speed.
   72 residents animate across the three states; forcing a `work` goal produces
   `brambleback-work`; stage widths measure 22/30/28; stepping the engine cycles
   frames 1→2→3→4→1.
+
+## Journey pass — scouts, crews, and ground worth crossing
+
+The basin had movement but no travel. A survey resolved on a three-to-six tick
+timer wherever the scout happened to be standing — usually inside the
+settlement, having walked nowhere — and they never came home. A raising was a
+counter nobody attended. Wandering picked a random cell, which mostly meant
+walking to another spot in the middle of town.
+
+- [x] **A survey is a journey.** The reveal waits for the scout to actually
+      reach the place, then they walk back. `phase` tracks outbound and
+      returning, and the HUD says which rather than showing a meaningless
+      counter.
+- [x] **Scouts route through unmapped ground.** Ordinary routing refuses it —
+      correctly, for a resident running errands, and exactly wrong for the one
+      sent to chart it. `Terrain.ignoreRevealed` carries the permission, on the
+      terrain rather than the call, because `takeStep` repaths mid-route.
+- [x] **Destinations are provably reachable.** The Canopy Rift's marker sits on
+      open water with water on every side, so that survey could never arrive.
+      `reachableNear` searches outward for ground that is walkable *and* has a
+      route from the scout.
+- [x] **A raising draws a crew.** Residents with nothing pressing walk to a
+      nearby site and work it, and hands on site speed the work. Base progress
+      is unchanged, so an unattended raising still finishes on schedule and no
+      objective can stall.
+- [x] **Sites look like sites.** Scaffolding that fills as the work goes,
+      with a mark per builder present, replacing a thin teal ring.
+- [x] **Ranging means the frontier**, not another cell downtown.
+
+### Three bugs, each hiding the next
+
+The scout reached only within three tiles and every survey ended on its
+fallback. Fixing that took three passes because each fix uncovered the next:
+
+1. `setScoutTarget` set a permissive route, and then `takeStep` repathed
+   restrictively one tile later. Permission moved onto the terrain.
+2. The Canopy Rift target was open water. Destinations became reachable ground.
+3. **The real one.** An existing branch in the resident loop re-targeted the
+   scout every tick with ordinary routing and `continue`d — so it silently
+   overwrote the expedition's route, and a fix I added below it was dead code
+   the branch never reached. Three separate changes produced byte-identical
+   trace output, which is what finally gave it away.
+
+After: outbound ticks fell from 19/38/41 to 8/16/10, and all three zones are
+reached by walking rather than by timeout.
+
+### A pacing cost, taken deliberately
+
+Real journeys are slower than a three-tick timer, and a crew draws some labour
+off the benches. Chapter five now arrives after tick 1200 where it used to
+arrive before it, so the chapter-order test's budget rises from 1200 to 1600 —
+matching the sibling test that proves the ledger still completes in full. The
+first cut of the crew was far worse: two thirds of free residents downed tools
+for any site anywhere on the board, and since something is nearly always being
+upgraded, it emptied the farms. It is now gated on interest, distance, and
+whether the site still wants hands.
+
+### Verification
+
+- 209 Vitest tests (4 new, including one asserting every zone is reached on
+  foot rather than on the fallback) and 20 Playwright tests pass.
+- Browser-driven on a live game: a scout walked 12,9 → 27,12, arrived, and came
+  home 27,14 → 13,9; a raising drew a crew and completed to level 2.

@@ -103,10 +103,21 @@ describe("the game can be finished", () => {
     expect(simulation.isLedgerComplete()).toBe(true);
   });
 
+  /**
+   * The budget here is 1600 rather than the 1200 it was, and that is a real
+   * cost rather than a slack test.
+   *
+   * Surveys used to resolve on a three-to-six tick timer wherever the scout
+   * stood; they are journeys now, walked out and back, and the scout is
+   * committed while they travel. Chapter five therefore arrives later than it
+   * did. The sibling test above proves the ledger still completes in full, so
+   * this is pacing, not a stall — but if this number ever has to rise again,
+   * that is worth treating as a symptom rather than raising it a third time.
+   */
   it("opens each chapter in turn rather than skipping any", () => {
     const simulation = new MosslightSimulation(SEED);
     const seen = new Set<number>([simulation.state.chapter]);
-    for (let index = 0; index < 1200; index += 1) {
+    for (let index = 0; index < 1600; index += 1) {
       playThrough(simulation, 1);
       seen.add(simulation.state.chapter);
     }

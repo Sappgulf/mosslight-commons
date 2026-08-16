@@ -240,15 +240,36 @@ describe("MosslightSimulation", () => {
   });
 
   describe("expeditions and crafting", () => {
-    it("reveals a zone when an expedition completes", () => {
+    it("reveals a zone when the scout actually gets there, and brings them home", () => {
       expect(simulation.state.revealed[16]![27]).toBe(false);
       expect(simulation.dispatchExpedition()).toBe(true);
       // A second dispatch while one is running must be refused.
       expect(simulation.dispatchExpedition()).toBe(false);
 
-      advance(simulation, 12);
+      const expedition = simulation.state.expeditions.find((entry) => entry.status === "active")!;
+      expect(expedition.phase).toBe("outbound");
+
+      /*
+       * The survey is a journey now rather than a half-day timer, so this
+       * walks the scout out and back. The zone must not be mapped while they
+       * are still on the way — that was the old behaviour, where the reveal
+       * fired on a counter wherever the scout happened to be standing.
+       */
+      let outboundTicks = 0;
+      while (expedition.phase === "outbound" && outboundTicks < 400) {
+        simulation.advance();
+        outboundTicks += 1;
+      }
+      expect(outboundTicks).toBeGreaterThan(1);
       expect(simulation.state.revealedAreas).toContain("sunken-reach");
       expect(simulation.state.revealed[16]![27]).toBe(true);
+
+      let returnTicks = 0;
+      while (expedition.status === "active" && returnTicks < 400) {
+        simulation.advance();
+        returnTicks += 1;
+      }
+      expect(expedition.status).toBe("complete");
     });
 
     it("refuses to craft without a workshop", () => {

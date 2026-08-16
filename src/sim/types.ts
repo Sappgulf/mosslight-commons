@@ -208,6 +208,8 @@ export interface Building {
   /** Accumulated ticks toward the next level, when an upgrade is in progress. */
   upgradeProgress: number;
   upgrading: boolean;
+  /** Builders present last tick, for the renderer to show the crew at work. */
+  crew?: number;
 }
 
 export interface ForecastSnapshot {
@@ -309,6 +311,16 @@ export interface Relationship {
   sharedDays: number;
 }
 
+/**
+ * Where a scout is in their journey.
+ *
+ * A survey used to finish on a timer alone: the zone was revealed on the tick
+ * the counter ran out, wherever the scout happened to be standing, and they
+ * never came home. The trek is the interesting part, so the phase is tracked
+ * and the reveal waits for an actual arrival.
+ */
+export type ExpeditionPhase = "outbound" | "returning";
+
 export interface Expedition {
   id: string;
   leaderId: string;
@@ -318,6 +330,9 @@ export interface Expedition {
   progress: number;
   duration: number;
   status: ExpeditionStatus;
+  phase: ExpeditionPhase;
+  /** Where the scout set out from, and where they are headed back to. */
+  home: Vec2;
   rewardItem: ItemKey;
   rewardAmount: number;
 }
