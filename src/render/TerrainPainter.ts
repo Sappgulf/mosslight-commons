@@ -14,6 +14,15 @@ import {
   type TerrainFamily,
 } from "./terrain";
 
+/**
+ * Edge tests for the terrain masks, at module scope: neither captures anything
+ * from the method that uses it, so rebuilding them on every repaint was pure
+ * allocation.
+ */
+const differs = (neighbor: TerrainFamily, self: TerrainFamily): boolean => neighbor !== self;
+const touchesWater = (neighbor: TerrainFamily, self: TerrainFamily): boolean =>
+  neighbor === "water" && self !== "water";
+
 export interface TerrainPainterConfig {
   tileSize: number;
   offsetX: number;
@@ -111,7 +120,6 @@ export class TerrainPainter {
     tileSize: number,
   ): void {
     const lip = Math.max(3, Math.round(tileSize * 0.22));
-    const differs = (neighbor: TerrainFamily, self: TerrainFamily) => neighbor !== self;
 
     for (let y = 0; y < grid.length; y += 1) {
       for (let x = 0; x < grid[y]!.length; x += 1) {
@@ -153,8 +161,6 @@ export class TerrainPainter {
     tileSize: number,
   ): void {
     const bank = Math.max(3, Math.round(tileSize * 0.28));
-    const touchesWater = (neighbor: TerrainFamily, self: TerrainFamily) =>
-      neighbor === "water" && self !== "water";
 
     for (let y = 0; y < grid.length; y += 1) {
       for (let x = 0; x < grid[y]!.length; x += 1) {

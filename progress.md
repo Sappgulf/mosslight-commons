@@ -1216,3 +1216,62 @@ carries their rank, widening and warming from a plain shadow to a broad gold one
 - 236 Vitest and 20 Playwright tests pass.
 - Browser at 1280×800: all four item labels render in full with nothing
   overflowing its panel, and the board holds 720×504.
+
+## Extraction, households, and a clean lint
+
+### Construction pulled out of the god class
+
+`chooseGrowth`, `chooseSelfBuild`, `findPlotFor` and `isNearTile` now live in
+`src/sim/systems/construction.ts` behind a narrow `BuildSite` surface. This is
+deliberately the block where the last round of bugs actually lived — a growth
+rule that only fired in a crisis, and a placement radius wrongly blamed for a
+footprint that never moved. They can now be measured against a hand-built world
+instead of inferred from a played game, and **12 new tests do exactly that**,
+including one pinning the regression itself: a thriving Commons must keep
+building.
+
+`simulation.ts` 3448 → 3293 lines. The extraction is behaviour-neutral: the
+full suite passed unchanged, with no snapshot movement.
+
+**A discrepancy caught in the move.** `RESIDENTS_PER_MARKET` is 34 in the
+simulation and had been transcribed as 28 — a silent change to market density
+across every settlement. Copying constants by hand is exactly how that happens;
+they live in one place now.
+
+### Households travel together
+
+Standing spots were hashed from the resident's own id alone, which spread a
+household evenly around a building: four relatives converging on one market
+arrived as four unrelated dots on four opposite sides. A resident with a close
+relation already bound for the same place now takes a spot near them.
+
+The first cut took the single *closest* free cell, which put the whole
+household on one tile — precisely the pile the dispersal pass existed to break
+up, and the test for it caught this immediately. They now spread across the five
+cells nearest their relation, chosen by the same stable hash.
+
+Measured over 1200 ticks: close relations average **6.14 tiles apart against
+7.26 for the settlement at large**, with the worst-occupied tile *improving*
+from 6 to 4. The effect is real but modest — it only applies while relations are
+actually converging on the same place — and the test asserts the direction
+rather than a margin it cannot honestly promise.
+
+### Lint clean
+
+Eight warnings, carried since the beginning of this work, are gone:
+
+- Two terrain edge tests were rebuilt on every repaint despite capturing
+  nothing; they are module-scope constants now.
+- The same for one e2e helper.
+- Two `sort` calls already operated on copies, so they carry a scoped disable
+  saying so — `toSorted` is not in this project's TS lib target, and a lib bump
+  for a cosmetic rule is not a trade worth making.
+- Three `console` calls are deliberate failure reporting on paths that have no
+  other channel — a HUD that will not paint, a board that will not draw, a
+  texture that will not load. They are annotated rather than deleted.
+
+### Verification
+
+- 250 Vitest tests (14 new) and 20 Playwright tests pass; `npm run lint` is
+  clean; the build is clean.
+- One snapshot updated on purpose, for the household clustering.

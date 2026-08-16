@@ -1,5 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 
+/**
+ * The optional Torx/THRML sidecar is probed only on localhost, which is exactly
+ * where these tests run. A refused connection to it is designed behaviour when
+ * it is not running, not a fault in the game.
+ */
+const isOptionalSidecar = (text: string): boolean =>
+  text.includes("ERR_CONNECTION_REFUSED") || text.includes("8001");
+
 interface Snapshot {
   day: number;
   tick: number;
@@ -63,9 +71,6 @@ test.describe("boot", () => {
      * refused connection to it is the designed behaviour when it is not
      * running, not a fault in the game.
      */
-    const isOptionalSidecar = (text: string) =>
-      text.includes("ERR_CONNECTION_REFUSED") || text.includes("8001");
-
     page.on("console", (message) => {
       if (message.type() === "error" && !isOptionalSidecar(message.text())) errors.push(message.text());
     });

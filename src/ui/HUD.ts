@@ -512,9 +512,9 @@ export class HUD {
       return;
     }
     panel.hidden = false;
-    const hottest = Object.entries(research.sampledRisks)
-      .slice()
-      .sort((left, right) => right[1] - left[1])[0];
+    // Sorting a fresh array from `Object.entries`, so nothing shared is mutated.
+    // oxlint-disable-next-line no-array-sort
+    const hottest = Object.entries(research.sampledRisks).sort((left, right) => right[1] - left[1])[0];
     this.setText("[data-torx-risk]", hottest ? `THRML ${hottest[0]} ${Math.round(hottest[1] * 100)}%` : "THRML");
 
     const meters = this.root.querySelector<HTMLElement>("[data-torx-meters]");
@@ -912,6 +912,8 @@ export class HUD {
     }
 
     // Active first, then most recently founded.
+    // Sorting a copy; `toSorted` is not in this project's TS lib target.
+    // oxlint-disable-next-line no-array-sort
     const ordered = [...factions].sort((first, second) => {
       if (first.active !== second.active) return first.active ? -1 : 1;
       return second.foundedDay - first.foundedDay;

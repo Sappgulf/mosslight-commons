@@ -61,3 +61,56 @@ describe("residents do not all walk at the same speed", () => {
     expect(resident.moveCredit).toBeLessThan(1);
   });
 });
+
+describe("households travel together", () => {
+  /**
+   * Standing spots used to be hashed from the resident's own id alone, which
+   * spread a household evenly around a building — four relatives converging on
+   * one market arrived as four unrelated dots on four opposite sides.
+   *
+   * The effect is deliberately modest: it only applies while relations are
+   * actually converging on the same place, so this asserts the direction
+   * rather than a dramatic margin.
+   */
+  it("keeps close relations nearer each other than strangers", () => {
+    const simulation = new MosslightSimulation(2048);
+    for (let tick = 0; tick < 1200; tick += 1) simulation.advance();
+
+    const byId = new Map(simulation.state.residents.map((resident) => [resident.id, resident]));
+    const distance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+      Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+
+    const kin: number[] = [];
+    for (const relationship of simulation.state.relationships) {
+      if (relationship.kind === "rivalry" || relationship.strength < 62) continue;
+      const a = byId.get(relationship.aId);
+      const b = byId.get(relationship.bId);
+      if (a && b) kin.push(distance(a.position, b.position));
+    }
+    expect(kin.length).toBeGreaterThan(10);
+
+    // Every unordered pair, so the comparison is deterministic rather than sampled.
+    const residents = simulation.state.residents;
+    const all: number[] = [];
+    for (let first = 0; first < residents.length; first += 1) {
+      for (let second = first + 1; second < residents.length; second += 1) {
+        all.push(distance(residents[first]!.position, residents[second]!.position));
+      }
+    }
+
+    const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+    expect(mean(kin)).toBeLessThan(mean(all));
+  });
+
+  it("does not let a household pile onto one tile", () => {
+    const simulation = new MosslightSimulation(2048);
+    for (let tick = 0; tick < 1200; tick += 1) simulation.advance();
+
+    const occupancy = new Map<string, number>();
+    for (const resident of simulation.state.residents) {
+      const key = `${resident.position.x},${resident.position.y}`;
+      occupancy.set(key, (occupancy.get(key) ?? 0) + 1);
+    }
+    expect(Math.max(...occupancy.values())).toBeLessThanOrEqual(6);
+  });
+});

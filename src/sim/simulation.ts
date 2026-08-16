@@ -31,6 +31,13 @@ import { GRID_HEIGHT, GRID_WIDTH } from "./grid";
 import { applySpeciesMood } from "./mood";
 import { maybeAssignWant, updateWants } from "./systems/wants";
 import { FOUNDING_COOLDOWN, STRIKE_AFTER, secededFactions, tickFactions } from "./factions";
+import {
+  chooseSelfBuild,
+  findPlotFor,
+  isNearTile,
+  RESIDENTS_PER_MARKET,
+  type BuildSite,
+} from "./systems/construction";
 import { tickSpecies } from "./species";
 import {
   findWalkableNear,
@@ -143,7 +150,6 @@ const DISTRICT_SWITCH_DAYS = 4;
 const DISTRICT_SWITCH_COST = { food: 6, warmth: 4 } as const;
 
 /** Residents a single market can comfortably serve. */
-const RESIDENTS_PER_MARKET = 34;
 
 /** How much each existing worker discourages another from joining a bench. */
 const WORKPLACE_CROWDING = 1.6;
@@ -153,18 +159,10 @@ const WORKPLACE_CROWDING = 1.6;
  * bonds that actually deepened, rather than on the first morning.
  */
 const KINSHIP_MOVE_THRESHOLD = 70;
-/** How far from the Root a young settlement will build. */
-const BASE_SETTLEMENT_REACH = 9;
-/** The furthest a mature settlement will push, short of the basin's rim. */
-const MAX_SETTLEMENT_REACH = 26;
-/*
- * What a population warrants. These set how far a prosperous settlement keeps
- * building once its immediate needs are met.
- */
-const RESIDENTS_PER_FARM = 14;
-const RESIDENTS_PER_GROVE = 16;
-const RESIDENTS_PER_HOME = 10;
-const RESIDENTS_PER_WORKSHOP = 45;
+/** Bond strength at which two residents will travel and stand together. */
+const COMPANION_STRENGTH = 62;
+/** How many cells around a companion a household spreads over. */
+const COMPANION_SPREAD = 5;
 /** How much one builder standing at a site adds to a tick of progress. */
 const CREW_CONTRIBUTION = 0.34;
 /** However big the crowd, a raising cannot go more than this much faster. */
@@ -2183,75 +2181,19 @@ export class MosslightSimulation {
     this.addMessage(`COMMONS · The residents raised a ${definition.label} of their own.`, "good");
   }
 
-  /**
-   * What a settlement of this size should have and does not yet, in the order
-   * it should want it. Returns undefined once the town has caught up with its
-   * own population.
-   */
-  private chooseGrowth(): Exclude<BuildingType, "root-heart"> | undefined {
-    const population = this.state.residents.length;
-    if (population < 12) return undefined;
-
-    const targets: Array<[Exclude<BuildingType, "root-heart">, number]> = [
-      ["reed-farm", Math.ceil(population / RESIDENTS_PER_FARM)],
-      ["lantern-grove", Math.ceil(population / RESIDENTS_PER_GROVE)],
-      ["commons-market", Math.ceil(population / RESIDENTS_PER_MARKET)],
-      ["burrow-home", Math.ceil(population / RESIDENTS_PER_HOME)],
-      ["root-workshop", Math.ceil(population / RESIDENTS_PER_WORKSHOP)],
-    ];
-
-    // The largest shortfall first, so the town fills its worst gap next.
-    let wanted: Exclude<BuildingType, "root-heart"> | undefined;
-    let worst = 0;
-    for (const [type, target] of targets) {
-      const shortfall = target - this.countBuildings(type);
-      if (shortfall > worst) {
-        worst = shortfall;
-        wanted = type;
-      }
-    }
-    return wanted;
+  /** The board as the placement system sees it. */
+  private get buildSite(): BuildSite {
+    return {
+      state: this.state,
+      isRevealed: (cell) => this.isRevealed(cell),
+      isOccupied: (cell) => this.isOccupied(cell),
+      lightCoverageAt: (cell) => this.lightCoverageAt(cell),
+      countBuildings: (type) => this.countBuildings(type),
+    };
   }
 
-  /** The building the Commons most needs next, or undefined if it needs none. */
   private chooseSelfBuild(): Exclude<BuildingType, "root-heart"> | undefined {
-    const { housingPressure, diagnosis } = this.state.metrics;
-    // Build ahead of the crunch rather than only once it has arrived, so the
-    // settlement visibly keeps growing instead of settling at its first cap.
-    if (housingPressure > 0.88) return "burrow-home";
-
-    /*
-     * A settlement that is doing well keeps building.
-     *
-     * This used to return nothing unless housing was tight or the report was a
-     * warning, so a thriving Commons raised nothing at all: a hundred and four
-     * residents lived in eleven buildings, and the town only ever grew out of
-     * crisis. Below is what a population of this size warrants — farms, groves,
-     * workshops and burrows in proportion to the people — so growth comes from
-     * prosperity too, and the settlement visibly spreads as it succeeds.
-     */
-    const ambition = this.chooseGrowth();
-    if (ambition) return ambition;
-
-    if (diagnosis.tone !== "warning") return undefined;
-
-    const byNeed: Record<NeedKey, Exclude<BuildingType, "root-heart">> = {
-      shelter: "burrow-home",
-      food: "reed-farm",
-      safety: "lantern-grove",
-      belonging: "commons-market",
-    };
-    const wanted = byNeed[diagnosis.need];
-    /*
-     * Markets scale with the settlement rather than being capped at one or two.
-     * A single market served a hundred and ten residents, so everyone converged
-     * on the same handful of tiles no matter how well the rest was spread.
-     */
-    if (wanted === "commons-market") {
-      const allowed = Math.max(1, Math.ceil(this.state.residents.length / RESIDENTS_PER_MARKET));
-      if (this.countBuildings("commons-market") >= allowed) return undefined;
-    }
-    return wanted;
+    return chooseSelfBuild(this.buildSite);
   }
 
   /**
@@ -2292,100 +2234,7 @@ export class MosslightSimulation {
    * actually live — and the map ends up looking like somewhere that grew.
    */
   private findPlotFor(type: Exclude<BuildingType, "root-heart">): Vec2 | undefined {
-    const homes = this.buildingsByType.get("burrow-home") ?? [];
-    const anchor = this.buildingByType.get("root-heart")?.position
-      ?? { x: Math.floor(GRID_WIDTH / 2), y: Math.floor(GRID_HEIGHT / 2) };
-
-    let best: Vec2 | undefined;
-    let bestScore = Number.NEGATIVE_INFINITY;
-
-    for (let y = 1; y < GRID_HEIGHT - 1; y += 1) {
-      for (let x = 1; x < GRID_WIDTH - 1; x += 1) {
-        const cell = { x, y };
-        if (!this.isRevealed(cell) || this.isOccupied(cell)) continue;
-        const tile = this.state.grid[y]?.[x];
-        if (tile !== "grass") continue;
-
-        /*
-         * The settlement's reach grows with the settlement.
-         *
-         * This was a flat sixteen tiles from the Root, with a standing pull
-         * back toward the centre — so a Commons of thirty and a Commons of a
-         * hundred and thirty occupied the same small blob, and the town could
-         * never push outward however large it got. The cap now opens as the
-         * town grows, and the centre-pull relaxes with it, so a mature
-         * settlement spreads across the basin instead of stacking on itself.
-         */
-        const reach = manhattan(cell, anchor);
-        const reachLimit = Math.min(
-          MAX_SETTLEMENT_REACH,
-          BASE_SETTLEMENT_REACH + Math.floor(this.state.residents.length / 9) + this.state.buildings.length,
-        );
-        if (reach > reachLimit) continue;
-        // Big towns stop hugging the Root; small ones still gather round it.
-        const centrePull = 0.35 * Math.max(0.25, 1 - this.state.buildings.length / 18);
-        let score = -reach * centrePull;
-
-        // Never wall a building in against its neighbours.
-        const crowding = this.state.buildings.filter(
-          (building) => manhattan(building.position, cell) <= 2,
-        ).length;
-        score -= crowding * 3;
-
-        switch (type) {
-          case "burrow-home": {
-            // Just beyond the current edge of housing: close enough to belong,
-            // far enough that the town actually spreads.
-            const nearestHome = homes.length
-              ? Math.min(...homes.map((home) => manhattan(home.position, cell)))
-              : 4;
-            // A denser town wants its next burrow further out, not wedged in.
-            const spacing = homes.length >= 6 ? 5 : 4;
-            score -= Math.abs(nearestHome - spacing) * 1.4;
-            break;
-          }
-          case "reed-farm": {
-            score += this.isNearTile(cell, "water", 3) || this.isNearTile(cell, "wetland", 3) ? 8 : -6;
-            break;
-          }
-          case "lantern-grove": {
-            // The darkest ground people actually walk on.
-            score += (1 - this.lightCoverageAt(cell)) * 9;
-            score -= homes.length
-              ? Math.min(...homes.map((home) => manhattan(home.position, cell))) * 0.5
-              : 0;
-            break;
-          }
-          case "commons-market":
-          case "root-workshop":
-          default: {
-            // Central to where people live.
-            if (homes.length > 0) {
-              const average = homes.reduce((sum, home) => sum + manhattan(home.position, cell), 0) / homes.length;
-              score -= average * 0.8;
-            }
-            break;
-          }
-        }
-
-        if (score > bestScore) {
-          bestScore = score;
-          best = cell;
-        }
-      }
-    }
-    return best;
-  }
-
-  /** Whether a tile of a given kind sits within `radius` of a cell. */
-  private isNearTile(cell: Vec2, kind: TileKind, radius: number): boolean {
-    for (let dy = -radius; dy <= radius; dy += 1) {
-      for (let dx = -radius; dx <= radius; dx += 1) {
-        const tile = this.state.grid[cell.y + dy]?.[cell.x + dx];
-        if (tile === kind) return true;
-      }
-    }
-    return false;
+    return findPlotFor(this.buildSite, type);
   }
 
   private maybeWelcomeResident(): void {
@@ -2607,11 +2456,59 @@ export class MosslightSimulation {
       }
     }
     if (ring.length === 0) return building.position;
+
+    /*
+     * Kin stand together.
+     *
+     * Standing spots were hashed from the resident's own id, which spread a
+     * household evenly around a building — so a family of four converging on
+     * the same market arrived as four unrelated dots on four opposite sides.
+     * A resident with a close relation already bound for the same place takes
+     * the free spot nearest that relation instead, so households cross the
+     * board and arrive as a group.
+     */
     // A stable hash of the pairing, so the same resident keeps the same spot.
     let hash = 0;
     for (let index = 0; index < resident.id.length; index += 1) hash = (hash * 31 + resident.id.charCodeAt(index)) >>> 0;
     for (let index = 0; index < building.id.length; index += 1) hash = (hash * 31 + building.id.charCodeAt(index)) >>> 0;
+
+    const companion = this.companionAt(resident, building);
+    if (companion) {
+      /*
+       * Near the companion, but not on top of them. Taking the single closest
+       * cell put a whole household on one tile — the precise pile the dispersal
+       * pass existed to break up. Each of them takes a different cell from the
+       * handful nearest their relation, chosen by the same stable hash, so a
+       * family gathers in a cluster and still reads as four people.
+       */
+      const nearest = [...ring].sort((first, second) => manhattan(first, companion) - manhattan(second, companion));
+      const cluster = nearest.slice(0, Math.min(COMPANION_SPREAD, nearest.length));
+      return cluster[hash % cluster.length]!;
+    }
+
     return ring[hash % ring.length]!;
+  }
+
+  /**
+   * Where a close relation of this resident is already standing or heading, if
+   * that place is the same building. Undefined when they are travelling alone.
+   */
+  private companionAt(resident: Resident, building: Building): Vec2 | undefined {
+    for (const relationship of this.state.relationships) {
+      if (relationship.kind === "rivalry") continue;
+      if (relationship.strength < COMPANION_STRENGTH) continue;
+      if (relationship.aId !== resident.id && relationship.bId !== resident.id) continue;
+
+      const otherId = relationship.aId === resident.id ? relationship.bId : relationship.aId;
+      const other = this.state.residents.find((candidate) => candidate.id === otherId);
+      if (!other) continue;
+
+      // Only a companion if they are actually converging on the same place.
+      const spot = other.target ?? other.position;
+      if (manhattan(spot, building.position) > 2) continue;
+      return spot;
+    }
+    return undefined;
   }
 
   /** The closest building of a type to a point, if the settlement has one. */

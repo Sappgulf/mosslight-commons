@@ -325,7 +325,9 @@ export class WorldScene extends Phaser.Scene {
     // player watching an unexplained dark rectangle.
     this.load.on("progress", (value: number) => setBootProgress(value * 0.9, "Gathering the lanterns…"));
     this.load.on("loaderror", (file: { key?: string }) => {
-      // Missing art falls back to vector marks; a failed file must never stall boot.
+      // Missing art falls back to vector marks; a failed file must never stall
+      // boot, but it should be visible to whoever is looking.
+      // oxlint-disable-next-line no-console
       console.warn(`Texture missing: ${file.key ?? "unknown"}`);
     });
 

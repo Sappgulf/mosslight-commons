@@ -305,6 +305,8 @@ const paintHud = () => {
   try {
     hud.render();
   } catch (error) {
+    // A HUD that fails to paint must still say why; there is no other channel.
+    // oxlint-disable-next-line no-console
     console.error("HUD render failed", error);
   }
 };
@@ -321,6 +323,8 @@ const clock = new SimulationClock({
     try {
       worldScene?.renderNow();
     } catch (error) {
+      // Same: a dead board with a silent console is undebuggable.
+      // oxlint-disable-next-line no-console
       console.error("Scene render failed", error);
     }
     paintHud();
