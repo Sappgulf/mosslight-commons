@@ -30,6 +30,7 @@ import { DAYS_PER_SEASON, TICKS_PER_DAY } from "./constants";
 import { GRID_HEIGHT, GRID_WIDTH } from "./grid";
 import { applySpeciesMood } from "./mood";
 import { maybeAssignWant, updateWants } from "./systems/wants";
+import { FOUNDING_COOLDOWN, tickFactions } from "./factions";
 import { tickSpecies } from "./species";
 import {
   findWalkableNear,
@@ -1216,6 +1217,8 @@ export class MosslightSimulation {
       speciesStrain: { brambleback: 0, glowtail: 0, mireling: 0, cloudmoth: 0 },
       speciesEase: { brambleback: 0, glowtail: 0, mireling: 0, cloudmoth: 0 },
       speciesLost: [],
+      factions: [],
+      lastFoundingDay: -FOUNDING_COOLDOWN,
       peakPopulation: 0,
       longShadeCrisis: false,
       longShadeStartDay: 0,
@@ -1466,6 +1469,7 @@ export class MosslightSimulation {
       { name: "workplaces", dailyOnly: true, run: () => this.rebalanceWorkplaces() },
       { name: "kinship-homes", dailyOnly: true, run: () => this.rehomeByKinship() },
       { name: "species", dailyOnly: true, run: () => this.updateSpecies() },
+      { name: "factions", dailyOnly: true, run: () => this.updateFactions() },
       { name: "mastery", run: () => this.checkMastery() },
       { name: "desire-paths", dailyOnly: true, run: () => this.wearDesirePaths() },
       { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
@@ -2761,6 +2765,35 @@ export class MosslightSimulation {
     return best;
   }
 
+  /**
+   * A day of bloc politics, reported to the ledger.
+   *
+   * Only the events worth a line get one — a founding, a dissolution — because
+   * recruiting happens most days and would otherwise drown everything else the
+   * Commons has to say.
+   */
+  private updateFactions(): void {
+    const { founded, dissolved } = tickFactions(this.state, this.rng);
+
+    for (const faction of founded) {
+      const opening =
+        faction.kind === "cult"
+          ? `CULT · ${faction.name} has formed around ${faction.founderName}.`
+          : faction.kind === "lone"
+            ? `APART · ${faction.founderName} has walked out on the Commons.`
+            : `FACTION · ${faction.name} has organised behind ${faction.founderName}.`;
+      this.addMessage(`${opening} "${faction.creed}"`, faction.kind === "faction" ? "info" : "warning");
+      const founder = this.buildingIndexResident(faction.founderId);
+      if (founder) {
+        this.emit({ type: "want", position: founder.position, label: "◆", tone: "warning" });
+      }
+    }
+
+    for (const faction of dissolved) {
+      this.addMessage(`DISBANDED · ${faction.name} is no more.`, "info");
+    }
+  }
+
   private buildingIndexResident(id: string): Resident | undefined {
     return this.state.residents.find((resident) => resident.id === id);
   }
@@ -3044,7 +3077,7 @@ function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-export const SAVE_VERSION = 9;
+export const SAVE_VERSION = 10;
 
 export interface SavePayload {
   version: number;

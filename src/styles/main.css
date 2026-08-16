@@ -825,6 +825,43 @@ kbd {
 .tradition.is-blocked .tradition-head strong { text-decoration: line-through; }
 .tradition.is-blocked .tradition-cost { color: var(--muted); }
 
+/*
+ * Blocs. The three kinds are told apart by their accent before the label is
+ * read: civic teal for a faction, violet for a cult, amber for somebody who
+ * walked out. A dissolved bloc stays on the list, drained of colour.
+ */
+.faction-list { display: grid; gap: var(--s2); margin-top: var(--s2); }
+.faction-empty { color: var(--muted); font-size: 10px; line-height: 1.5; margin-top: var(--s2); }
+.faction {
+  align-items: start;
+  background: rgba(8, 21, 27, 0.5);
+  border: 1px solid rgba(99, 230, 212, 0.18);
+  border-radius: 10px;
+  display: grid;
+  gap: var(--s2);
+  grid-template-columns: 34px 1fr;
+  padding: var(--s2);
+}
+.faction[data-kind="cult"] { border-color: rgba(200, 169, 255, 0.34); }
+.faction[data-kind="lone"] { border-color: rgba(244, 184, 91, 0.32); }
+.faction.is-gone { filter: grayscale(1); opacity: 0.45; }
+.faction-mark { display: block; }
+.faction-mark svg { display: block; height: 34px; width: 34px; }
+.faction-body { display: grid; gap: 2px; min-width: 0; }
+.faction-head { align-items: baseline; display: flex; gap: var(--s2); justify-content: space-between; }
+.faction-head strong { font-size: 12px; font-weight: 600; }
+.faction-kind {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.faction[data-kind="cult"] .faction-kind { color: #c8a9ff; }
+.faction[data-kind="lone"] .faction-kind { color: var(--gold); }
+.faction-creed { color: var(--paper); font-size: 10px; font-style: italic; line-height: 1.45; }
+.faction-stat { color: var(--teal); font-size: 9px; font-weight: 700; letter-spacing: 0.04em; }
+.faction-history { color: var(--muted); font-size: 9px; line-height: 1.45; }
+
 /* A craft the resident has genuinely mastered reads gold, not muted. */
 .need-row.is-mastered b { color: var(--gold); font-weight: 800; }
 

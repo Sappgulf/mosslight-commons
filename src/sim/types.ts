@@ -200,6 +200,41 @@ export interface Resident {
   memories: Memory[];
 }
 
+/**
+ * The three shapes a bloc can take. Which one it is comes from *why* it formed:
+ * a faction organises around a species' interests, a cult around somebody who
+ * survived something, and a lone wolf is one resident who stopped answering to
+ * any of it.
+ */
+export type FactionKind = "faction" | "cult" | "lone";
+
+/** A dated line in a bloc's own account of itself. */
+export interface HistoryEntry {
+  day: number;
+  season: Season;
+  text: string;
+}
+
+export interface Faction {
+  id: string;
+  kind: FactionKind;
+  name: string;
+  /** Deterministic seed for the procedurally drawn emblem. */
+  emblem: number;
+  foundedDay: number;
+  founderId: string;
+  /** Kept separately so the history survives the founder leaving. */
+  founderName: string;
+  species: Species;
+  doctrine: string;
+  creed: string;
+  memberIds: string[];
+  /** How the bloc regards the Commons, 0-100. */
+  standing: number;
+  history: HistoryEntry[];
+  active: boolean;
+}
+
 export interface Building {
   id: string;
   type: BuildingType;
@@ -393,6 +428,10 @@ export interface WorldState {
   speciesEase: Record<Species, number>;
   /** Species that have left the Commons entirely, in the order they went. */
   speciesLost: Species[];
+  /** Every bloc the settlement has produced, dissolved ones included. */
+  factions: Faction[];
+  /** Day the last bloc formed, so a bad week cannot spawn a dozen. */
+  lastFoundingDay: number;
   /**
    * The largest the settlement has ever been.
    *

@@ -21,6 +21,7 @@ exports[`tick pipeline > runs stages in the recorded order 1`] = `
   "workplaces",
   "kinship-homes",
   "species",
+  "factions",
   "mastery",
   "desire-paths",
   "births",

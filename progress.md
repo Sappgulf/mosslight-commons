@@ -970,3 +970,63 @@ whether the site still wants hands.
   foot rather than on the fallback) and 20 Playwright tests pass.
 - Browser-driven on a live game: a scout walked 12,9 → 27,12, arrived, and came
   home 27,14 → 13,9; a raising drew a crew and completed to level 2.
+
+## Bloc pass — factions, cults, and people who walk out
+
+The settlement had one social structure: everyone, equally, in one
+undifferentiated population, with a council that spoke for species rather than
+for anybody's convictions. Nothing could organise, split off, or hold a belief
+the Commons disagreed with, so a hundred residents were a hundred copies of the
+same civic attitude.
+
+- [x] **`src/sim/factions.ts`.** Three shapes, and which one forms is decided
+      by *why* rather than by a roll. A **faction** organises around a species'
+      interests when harmony is thin and enough of them are unhappy to make a
+      bloc. A **cult** forms around somebody carrying a hard memory — the
+      memory system from the previous pass is what makes them possible — and
+      speaks to whoever the Commons is failing. A **lone wolf** is one resilient
+      resident with nothing left to belong to, who simply goes.
+- [x] **Doctrines, not flavour.** Each bloc wants something the Commons can
+      actually deliver — provision, shelter, light, clean water, memory — and
+      its standing follows whether that thing is being delivered.
+- [x] **Every bloc keeps its own history**, written as things happen to it: its
+      founding and founder, who joined, when standing broke either way, and its
+      dissolution. A run's politics can be read back afterwards.
+- [x] **Procedural emblems** in `src/ui/emblem.ts`: deterministic SVG seeded per
+      bloc, so the same bloc draws the same sigil across sessions and saves.
+      Shape family follows kind — a civic polygon, a cult's star, a lone wolf's
+      broken open ring — so the three read apart before the label does.
+- [x] **A BLOCS panel** listing each with its mark, creed, membership, standing
+      and latest history line. Dissolved blocs stay on the list, greyed: a
+      Commons that drove a cult to collapse should still have to look at it.
+
+### The first cut was churn, not politics
+
+It produced **eight factions in forty-six days**, most of them one person, a new
+name in the ledger every week — and no cults or lone wolves at all, because the
+faction branch always fired first. That directly contradicted the comment
+sitting above it about blocs being what a run is remembered for.
+
+Rebalanced: the founding cooldown went 6 → 22 days, at most three organised
+blocs exist at once, a faction needs a quorum of three willing members of a
+species that has no bloc already, and a cult needs somebody scarred *plus*
+people for it to speak to. Lone wolves were moved off the shared cooldown
+entirely — one person walking out is not a bloc organising — which is why they
+could never appear before.
+
+### On assets
+
+The emblems are genuinely generated rather than placeholder. A geometric sigil
+is what a bloc's mark should be, and there is no sense in which hand-drawn art
+is being stood in for. This is unlike the resident animation frames, which
+remain explicit placeholders.
+
+### Verification
+
+- 224 Vitest tests (15 new, covering each formation path, the cap, the
+  cooldown, one-bloc-per-species, dissolution, bounded history, standing
+  tracking satisfaction, and that no resident is ever in two blocs) and 20
+  Playwright tests pass.
+- Browser: all three kinds render with distinct emblems and colour families,
+  and a dissolved bloc greys out. Confirmed on screen.
+- `SAVE_VERSION` is 10.

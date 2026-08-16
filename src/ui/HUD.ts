@@ -19,6 +19,7 @@ import { isActivationOnControl, isTypingTarget, type Binding, type BindingGroup,
 import { masteryTitle, tierFor } from "../sim/mastery";
 import { blockedBy, canAfford, isAvailable, missingFor, TRADITION_DEFINITIONS, TRADITION_ORDER } from "../sim/traditions";
 import { testimony } from "../sim/memory";
+import { emblemSvg } from "./emblem";
 import type { TraditionKey } from "../sim/types";
 
 const shortcutGroups: BindingGroup[] = ["Time", "View", "World", "Session"];
@@ -274,6 +275,7 @@ export class HUD {
     this.renderLedger();
     this.renderPetitions();
     this.renderTraditions();
+    this.renderFactions();
     this.renderCouncil();
 
     const activeExpedition = state.expeditions.find((expedition) => expedition.status === "active");
@@ -886,6 +888,85 @@ export class HUD {
   }
 
   /** Fills the traditions panel: what the Commons keeps, and what it could. */
+  /**
+   * The settlement's blocs, each with its mark, its creed, and its own account
+   * of itself.
+   *
+   * Dissolved blocs stay on the list, greyed: a Commons that drove a cult to
+   * collapse should still have to look at the fact that it existed.
+   */
+  private renderFactions(): void {
+    const list = this.root.querySelector<HTMLElement>("[data-factions]");
+    if (!list) return;
+    const factions = this.simulation.state.factions ?? [];
+    const active = factions.filter((faction) => faction.active);
+    this.setText("[data-faction-count]", active.length === 0 ? "NONE" : `${active.length} ACTIVE`);
+
+    if (factions.length === 0) {
+      list.replaceChildren();
+      const empty = document.createElement("p");
+      empty.className = "faction-empty";
+      empty.textContent = "No one has organised. The Commons speaks with one voice.";
+      list.append(empty);
+      return;
+    }
+
+    // Active first, then most recently founded.
+    const ordered = [...factions].sort((first, second) => {
+      if (first.active !== second.active) return first.active ? -1 : 1;
+      return second.foundedDay - first.foundedDay;
+    });
+
+    const rows = ordered.map((faction) => {
+      const row = document.createElement("article");
+      row.className = "faction";
+      row.dataset.kind = faction.kind;
+      row.classList.toggle("is-gone", !faction.active);
+
+      const mark = document.createElement("span");
+      mark.className = "faction-mark";
+      mark.innerHTML = emblemSvg(faction.emblem, faction.kind);
+
+      const body = document.createElement("div");
+      body.className = "faction-body";
+
+      const head = document.createElement("div");
+      head.className = "faction-head";
+      const name = document.createElement("strong");
+      name.textContent = faction.name;
+      const kind = document.createElement("span");
+      kind.className = "faction-kind";
+      kind.textContent = faction.active
+        ? faction.kind === "lone" ? "APART" : faction.kind.toUpperCase()
+        : "GONE";
+      head.append(name, kind);
+
+      const creed = document.createElement("small");
+      creed.className = "faction-creed";
+      creed.textContent = `“${faction.creed}”`;
+
+      const stat = document.createElement("small");
+      stat.className = "faction-stat";
+      stat.textContent = faction.active
+        ? `${faction.memberIds.length} member${faction.memberIds.length === 1 ? "" : "s"} · standing ${Math.round(faction.standing)} · since day ${faction.foundedDay}`
+        : `founded day ${faction.foundedDay} · dissolved`;
+
+      const latest = faction.history.at(-1);
+      body.append(head, creed, stat);
+      if (latest) {
+        const line = document.createElement("small");
+        line.className = "faction-history";
+        line.textContent = `Day ${latest.day}: ${latest.text}`;
+        body.append(line);
+      }
+
+      row.append(mark, body);
+      return row;
+    });
+
+    list.replaceChildren(...rows);
+  }
+
   private renderTraditions(): void {
     const list = this.root.querySelector<HTMLElement>("[data-traditions]");
     if (!list) return;
@@ -1543,6 +1624,10 @@ export class HUD {
         <div class="field-section traditions-section">
           <div class="objective-heading"><span>TRADITIONS</span><span>KEPT FOR GOOD</span></div>
           <div class="tradition-list" data-traditions></div>
+        </div>
+        <div class="field-section factions-section">
+          <div class="objective-heading"><span>BLOCS</span><span data-faction-count>NONE</span></div>
+          <div class="faction-list" data-factions></div>
         </div>
         <div class="field-section crafting-section">
           <div class="objective-heading"><span>CRAFTING</span><span data-crafting-status>WORKSHOP IDLE</span></div>
