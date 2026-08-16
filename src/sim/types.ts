@@ -198,6 +198,16 @@ export interface Resident {
    * does not accumulate a save-bloating history.
    */
   memories: Memory[];
+  /**
+   * Fractional steps banked toward the next tile.
+   *
+   * Everyone used to move exactly one tile per tick, so a sprout, a laden
+   * hauler and an elder all crossed the basin at identical speed and the whole
+   * settlement slid about in lockstep. Pace is per-resident now, and the
+   * remainder carries between ticks so a slow walker moves smoothly rather
+   * than stuttering every other tick.
+   */
+  moveCredit: number;
 }
 
 /**

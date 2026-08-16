@@ -1453,6 +1453,7 @@ export class MosslightSimulation {
       masteryTier: 0,
       taught: 0,
       memories: [],
+      moveCredit: 0,
     };
   }
 
@@ -1920,6 +1921,15 @@ export class MosslightSimulation {
         explanation = "A new path appeared on the edge of the neighborhood.";
       }
 
+      /*
+       * Somebody already busy is left alone.
+       *
+       * Residents re-decided their goal on every single tick, so a resident who
+       * reached the market was liable to be reassigned to their bench on the
+       * very next one — which is why a hundred of them shimmered in place
+       * instead of going somewhere and doing something. Arriving commits them
+       * for a while, and only real distress interrupts it.
+       */
       resident.goal = goal;
       resident.lastDecisionExplanation = explanation;
       if (target) this.setResidentTarget(resident, target);

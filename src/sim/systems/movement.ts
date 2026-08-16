@@ -1,6 +1,6 @@
 import { GRID_HEIGHT, GRID_WIDTH } from "../grid";
 import { findPath, isWalkable, packCell, type PathContext } from "../pathfinding";
-import type { Resident, Vec2, WorldState } from "../types";
+import type { LifeStage, Resident, ResidentGoal, Species, Vec2, WorldState } from "../types";
 
 const sameCell = (a: Vec2, b: Vec2) => a.x === b.x && a.y === b.y;
 
@@ -103,6 +103,47 @@ function takeStep(terrain: Terrain, resident: Resident): void {
 }
 
 /**
+ * How fast each kind of creature walks, relative to a plain adult.
+ *
+ * These are the species' own descriptions made literal: Glowtails are traders
+ * and explorers, Mirelings are patient growers, Cloudmoths drift.
+ */
+const SPECIES_PACE: Record<Species, number> = {
+  brambleback: 0.95,
+  glowtail: 1.15,
+  mireling: 0.82,
+  cloudmoth: 1.2,
+};
+
+/** Young legs are quick and old legs are not. */
+const STAGE_PACE: Record<LifeStage, number> = { sprout: 1.18, adult: 1, elder: 0.72 };
+
+/** Somebody heading out to explore moves differently from somebody going to bed. */
+const GOAL_PACE: Record<ResidentGoal, number> = {
+  explore: 1.12,
+  forage: 1,
+  work: 0.95,
+  socialize: 0.9,
+  rest: 0.85,
+};
+
+/**
+ * Tiles per tick for one resident.
+ *
+ * Everyone used to move exactly one tile per tick — a sprout, an elder and a
+ * scout all crossed the basin at the same speed, and a hundred residents slid
+ * about in lockstep, which is most of why the board looked mechanical however
+ * much detail sat behind it.
+ */
+export function paceFor(resident: Resident): number {
+  return (
+    SPECIES_PACE[resident.species] *
+    STAGE_PACE[resident.stage] *
+    (GOAL_PACE[resident.goal] ?? 1)
+  );
+}
+
+/**
  * Advances a resident one step, or two when they are travelling on a packed
  * road.
  *
@@ -112,9 +153,24 @@ function takeStep(terrain: Terrain, resident: Resident): void {
  * makes spending food and warmth on one worth doing.
  */
 export function stepAlongPath(terrain: Terrain, resident: Resident): void {
-  takeStep(terrain, resident);
-  const tile = terrain.state.grid[resident.position.y]?.[resident.position.x];
-  if (tile === "path") takeStep(terrain, resident);
+  /*
+   * Pace is banked rather than rounded. A resident who moves at 0.82 tiles a
+   * tick takes a step on most ticks and pauses on the others, which reads as a
+   * slower walk instead of a stutter, and the remainder never gets lost.
+   */
+  resident.moveCredit = (resident.moveCredit ?? 0) + paceFor(resident);
+  let steps = 0;
+  while (resident.moveCredit >= 1 && steps < 3) {
+    resident.moveCredit -= 1;
+    takeStep(terrain, resident);
+    steps += 1;
+    // A packed road is still worth walking: it buys an extra tile outright.
+    const tile = terrain.state.grid[resident.position.y]?.[resident.position.x];
+    if (tile === "path" && steps < 3) {
+      takeStep(terrain, resident);
+      steps += 1;
+    }
+  }
 }
 
 /** The nearest revealed, walkable cell to a position — or the position itself. */

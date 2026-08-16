@@ -1123,3 +1123,54 @@ counts on names.
   500-tick digest now shows 13 buildings where it showed 8.
 - Browser: at day 171 the basin holds 110 residents across 25 buildings, spread
   over the board rather than banked in one strip.
+
+## Pace pass — and a feature withheld
+
+Player feedback: "it's the same movement." It was. Every resident moved exactly
+one tile per tick, so a sprout, an elder and a scout crossed the basin at
+identical speed and a hundred residents slid about in lockstep — which is most
+of why the board read as mechanical however much simulation sat behind it.
+
+- [x] **Pace is per-resident.** Species (Mirelings patient, Glowtails and
+      Cloudmoths quick), life stage (young legs quick, old legs not) and what
+      they are currently doing all multiply together.
+- [x] **The remainder is banked.** A resident who moves at 0.82 tiles a tick
+      steps on most ticks and pauses on the others, which reads as a slower
+      walk rather than a stutter, and no fraction is ever lost.
+- [x] Roads still buy an outright extra tile, so packing earth stays worth it.
+
+Measured across a 900-tick settlement: **23 distinct paces, the fastest 2.58×
+the slowest.** It was 1.00× for everybody before.
+
+### Dwell: built, measured, and removed
+
+The other half of the plan was for residents to arrive somewhere and stay a
+while doing the thing, instead of re-deciding their goal every single tick. It
+was built, and it worked — but it cost the settlement's throughput badly enough
+that **the ledger could no longer be finished**: chapters stopped at 2 of 5.
+
+Tuning it down did not rescue it. Disabling dwell alone, with pace left in,
+restored progression immediately — so the cause was not in doubt. Even a
+two-tick dwell failed. The progression test's own comment warns that its tick
+budget has already been raised twice for similar reasons and that a third rise
+should be treated as a symptom rather than a fix, which is exactly right, so
+the budget was left alone and the feature was removed instead.
+
+What that says, and it is worth recording: the pacing budget is now the binding
+constraint on any change that makes residents act more deliberately. Dwelling
+is the right idea and cannot be afforded until the ledger's pacing has room in
+it — that is the thing to fix first, not the dwell.
+
+An interim bug worth noting, since it nearly hid the pacing problem: while a
+resident was dwelling their committed goal and the freshly computed one
+disagreed, and the arrival effects were testing the fresh one. A resident stood
+at the market being checked against their bench, so they never ate. Settlement
+wellbeing fell 77 → 63 before that was found.
+
+### Verification
+
+- 236 Vitest tests (6 new, pinning that the young outpace the old, that each
+  species has its own gait, that goal changes pace, that nobody stalls, that a
+  real settlement spreads across many speeds, and that fractional steps are
+  banked) and 20 Playwright tests pass.
+- One snapshot updated on purpose.
