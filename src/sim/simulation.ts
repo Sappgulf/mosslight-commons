@@ -26,10 +26,32 @@ import {
 } from "./civic";
 import { beginLongShade, crisisBanner, tickLongShade } from "./crisis";
 import { rememberLongShade } from "./memory";
+import { DAYS_PER_SEASON, TICKS_PER_DAY } from "./constants";
+import { GRID_HEIGHT, GRID_WIDTH } from "./grid";
+import { applySpeciesMood } from "./mood";
+import { maybeAssignWant, updateWants } from "./systems/wants";
 import { tickSpecies } from "./species";
+import {
+  findWalkableNear,
+  invalidateAllPaths,
+  isInside,
+  isRevealed,
+  setResidentTarget,
+  stepAlongPath,
+  type Terrain,
+} from "./systems/movement";
+import {
+  calculateMetrics,
+  housingMessageBand,
+  resourceWarningLevel,
+  checkHousingPressure,
+  checkResourceWarnings,
+  createWarningBands,
+  housingCapacityOf,
+  mostPressingNeed,
+} from "./systems/metrics";
 import { annotateForecast, calculateLocalForecast, compareForecasts } from "./forecast";
-import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
-import { describeWant, isWantSatisfied, unmetWantKinds } from "./wants";
+import { isWalkable, packCell } from "./pathfinding";
 import { bestCraft, inheritedSkills, MASTERY_TIERS, speciesAffinity, tierFor } from "./mastery";
 import { canAfford, hasTradition, isAvailable, TRADITION_DEFINITIONS } from "./traditions";
 import type { SimContext } from "./systems/context";
@@ -64,36 +86,24 @@ import type {
   RelationshipKind,
   ResourceKey,
   Season,
-  SettlementDiagnosis,
   TraditionKey,
   SettlementMetrics,
   SettlementStatus,
   Species,
   TileKind,
   Vec2,
-  WantKind,
   WorldState,
 } from "./types";
 
-export const GRID_WIDTH = 32;
-export const GRID_HEIGHT = 24;
-const MAX_RESOURCE = 100;
+// Re-exported so existing importers of `simulation` keep working; the values
+// themselves live in `grid.ts` so systems can read them without a cycle.
+export { GRID_HEIGHT, GRID_WIDTH } from "./grid";
 /** Storage every settlement has before it builds anything to hold more. */
 const BASE_STORAGE = 38;
 
 /** How much each building adds to what the Commons can hold. */
-const STORAGE_YIELD: Partial<Record<BuildingType, Partial<Record<ResourceKey, number>>>> = {
-  "root-heart": { food: 8, water: 8, warmth: 8, light: 8 },
-  "commons-market": { food: 26, water: 14 },
-  "reed-farm": { food: 12, water: 20 },
-  "burrow-home": { warmth: 14 },
-  "lantern-grove": { light: 26 },
-  "root-workshop": { warmth: 10, light: 10 },
-  "sky-walk": { light: 18, warmth: 6 },
-};
 const START_DAY = 8;
-const TICKS_PER_DAY = 12;
-const DAYS_PER_SEASON = 7;
+
 /*
  * A ceiling on the basin, not on the game. It was 60, which the settlement
  * reached by day 74 and then sat at for the rest of the run with housing no
@@ -187,14 +197,6 @@ const WANT_INTERVAL = TICKS_PER_DAY;
 const WANT_PATIENCE = 6;
 
 /** What answering a request pays out. */
-const WANT_REWARDS: Record<WantKind, { item: ItemKey; amount: number }> = {
-  lantern: { item: "moonwater", amount: 2 },
-  neighbour: { item: "seed-pod", amount: 3 },
-  market: { item: "seed-pod", amount: 2 },
-  quiet: { item: "resin", amount: 2 },
-  company: { item: "resin", amount: 1 },
-  sky: { item: "moonwater", amount: 2 },
-};
 
 const ZONE_BOUNDS: Record<MapZoneKey, { xMin: number; xMax: number; yMin: number; yMax: number }> = {
   "sunken-reach": { xMin: 24, xMax: 31, yMin: 13, yMax: 20 },
@@ -318,13 +320,12 @@ export class MosslightSimulation {
   private nextProposalId = 1;
   private localForecast: Forecast | undefined;
   private researchSignals: TorxThrmlForecastResponse | null = null;
-  private resourceWarningLevels: Record<ResourceKey, number> = {
-    food: 0,
-    water: 0,
-    warmth: 0,
-    light: 0,
-  };
-  private housingMessageBand = 0;
+  /**
+   * Edge-trigger state for the store and housing warnings: which band each
+   * reading was last announced at, so the Commons speaks when a reading crosses
+   * a threshold rather than every tick it sits past one.
+   */
+  private warningBands = createWarningBands();
 
   /**
    * Metrics are expensive relative to how often they actually change, so they
@@ -375,6 +376,7 @@ export class MosslightSimulation {
     hasPolicy: (kind) => owner.hasPolicy(kind),
     averageWaterQuality: () => owner.averageWaterQuality(),
     buildingOfType: (type) => owner.buildingByType.get(type),
+    buildingById: (id) => owner.buildingIndex.get(id),
   }))(this);
 
   constructor(seed = 20260811) {
@@ -383,9 +385,9 @@ export class MosslightSimulation {
     this.reindexBuildings();
     this.localForecast = this.state.forecast;
     for (const resource of Object.keys(this.state.resources) as ResourceKey[]) {
-      this.resourceWarningLevels[resource] = this.getResourceWarningLevel(this.state.resources[resource]);
+      this.warningBands.resources[resource] = resourceWarningLevel(this.state.resources[resource]);
     }
-    this.housingMessageBand = this.getHousingMessageBand(this.state.metrics.housingPressure);
+    this.warningBands.housing = housingMessageBand(this.state.metrics.housingPressure);
   }
 
   /** Subscribes to world events. Returns an unsubscribe function. */
@@ -1041,8 +1043,8 @@ export class MosslightSimulation {
       nextResidentId: this.nextResidentId,
       nextBuildingId: this.nextBuildingId,
       nextProposalId: this.nextProposalId,
-      resourceWarningLevels: this.resourceWarningLevels,
-      housingMessageBand: this.housingMessageBand,
+      resourceWarningLevels: this.warningBands.resources,
+      housingMessageBand: this.warningBands.housing,
       state: this.state,
     });
   }
@@ -1053,8 +1055,7 @@ export class MosslightSimulation {
     this.nextResidentId = payload.nextResidentId;
     this.nextBuildingId = payload.nextBuildingId;
     this.nextProposalId = payload.nextProposalId;
-    this.resourceWarningLevels = payload.resourceWarningLevels;
-    this.housingMessageBand = payload.housingMessageBand;
+    this.warningBands = { resources: payload.resourceWarningLevels, housing: payload.housingMessageBand };
     this.state = normalizeWorld(payload.state, payload.state.grid);
     this.reindexBuildings();
     this.metricsDirty = true;
@@ -2285,432 +2286,58 @@ export class MosslightSimulation {
    * become forty neighbours, one of whom would like a lantern near her burrow.
    */
   private maybeAssignWant(): void {
-    if (this.state.tick % WANT_INTERVAL !== 0) return;
-    const candidates = this.state.residents.filter((resident) => !resident.want && resident.stage !== "sprout");
-    if (candidates.length === 0) return;
-
-    const resident = this.rng.pick(candidates);
-    const kind = this.pickWantFor(resident);
-    if (!kind) return;
-
-    const home = this.buildingIndex.get(resident.homeId);
-    const where = home ? `plot ${home.position.x + 1}:${home.position.y + 1}` : "the Commons";
-    const description = describeWant(resident, kind, where);
-
-    const reward = WANT_REWARDS[kind];
-    resident.want = {
-      kind,
-      description,
-      createdDay: this.state.day,
-      deadlineDay: this.state.day + WANT_PATIENCE,
-      rewardItem: reward.item,
-      rewardAmount: reward.amount,
-      fulfilled: false,
-    };
-    this.addMessage(
-      `REQUEST · ${description} Answer within ${WANT_PATIENCE} days for ${reward.amount} ${ITEM_DEFINITIONS[reward.item].label}.`,
-      "info",
-    );
+    maybeAssignWant(this.context);
   }
 
-  /** Only offer a want the resident does not already have satisfied. */
-  private pickWantFor(resident: Resident): WantKind | null {
-    const home = this.buildingIndex.get(resident.homeId);
-    const options = unmetWantKinds(resident, this.state.buildings, this.state.relationships, home);
-    return options.length === 0 ? null : this.rng.pick(options);
-  }
-
-  private residentWantSatisfied(resident: Resident, kind: WantKind): boolean {
-    return isWantSatisfied(
-      resident,
-      kind,
-      this.state.buildings,
-      this.state.relationships,
-      this.buildingIndex.get(resident.homeId),
-    );
-  }
-
-  /**
-   * Resolves outstanding wants. Meeting one is a small, visible reward; letting
-   * one sit unanswered slowly costs belonging, which is the pressure that makes
-   * the request worth reading in the first place.
-   */
   private updateWants(): void {
-    for (const resident of this.state.residents) {
-      const want = resident.want;
-      if (!want || want.fulfilled) continue;
-
-      if (this.residentWantSatisfied(resident, want.kind)) {
-        want.fulfilled = true;
-        resident.needs.belonging = clamp(resident.needs.belonging + 18);
-        this.state.items[want.rewardItem] += want.rewardAmount;
-        this.state.wantsMet += 1;
-        // A kept promise is remembered by the whole species, not just the asker.
-        this.applySpeciesMood(resident.species, 4, 0);
-        this.metricsDirty = true;
-        this.addMessage(
-          `REQUEST MET · ${resident.name} got their wish · +${want.rewardAmount} ${ITEM_DEFINITIONS[want.rewardItem].label}.`,
-          "good",
-        );
-        this.emit({ type: "want", position: resident.position, label: "♥", tone: "good" });
-        // Clear it so the resident can want something else later.
-        resident.want = undefined;
-        continue;
-      }
-
-      /*
-       * A lapsed request is the cost of ignoring the ledger. Wants used to sit
-       * open forever for a fraction of a belonging point a tick — twenty-six of
-       * them were outstanding by day 35 with nothing to show for it either way.
-       */
-      if (this.state.day > want.deadlineDay) {
-        resident.needs.belonging = clamp(resident.needs.belonging - 14);
-        resident.distress += 4;
-        this.state.wantsMissed += 1;
-        this.applySpeciesMood(resident.species, -5, 0);
-        this.state.metrics.harmony = clamp(this.state.metrics.harmony - 3);
-        this.metricsDirty = true;
-        this.addMessage(
-          `REQUEST LAPSED · ${resident.name} waited ${WANT_PATIENCE} days and gave up asking.`,
-          "warning",
-        );
-        this.emit({ type: "want", position: resident.position, label: "✕", tone: "warning" });
-        resident.want = undefined;
-      }
-    }
+    updateWants(this.context);
   }
 
   // --- Metrics ------------------------------------------------------------
 
   private updateMetrics(): void {
     if (!this.metricsDirty) return;
-    this.state.metrics = this.calculateMetrics(this.state);
+    this.state.metrics = calculateMetrics(this.state);
     this.metricsDirty = false;
   }
 
   private calculateMetrics(state: WorldState): SettlementMetrics {
-    const population = state.residents.length;
-    const housingCapacity = this.getHousingCapacity(state.buildings);
-    const housingPressure = population / Math.max(1, housingCapacity);
-    let needsTotal = 0;
-    const speciesCounts: Record<Species, number> = { brambleback: 0, glowtail: 0, mireling: 0, cloudmoth: 0 };
-    for (const resident of state.residents) {
-      needsTotal += (resident.needs.shelter + resident.needs.food + resident.needs.safety + resident.needs.belonging) / 4;
-      speciesCounts[resident.species] += 1;
-    }
-    const averageWellbeing = needsTotal / Math.max(1, population);
-    const resourceSecurity = (state.resources.food + state.resources.water + state.resources.warmth + state.resources.light) / 4;
-    const largestSpeciesShare = Math.max(speciesCounts.brambleback, speciesCounts.glowtail, speciesCounts.mireling, speciesCounts.cloudmoth, 0) / Math.max(1, population);
-    const speciesMix = clamp(1 - largestSpeciesShare, 0, 1);
-    const housingHealth = clamp(1 - Math.max(0, housingPressure - 0.75) / 0.5, 0, 1);
-    const marketBonus = this.countBuildings("commons-market", state) > 0 ? 5 : 0;
-    const districtBonus = state.districtFocus === "market" ? 3 : 0;
-    const relationshipBalance = state.relationships.reduce((sum, relationship) => {
-      const weight = relationship.kind === "rivalry" ? -1 : relationship.kind === "family" ? 1.3 : 1;
-      return sum + weight * relationship.strength;
-    }, 0) / Math.max(1, state.relationships.length);
-    const relationshipBonus = clamp(relationshipBalance / 25, -4, 4);
-    const harmony = clamp(
-      averageWellbeing * 0.55
-      + resourceSecurity * 0.15
-      + speciesMix * 100 * 0.15
-      + housingHealth * 100 * 0.1
-      + marketBonus
-      + districtBonus
-      + relationshipBonus,
-    );
-
-    return {
-      population,
-      housingCapacity,
-      housingAvailable: housingCapacity - population,
-      housingPressure,
-      averageWellbeing,
-      harmony,
-      resourceSecurity,
-      activeBuildings: state.buildings.length,
-      storage: this.calculateStorage(state),
-      diagnosis: this.diagnose(state, housingPressure),
-    };
-  }
-
-  /**
-   * How much of each resource the settlement can hold.
-   *
-   * Everything used to cap at a flat 100, which food reached inside twenty days
-   * and never left — a solved problem for the rest of the run, and no reason to
-   * build anything that touched it. Capacity comes from buildings now, so a
-   * surplus needs somewhere to go and growth has to be built for.
-   */
-  private calculateStorage(state: WorldState): Record<ResourceKey, number> {
-    const storage: Record<ResourceKey, number> = {
-      food: BASE_STORAGE,
-      water: BASE_STORAGE,
-      warmth: BASE_STORAGE,
-      light: BASE_STORAGE,
-    };
-    for (const building of state.buildings) {
-      const yields = STORAGE_YIELD[building.type];
-      if (!yields) continue;
-      const multiplier = OUTPUT_MULTIPLIER[building.level] ?? 1;
-      for (const [resource, amount] of Object.entries(yields) as Array<[ResourceKey, number]>) {
-        storage[resource] += amount * multiplier;
-      }
-    }
-    if (hasTradition(state, "open-table")) {
-      storage.food *= 1.25;
-      storage.water *= 1.25;
-    }
-    for (const resource of Object.keys(storage) as ResourceKey[]) {
-      storage[resource] = Math.min(MAX_RESOURCE, Math.round(storage[resource]));
-    }
-    return storage;
-  }
-
-  /**
-   * Names the need in the worst shape and what would lift it. Without this the
-   * settlement declined silently behind four full bars, and a player had no way
-   * to tell what was going wrong, let alone what to do about it.
-   */
-  private diagnose(state: WorldState, housingPressure: number): SettlementDiagnosis {
-    const population = state.residents.length;
-    if (population === 0) {
-      return {
-        need: "belonging",
-        level: 0,
-        cause: "The basin is empty.",
-        advice: "Begin again, or load a save from before the quiet.",
-        tone: "warning",
-      };
-    }
-
-    const totals: Record<NeedKey, number> = { food: 0, shelter: 0, safety: 0, belonging: 0 };
-    for (const resident of state.residents) {
-      totals.food += resident.needs.food;
-      totals.shelter += resident.needs.shelter;
-      totals.safety += resident.needs.safety;
-      totals.belonging += resident.needs.belonging;
-    }
-    const averages = Object.fromEntries(
-      (Object.keys(totals) as NeedKey[]).map((need) => [need, totals[need] / population]),
-    ) as Record<NeedKey, number>;
-
-    const need = (Object.keys(averages) as NeedKey[]).reduce((worst, candidate) =>
-      averages[candidate] < averages[worst] ? candidate : worst,
-    );
-    const level = averages[need];
-
-    /*
-     * Stores run dry before needs do, so a shortage is the earlier and more
-     * actionable warning. Reporting "everyone is fine" while the lanterns have
-     * a fifth of their fuel left is how a settlement gets to the edge without
-     * the player being told anything was wrong.
-     */
-    const storage = state.metrics.storage;
-    const short = (Object.keys(state.resources) as ResourceKey[])
-      .map((resource) => ({ resource, ratio: state.resources[resource] / Math.max(1, storage[resource]) }))
-      .filter((entry) => entry.ratio < 0.2)
-      .sort((a, b) => a.ratio - b.ratio)[0];
-
-    if (short) {
-      const shortfall: Record<ResourceKey, { need: NeedKey; cause: string; advice: string }> = {
-        food: { need: "food", cause: "The granary is nearly out and meals are getting thin.", advice: "Raise a Reed Farm, or upgrade one, before the stalls empty." },
-        water: { need: "food", cause: "The cistern is nearly dry.", advice: "Raise a Reed Farm near clean water to refill the basin stores." },
-        warmth: { need: "shelter", cause: "There is barely any fuel left for the hearths.", advice: "Raise or upgrade a Burrow Home, and keep resin coming from the workshop." },
-        light: { need: "safety", cause: "The lanterns are nearly out of fuel and the night routes are going dark.", advice: "Raise a Lantern Grove, or craft a Glow Kit to recharge the routes." },
-      };
-      const entry = shortfall[short.resource];
-      return { need: entry.need, level: averages[entry.need], cause: entry.cause, advice: entry.advice, tone: "warning" };
-    }
-
-    if (level > 62) {
-      return {
-        need,
-        level,
-        cause: "Everyone is getting what they need.",
-        advice: "Room to grow: raise a home, or push into the unmapped basin.",
-        tone: "good",
-      };
-    }
-
-    const crowded = housingPressure > 0.95;
-    const reasons: Record<NeedKey, { cause: string; advice: string }> = {
-      food: {
-        cause: state.resources.food < 12
-          ? "The granary is empty, so trips to the market come back with nothing."
-          : "More mouths are arriving at the stalls than the farms are filling them.",
-        advice: "Raise a Reed Farm, or a Commons Market so food reaches the far neighborhoods.",
-      },
-      shelter: {
-        cause: crowded
-          ? "Homes are over capacity and nobody is resting properly."
-          : "Hearths are burning more warmth than the Commons is making.",
-        advice: crowded
-          ? "Raise a Burrow Home — housing is the binding constraint right now."
-          : "Raise or upgrade a Burrow Home to bring warmth back up.",
-      },
-      safety: {
-        cause: state.resources.light < 12
-          ? "The lanterns have no fuel and the routes go dark after dusk."
-          : "Too much of the settlement sits outside the lantern light.",
-        advice: "Raise a Lantern Grove near the outer homes, or upgrade the one you have.",
-      },
-      belonging: {
-        cause: crowded
-          ? "Crowding is wearing on everyone, and requests are going unanswered."
-          : "Neighbors are not meeting often enough, and requests are going unanswered.",
-        advice: "Answer an open request, and keep a Commons Market within easy walking distance.",
-      },
-    };
-
-    return { need, level, ...reasons[need], tone: "warning" };
+    return calculateMetrics(state);
   }
 
   private checkResourceWarnings(): void {
-    const actions: Record<ResourceKey, string> = {
-      food: "Add a Reed Farm before the market runs dry.",
-      water: "Add a Reed Farm to filter and replenish the basin.",
-      warmth: "Build a Burrow Home or reduce the strain on existing shelter.",
-      light: "Build a Lantern Grove before night routes become unsafe.",
-    };
-
-    for (const resource of Object.keys(this.state.resources) as ResourceKey[]) {
-      const value = this.state.resources[resource];
-      const previousLevel = this.resourceWarningLevels[resource];
-      const nextLevel = this.getResourceWarningLevel(value);
-      if (nextLevel > previousLevel) {
-        this.addMessage(
-          `ALERT · ${this.formatResource(resource)} stores are ${nextLevel === 2 ? "critical" : "low"} at ${Math.round(value)}. ${actions[resource]}`,
-          "warning",
-        );
-      } else if (previousLevel > 0 && nextLevel === 0) {
-        this.addMessage(`RECOVERY · ${this.formatResource(resource)} stores are stable at ${Math.round(value)}.`, "good");
-      }
-      this.resourceWarningLevels[resource] = nextLevel;
-    }
+    checkResourceWarnings(this.state, this.warningBands, (text, tone) => this.addMessage(text, tone));
   }
 
   private checkHousingPressure(): void {
-    const nextBand = this.getHousingMessageBand(this.state.metrics.housingPressure);
-    if (nextBand === this.housingMessageBand) return;
-
-    const { population, housingCapacity } = this.state.metrics;
-    if (nextBand === 2) {
-      this.addMessage(
-        `ALERT · Housing is over capacity at ${population}/${housingCapacity}. Build a Burrow Home before welcoming anyone else.`,
-        "warning",
-      );
-    } else if (nextBand === 1) {
-      this.addMessage(
-        `SETTLEMENT · Housing is tight at ${population}/${housingCapacity}. A Burrow Home will make room for the next arrival.`,
-        "info",
-      );
-    } else {
-      this.addMessage(`RECOVERY · Housing has breathing room again at ${population}/${housingCapacity}.`, "good");
-    }
-    this.housingMessageBand = nextBand;
-  }
-
-  private getResourceWarningLevel(value: number): number {
-    return value < 10 ? 2 : value < 25 ? 1 : 0;
-  }
-
-  private getHousingMessageBand(pressure: number): number {
-    return pressure >= 1 ? 2 : pressure >= 0.88 ? 1 : 0;
+    checkHousingPressure(this.state, this.warningBands, (text, tone) => this.addMessage(text, tone));
   }
 
   private getMostPressingNeed(resident: Resident): keyof Resident["needs"] {
-    const { shelter, food, safety, belonging } = resident.needs;
-    let key: keyof Resident["needs"] = "food";
-    let lowest = food;
-    if (shelter < lowest) { lowest = shelter; key = "shelter"; }
-    if (safety < lowest) { lowest = safety; key = "safety"; }
-    if (belonging < lowest) { key = "belonging"; }
-    return key;
+    return mostPressingNeed(resident);
   }
 
   // --- Movement -----------------------------------------------------------
 
-  private pathContext(): PathContext {
-    return {
-      grid: this.state.grid,
-      revealed: this.state.revealed,
-      blocked: this.occupiedCells,
-    };
+  /** The board as the movement system sees it: terrain plus what blocks it. */
+  private get terrain(): Terrain {
+    return { state: this.state, blocked: this.occupiedCells };
   }
 
-  /** Sets a target and recomputes the route only when the destination changed. */
   private setResidentTarget(resident: Resident, target: Vec2): void {
-    if (resident.target && sameCell(resident.target, target) && resident.path.length > 0) return;
-    resident.target = { x: target.x, y: target.y };
-    if (sameCell(resident.position, target)) {
-      resident.path = [];
-      return;
-    }
-    resident.path = findPath(this.pathContext(), resident.position, target) ?? [];
+    setResidentTarget(this.terrain, resident, target);
   }
 
-  /** Advances one tile along the resident's route, repathing if it has gone stale. */
-  /**
-   * Advances a resident one step, or two when they are travelling on a packed
-   * road.
-   *
-   * Roads already carried a lower cost inside the pathfinder, so residents
-   * preferred them — but preferring a route the player cannot see the benefit
-   * of is not a mechanic. Walking a road is now visibly faster, which is what
-   * makes spending food and warmth on one worth doing.
-   */
   private stepAlongPath(resident: Resident): void {
-    this.takeStep(resident);
-    const tile = this.state.grid[resident.position.y]?.[resident.position.x];
-    if (tile === "path") this.takeStep(resident);
-  }
-
-  private takeStep(resident: Resident): void {
-    if (!resident.target) return;
-    if (resident.path.length === 0) {
-      if (sameCell(resident.position, resident.target)) return;
-      resident.path = findPath(this.pathContext(), resident.position, resident.target) ?? [];
-      if (resident.path.length === 0) return;
-    }
-
-    const next = resident.path[0]!;
-    const tile = this.state.grid[next.y]?.[next.x];
-    const isDestination = sameCell(next, resident.target);
-    // The world can change under a resident mid-route (a new building, a
-    // regrown node); repath rather than walking into it.
-    if (!isDestination && (!isWalkable(tile) || this.occupiedCells.has(packCell(next.x, next.y, GRID_WIDTH)))) {
-      resident.path = findPath(this.pathContext(), resident.position, resident.target) ?? [];
-      return;
-    }
-
-    resident.path.shift();
-    resident.position = { x: next.x, y: next.y };
-
-    // Remember where the settlement actually walks.
-    const index = next.y * GRID_WIDTH + next.x;
-    if (this.state.footfall[index] !== undefined) this.state.footfall[index] += 1;
+    stepAlongPath(this.terrain, resident);
   }
 
   private findWalkableNear(position: Vec2): Vec2 {
-    if (isWalkable(this.state.grid[position.y]?.[position.x]) && this.isRevealed(position)) return position;
-    for (let radius = 1; radius <= 4; radius += 1) {
-      for (let dy = -radius; dy <= radius; dy += 1) {
-        for (let dx = -radius; dx <= radius; dx += 1) {
-          const candidate = { x: position.x + dx, y: position.y + dy };
-          if (!this.isInside(candidate)) continue;
-          if (!this.isRevealed(candidate)) continue;
-          if (isWalkable(this.state.grid[candidate.y]?.[candidate.x])) return candidate;
-        }
-      }
-    }
-    return position;
+    return findWalkableNear(this.terrain, position);
   }
 
   private invalidateAllPaths(): void {
-    for (const resident of this.state.residents) {
-      resident.path = [];
-    }
+    invalidateAllPaths(this.state);
   }
 
   private reindexBuildings(): void {
@@ -3000,10 +2627,7 @@ export class MosslightSimulation {
   }
 
   private applySpeciesMood(species: Species, allyDelta: number, othersDelta: number): void {
-    for (const resident of this.state.residents) {
-      const delta = resident.species === species ? allyDelta : othersDelta;
-      resident.needs.belonging = clamp(resident.needs.belonging + delta);
-    }
+    applySpeciesMood(this.state, species, allyDelta, othersDelta);
   }
 
   private boostBasin(amount: number): void {
@@ -3181,15 +2805,9 @@ export class MosslightSimulation {
   }
 
   private getHousingCapacity(buildings: Building[]): number {
-    let capacity = 0;
-    for (const building of buildings) {
-      // Upgraded homes house more; the Root scales too.
-      const multiplier = OUTPUT_MULTIPLIER[building.level] ?? 1;
-      if (building.type === "root-heart") capacity += BASE_HOUSING_CAPACITY * multiplier;
-      else if (building.type === "burrow-home") capacity += HOME_HOUSING_CAPACITY * multiplier;
-    }
-    return Math.floor(capacity);
+    return housingCapacityOf(buildings);
   }
+
 
   private formatResource(resource: ResourceKey): string {
     return resource.charAt(0).toUpperCase() + resource.slice(1);
@@ -3217,7 +2835,7 @@ export class MosslightSimulation {
   }
 
   private isInside(position: Vec2): boolean {
-    return position.x >= 0 && position.x < GRID_WIDTH && position.y >= 0 && position.y < GRID_HEIGHT;
+    return isInside(position);
   }
 
   private isOccupied(position: Vec2): boolean {
@@ -3225,7 +2843,7 @@ export class MosslightSimulation {
   }
 
   private isRevealed(position: Vec2): boolean {
-    return this.state.revealed[position.y]?.[position.x] ?? false;
+    return isRevealed(this.state, position);
   }
 
   private isCollectibleTile(tile: TileKind): tile is CollectibleTile {

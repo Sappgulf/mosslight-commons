@@ -1,10 +1,10 @@
 import { EVENT_COPY } from "../data/definitions";
+import { DAYS_PER_SEASON } from "./constants";
 import { STRESS_CHANNELS, buildStressGraph, channelStress, worstDistrictFor } from "./graph";
 import type { StressChannel, StressGraph, StressNode } from "./graph";
 import type { BuildingType, Forecast, ForecastSnapshot, WorldState } from "./types";
 
 const MAX_RESOURCE = 100;
-const DAYS_PER_SEASON = 7;
 
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
 

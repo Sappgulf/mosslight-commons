@@ -798,3 +798,54 @@ peak is strained, 45% below is failing, whatever the remainder feel.
   500-tick digest.
 - `SAVE_VERSION` is 8. Old saves are rejected rather than migrated, which is
   the existing convention.
+
+## Extraction pass — paying down the god class
+
+Three passes in a row added systems to `simulation.ts` while the notes kept
+calling it too big. It went 3,334 → 3,494 lines. This pass reverses that, and
+adds nothing: every test that passed before passes after, with no snapshot
+changes, because none of it is a behaviour change.
+
+- [x] **`systems/metrics.ts`** (323 lines). Capacity, storage, harmony, and the
+      plain-language diagnosis — every one of them a pure reading of world
+      state that never needed the class. The edge-triggered warning bands moved
+      too, carrying their "have we said this already?" bookkeeping with them as
+      an explicit `WarningBands` argument instead of instance fields.
+- [x] **`systems/movement.ts`** (109 lines). Targeting, stepping, road speed,
+      and finding walkable ground, over an explicit `Terrain` — the world plus
+      the set of blocked cells — rather than `this.occupiedCells`.
+- [x] **`systems/wants.ts`** (132 lines). The tick half of personal requests:
+      assigning, resolving, lapsing. The rules for *what* can be wanted already
+      lived in `sim/wants.ts`; this is the half that was still on the class.
+- [x] **`mood.ts`**, shared by wants and council proposals.
+- [x] **`grid.ts`** and **`constants.ts`.** `GRID_WIDTH`, `TICKS_PER_DAY` and
+      `DAYS_PER_SEASON` lived in `simulation.ts`, so a system needing them had
+      to import the god class — impossible for a system the class imports. They
+      have no dependencies, so they live apart and everything reads one copy.
+      `forecast.ts` had already been forced into declaring its own
+      `DAYS_PER_SEASON = 7`; that duplicate is gone.
+- [x] `SimContext` gained `buildingById`, so a system can reach the building
+      index rather than scanning the array.
+- [x] Dead imports and constants left behind by the moves are removed —
+      `MAX_RESOURCE`, `STORAGE_YIELD`, `BASE_STORAGE`, `PathContext`,
+      `findPath`, and four want helpers.
+
+`simulation.ts`: **3,494 → 3,112 lines**, and the pieces that came out are
+testable without standing up a played game.
+
+### A near miss
+
+Moving `WANT_INTERVAL` I typed `18` where the original was `TICKS_PER_DAY`,
+which is 12 — requests would have been offered a third less often, with every
+test still green because nothing pins the interval. Caught by reading the old
+declaration rather than by the suite. It is the argument for moving constants
+to a shared module rather than retyping them at each call site.
+
+### Verification
+
+- 205 Vitest tests (15 new, covering the extracted metrics functions directly)
+  and 20 Playwright tests pass. **No snapshot changed**, which is the real
+  assertion for a refactor: the tick order and the 500-tick digest are both
+  byte-identical.
+- Browser-driven on a live game: 40 days in, harmony 85, housing 55/78, storage
+  and diagnosis all reading correctly, console clean.

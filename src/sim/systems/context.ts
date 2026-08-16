@@ -32,4 +32,6 @@ export interface SimContext {
   averageWaterQuality(): number;
   /** First building of a type, or undefined. */
   buildingOfType(type: BuildingType): Building | undefined;
+  /** A building by id, through the simulation's index rather than a scan. */
+  buildingById(id: string): Building | undefined;
 }
