@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Local Torx + THRML forecast service for Mosslight Commons."""
+"""Local Torx + THRML forecast service for Mosslight Commons.
+
+The browser sends a *stress graph* built in `src/sim/graph.ts`: one node per
+(district × pressure channel), plus edges coupling pressures inside a district
+and the same pressure across neighbouring districts. This service samples that
+graph with THRML and evaluates civic policy axes with Torx.
+
+The graph's shape follows the settlement the player built, so a sprawling town
+with five districts samples a genuinely different model from a dense one.
+"""
 
 from __future__ import annotations
 
@@ -15,49 +24,92 @@ from thrml import Block, SamplingSchedule, SpinNode, sample_states
 from thrml.models import IsingEBM, IsingSamplingProgram, hinton_init
 from torx import psc
 
+CHANNELS = ["food", "water", "warmth", "light", "housing", "shade"]
+
+# Copy per channel, matching src/sim/forecast.ts so the sidecar and the local
+# model tell the same story about the same pressure.
+CHANNEL_COPY: dict[str, dict[str, str]] = {
+    "food": {
+        "title": "Empty Shelves",
+        "recommendation": "Add a Reed Farm or protect the wild plots.",
+        "tone": "warning",
+        "window": "next 2 days",
+    },
+    "water": {
+        "title": "Wetland Warning",
+        "recommendation": "Give the Mirelings clean water and quiet ground.",
+        "tone": "warning",
+        "window": "next 2 days",
+    },
+    "warmth": {
+        "title": "Cold Burrows",
+        "recommendation": "Raise warmth before the burrows go cold: a Root Workshop or a Comfort Bundle.",
+        "tone": "warning",
+        "window": "next 3 days",
+    },
+    "light": {
+        "title": "Lantern Festival",
+        "recommendation": "Keep the market open and let the neighborhoods mix.",
+        "tone": "bright",
+        "window": "next 3 days",
+    },
+    "housing": {
+        "title": "No Room Left",
+        "recommendation": "Build Burrow Homes where the crowd already stands.",
+        "tone": "warning",
+        "window": "next 2 days",
+    },
+    "shade": {
+        "title": "Long Shade Crossing",
+        "recommendation": "Keep lanterns lit and welcome the Cloudmoths before the canopy fails.",
+        "tone": "warning",
+        "window": "this season",
+    },
+}
+
+# Light is the channel whose *absence* of stress is the event worth forecasting.
+INVERTED_CHANNELS = {"light"}
+
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
-def mean_need(residents: list[dict[str, Any]], key: str) -> float:
-    if not residents:
-        return 50.0
-    values = [float((resident.get("needs") or {}).get(key, 50)) for resident in residents]
-    return sum(values) / len(values)
+def sample_graph(graph: dict[str, Any], seed: int) -> dict[str, float]:
+    """Sample the settlement's stress graph as an Ising model.
 
+    Returns the marginal probability that each node is in its "stressed" state,
+    keyed by node id. Node biases come from the local stress reading; edge
+    weights come from the couplings the graph declared.
+    """
 
-def sample_resource_risks(state: dict[str, Any], seed: int) -> dict[str, float]:
-    """Sample correlated shortage and civic-stress states with a THRML Ising model."""
+    payload_nodes = graph.get("nodes") or []
+    payload_edges = graph.get("edges") or []
+    if not payload_nodes:
+        return {}
 
-    resources = state.get("resources") or {}
-    metrics = state.get("metrics") or {}
-    residents = state.get("residents") or []
-    season = state.get("season", "mosswake")
+    nodes = [SpinNode() for _ in payload_nodes]
+    index_of = {node["id"]: index for index, node in enumerate(payload_nodes)}
 
-    food_need = 1.0 - clamp(mean_need(residents, "food") / 100.0)
-    shelter_need = 1.0 - clamp(mean_need(residents, "shelter") / 100.0)
-    housing = clamp(float(metrics.get("housingPressure", 0)))
-    shade = 0.55 if season == "longshade" else 0.12 if season == "emberfall" else 0.05
+    edges = []
+    weights: list[float] = []
+    for edge in payload_edges:
+        first = index_of.get(edge.get("a"))
+        second = index_of.get(edge.get("b"))
+        if first is None or second is None or first == second:
+            continue
+        edges.append((nodes[first], nodes[second]))
+        weights.append(float(edge.get("weight", 0.3)))
 
-    names = ["food", "water", "warmth", "light", "housing", "shade"]
-    shortage = [
-        1.0 - clamp(float(resources.get("food", 50)) / 100.0) * 0.65 + food_need * 0.35,
-        1.0 - clamp(float(resources.get("water", 50)) / 100.0),
-        1.0 - clamp(float(resources.get("warmth", 50)) / 100.0) * 0.7 + shelter_need * 0.3,
-        1.0 - clamp(float(resources.get("light", 50)) / 100.0),
-        housing,
-        shade,
-    ]
-    shortage = [clamp(value) for value in shortage]
+    # A graph with a single district and no couplings is still samplable, but
+    # IsingEBM wants at least one edge; couple the first two nodes weakly.
+    if not edges and len(nodes) >= 2:
+        edges.append((nodes[0], nodes[1]))
+        weights.append(0.05)
 
-    nodes = [SpinNode() for _ in names]
-    edges = [(nodes[index], nodes[index + 1]) for index in range(len(nodes) - 1)]
-    # Couple food↔housing and light↔shade so the graph is not a single chain.
-    edges.extend([(nodes[0], nodes[4]), (nodes[3], nodes[5])])
-    biases = jnp.asarray([(value - 0.35) * 2.6 for value in shortage])
-    weights = jnp.ones((len(edges),)) * 0.32
-    model = IsingEBM(nodes, edges, biases, weights, jnp.array(1.0))
+    # Recentre stress on zero so a comfortable node is genuinely unbiased.
+    biases = jnp.asarray([(float(node.get("stress", 0.0)) - 0.35) * 2.6 for node in payload_nodes])
+    model = IsingEBM(nodes, edges, biases, jnp.asarray(weights), jnp.array(1.0))
     blocks = [Block(nodes)]
     program = IsingSamplingProgram(model, blocks, clamped_blocks=[])
     key = jax.random.key(seed)
@@ -73,20 +125,54 @@ def sample_resource_risks(state: dict[str, Any], seed: int) -> dict[str, float]:
     )
     values = jnp.asarray(sampled[0])
     probabilities = jnp.mean(values, axis=0)
-    return {name: round(float(probabilities[index]), 3) for index, name in enumerate(names)}
+    return {
+        node["id"]: round(float(probabilities[index]), 3)
+        for index, node in enumerate(payload_nodes)
+    }
 
 
-def evaluate_torx_policy(state: dict[str, Any], risks: dict[str, float]) -> dict[str, float]:
+def channel_rollup(graph: dict[str, Any], marginals: dict[str, float]) -> dict[str, dict[str, Any]]:
+    """Mean sampled risk per channel, plus the district it is worst in."""
+
+    rollup: dict[str, dict[str, Any]] = {}
+    for channel in CHANNELS:
+        members = [node for node in (graph.get("nodes") or []) if node.get("channel") == channel]
+        if not members:
+            rollup[channel] = {"mean": 0.0, "label": None, "population": 0, "peak": 0.0}
+            continue
+
+        values = [marginals.get(node["id"], float(node.get("stress", 0.0))) for node in members]
+        mean = sum(values) / len(values)
+
+        # Weight by the crowd standing there: a dark district nobody lives in
+        # is not the story to lead with.
+        best_index = max(
+            range(len(members)),
+            key=lambda position: values[position]
+            * (1.0 + min(1.0, float(members[position].get("population", 0)) / 12.0)),
+        )
+        worst = members[best_index]
+        rollup[channel] = {
+            "mean": round(mean, 3),
+            "label": worst.get("label"),
+            "population": int(worst.get("population", 0)),
+            "peak": round(values[best_index], 3),
+        }
+    return rollup
+
+
+def evaluate_torx_policy(state: dict[str, Any], rollup: dict[str, dict[str, Any]]) -> dict[str, float]:
     """Evaluate a parameterized stochastic circuit for four civic axes."""
 
     moths = sum(1 for resident in state.get("residents") or [] if resident.get("species") == "cloudmoth")
     harmony = clamp(float((state.get("metrics") or {}).get("harmony", 50)) / 100.0)
     district = state.get("districtFocus", "market")
+    risk = lambda channel: float(rollup.get(channel, {}).get("mean", 0.0))  # noqa: E731
 
-    curiosity = 0.35 + risks["light"] * 0.45 + risks["shade"] * 0.25 - risks["food"] * 0.3
-    community = 0.28 + risks["water"] * 0.35 + harmony * 0.4 + (0.12 if district == "market" else 0.0)
-    harvest = 0.3 + risks["food"] * 0.55 + risks["housing"] * 0.15
-    vigil = 0.22 + risks["light"] * 0.4 + risks["shade"] * 0.35 + min(0.2, moths * 0.04)
+    curiosity = 0.35 + risk("light") * 0.45 + risk("shade") * 0.25 - risk("food") * 0.3
+    community = 0.28 + risk("water") * 0.35 + harmony * 0.4 + (0.12 if district == "market" else 0.0)
+    harvest = 0.3 + risk("food") * 0.55 + risk("housing") * 0.15
+    vigil = 0.22 + risk("light") * 0.4 + risk("shade") * 0.35 + min(0.2, moths * 0.04)
 
     circuit = psc.DiscretePCircuit([psc.PNOT(0), psc.PCNOT([0, 1]), psc.PNOT(1)])
     thetas = [jnp.asarray([clamp(curiosity)]), jnp.asarray([clamp(community)])]
@@ -103,124 +189,98 @@ def evaluate_torx_policy(state: dict[str, Any], risks: dict[str, float]) -> dict
     }
 
 
+def generate_candidates(
+    state: dict[str, Any],
+    graph: dict[str, Any],
+    rollup: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one forecast per channel from the sampled graph.
+
+    This replaces a hardcoded list of seven hand-tuned candidates: the copy is
+    still authored per channel, but which forecast leads, how likely it is, and
+    which district it names all come from the sample.
+    """
+
+    district_count = len({node.get("district") for node in (graph.get("nodes") or [])})
+    candidates: list[dict[str, Any]] = []
+
+    for channel in CHANNELS:
+        summary = rollup.get(channel)
+        if not summary:
+            continue
+        copy = CHANNEL_COPY[channel]
+        mean = float(summary["mean"])
+        peak = float(summary["peak"])
+        intensity = (1.0 - (peak * 0.6 + mean * 0.4)) if channel in INVERTED_CHANNELS else (peak * 0.65 + mean * 0.35)
+
+        drivers = []
+        if summary.get("label"):
+            drivers.append(
+                f"{summary['label']} sampled at {peak:.0%} {channel} pressure "
+                f"with {summary['population']} resident{'' if summary['population'] == 1 else 's'}"
+            )
+        drivers.append(f"THRML {channel} marginal {mean:.0%} across {district_count} districts")
+
+        spread = [
+            node.get("label")
+            for node in (graph.get("nodes") or [])
+            if node.get("channel") == channel
+            and node.get("label") != summary.get("label")
+            and float(node.get("stress", 0.0)) > 0.45
+        ]
+        if spread:
+            drivers.append(f"spreading toward {' and '.join(dict.fromkeys(spread))[:60]}")
+        else:
+            drivers.append(f"season is {state.get('season', 'mosswake')}")
+
+        candidates.append(
+            {
+                "title": copy["title"],
+                "probability": clamp(0.06 + intensity * 0.86, 0.05, 0.94),
+                "window": copy["window"],
+                "drivers": drivers[:3],
+                "recommendation": copy["recommendation"],
+                "tone": copy["tone"],
+            }
+        )
+
+    return candidates
+
+
 def make_forecast(payload: dict[str, Any]) -> dict[str, Any]:
     state = payload.get("state", payload)
     seed = int(state.get("tick", 0)) + int(state.get("seed", 2048))
-    risks = sample_resource_risks(state, seed)
-    policy = evaluate_torx_policy(state, risks)
-    season = state.get("season", "mosswake")
-    chapter = int(state.get("chapter", 0))
-    metrics = state.get("metrics") or {}
-    buildings = state.get("buildings") or []
-    farm_count = sum(1 for building in buildings if building.get("type") == "reed-farm")
-    grove_count = sum(1 for building in buildings if building.get("type") == "lantern-grove")
-    walk_count = sum(1 for building in buildings if building.get("type") == "sky-walk")
-    moths = sum(1 for resident in state.get("residents") or [] if resident.get("species") == "cloudmoth")
-    status = state.get("status", "thriving")
+    graph = state.get("graph") or {"nodes": [], "edges": []}
 
-    candidates = [
-        {
-            "title": "Empty Shelves",
-            "probability": clamp(0.08 + risks["food"] * 0.7 + risks["housing"] * 0.12),
-            "window": "next 2 days",
-            "drivers": [
-                f"THRML food-shortage mass {risks['food']:.0%}",
-                f"{farm_count} Reed Farms feeding {int(metrics.get('population', 0))} residents",
-                "Torx harvest signal is asking for more stalls",
-            ],
-            "recommendation": "Raise a Reed Farm or answer a food petition before the stalls empty.",
-            "tone": "warning",
-        },
-        {
-            "title": "Wetland Warning",
-            "probability": clamp(0.08 + risks["water"] * 0.68),
-            "window": "next 2 days",
-            "drivers": [
-                f"THRML water-shortage mass {risks['water']:.0%}",
-                "Mireling health is coupled to basin quality",
-                f"season is {season}",
-            ],
-            "recommendation": "Give the Mirelings quiet water and keep farms off the last reed bank.",
-            "tone": "warning",
-        },
-        {
-            "title": "Lantern Festival",
-            "probability": clamp(0.1 + (1.0 - risks["light"]) * 0.35 + policy["social"] * 0.4),
-            "window": "next 3 days",
-            "drivers": [
-                f"Torx social signal {policy['social']:.0%}",
-                f"{grove_count} lantern groves, harmony {int(metrics.get('harmony', 0))}%",
-                "the market is an active gathering point",
-            ],
-            "recommendation": "Keep the market open and let the neighborhoods mix.",
-            "tone": "bright",
-        },
-        {
-            "title": "Unmapped Burrow",
-            "probability": clamp(0.12 + policy["exploration"] * 0.62),
-            "window": "this week",
-            "drivers": [
-                f"Torx exploration signal {policy['exploration']:.0%}",
-                "Bramblebacks are leaving their usual routes",
-                f"chapter {chapter} still has ground to chart",
-            ],
-            "recommendation": "Inspect the new route before building over it.",
-            "tone": "calm",
-        },
-        {
-            "title": "Long Shade Crossing",
-            "probability": clamp(0.1 + risks["shade"] * 0.55 + policy["vigil"] * 0.28 + (0.12 if moths == 0 else 0.0)),
-            "window": "this season",
-            "drivers": [
-                f"THRML shade mass {risks['shade']:.0%}",
-                f"Torx vigil {policy['vigil']:.0%} · {moths} Cloudmoths present",
-                f"{walk_count} Sky Walks hung above the basin",
-            ],
-            "recommendation": "Hang a Sky Walk, craft a Sky Lantern, and keep the groves lit.",
-            "tone": "warning",
-        },
-        {
-            "title": "Canopy Hosting",
-            "probability": clamp(0.08 + moths * 0.08 + walk_count * 0.12 + policy["vigil"] * 0.25),
-            "window": "next 4 days",
-            "drivers": [
-                f"{moths} Cloudmoths reading the weather",
-                f"Torx vigil {policy['vigil']:.0%}",
-                "a hanging walkway is how they stay",
-            ],
-            "recommendation": "Adopt the Sky Veil and give the moths a Sky Walk.",
-            "tone": "calm",
-        },
-    ]
-    if status in {"strained", "failing"}:
-        candidates.append(
-            {
-                "title": "Commons Strain",
-                "probability": clamp(0.4 + (0.2 if status == "failing" else 0.0) + risks["housing"] * 0.2),
-                "window": "now",
-                "drivers": [
-                    f"settlement status is {status}",
-                    f"THRML housing pressure {risks['housing']:.0%}",
-                    "departures will start if stores and burrows stay thin",
-                ],
-                "recommendation": "Answer the Commons Report: the need it names is the one that is failing.",
-                "tone": "warning",
-            }
-        )
+    # No districts yet means nothing to sample. Bail before doing any THRML or
+    # Torx work and let the browser keep its own local model.
+    if not graph.get("nodes"):
+        return {"error": "empty stress graph"}
+
+    marginals = sample_graph(graph, seed)
+    rollup = channel_rollup(graph, marginals)
+    policy = evaluate_torx_policy(state, rollup)
+    candidates = generate_candidates(state, graph, rollup)
+
+    if not candidates:
+        return {"error": "no candidates from stress graph"}
 
     ranked = sorted(candidates, key=lambda candidate: candidate["probability"], reverse=True)
     for item in ranked:
         item["probability"] = round(float(clamp(item["probability"], 0.05, 0.94)), 3)
-    forecast = ranked[0]
+
+    node_count = len(graph.get("nodes") or [])
+    edge_count = len(graph.get("edges") or [])
     return {
         "provider": "torx-thrml",
-        "forecast": forecast,
-        "alternatives": ranked[1:3],
-        "sampledRisks": risks,
+        "forecast": ranked[0],
+        "alternatives": ranked[1:4],
+        "sampledRisks": {channel: rollup[channel]["mean"] for channel in CHANNELS if channel in rollup},
         "torxPolicy": policy,
         "explanation": [
-            "THRML sampled a six-node Ising graph: stores, housing, and shade.",
-            "Torx evaluated exploration, mixing, harvest, and vigil from that graph plus live civic counts.",
+            f"THRML sampled a {node_count}-node Ising graph over {edge_count} couplings, built from the settlement's own districts.",
+            "Nodes are one pressure in one district; edges couple pressures locally and the same pressure between neighbours.",
+            "Torx evaluated exploration, mixing, harvest, and vigil from those marginals plus live civic counts.",
             "The browser keeps the local forecast if this bridge is stopped.",
         ],
     }

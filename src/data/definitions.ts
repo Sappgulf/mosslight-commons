@@ -28,6 +28,15 @@ export const REGROWTH_DEFINITIONS: Record<
 export const MAX_BUILDING_LEVEL = 3;
 
 /**
+ * How many residents the Root and a single Burrow Home shelter at level 1.
+ * These live here rather than inside the simulation because the stress graph
+ * in `sim/graph.ts` measures housing pressure per district and needs the same
+ * numbers the simulation uses for the basin-wide figure.
+ */
+export const BASE_HOUSING_CAPACITY = 24;
+export const HOME_HOUSING_CAPACITY = 18;
+
+/**
  * Upgrade cost per target level. Level 2 and 3 multiply a building's output by
  * `OUTPUT_MULTIPLIER[level]`, which is what gives the mid game somewhere to go
  * once the map runs out of good plots.

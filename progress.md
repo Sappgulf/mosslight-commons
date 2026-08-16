@@ -615,3 +615,59 @@ spread over **53 tiles instead of 26**, and the built area grew from 16×11 to
 
 - 138 Vitest tests (4 new, including one asserting reed farms end up near
   water) and 19 Playwright tests pass.
+
+## Stress-graph pass — a model shaped like the town
+
+The forecast was two hardcoded lists. The browser ranked five hand-tuned
+candidates; the sidecar ranked seven more and sampled a **fixed six-node Ising
+chain** of basin-wide aggregates. Neither knew the settlement had districts, so
+a basin with full stores could never surface the one neighborhood in the dark,
+and every forecast read the same however the player had built.
+
+- [x] **New `src/sim/graph.ts`.** The settlement's stress graph: one node per
+      (district × channel) over six pressures — food, water, warmth, light,
+      housing, shade — so the graph's *shape* now follows the town.
+- [x] **Two kinds of coupling.** `channel` edges tie pressures together inside
+      one district (light↔shade at 0.55, warmth↔housing at 0.36); `spatial`
+      edges tie the same pressure across districts, weighted by real
+      centre-to-centre distance and cut off past 14 tiles.
+- [x] **Local stress is genuinely local.** Each channel blends the basin-wide
+      stockpile with what the district can actually reach: a grove lights its
+      own ground, a district feeding many mouths from few farms is short even
+      when stores are full.
+- [x] **Forecasts are generated, not picked.** `generateForecasts()` builds one
+      candidate per channel from measured stress. A basin never short of water
+      simply stops surfacing a Wetland Warning, and a forecast names the
+      district it is about: *"Fern Meadow reads 55% light pressure with 36
+      residents · basin-wide 44% across 5 districts · spreading toward Reed
+      Wetland and Commons Market."*
+- [x] **The sidecar builds its Ising model from the transmitted graph** rather
+      than a hardcoded chain — variable node count, per-edge weights — and
+      generates its candidates the same way the browser does.
+- [x] `BASE_HOUSING_CAPACITY` / `HOME_HOUSING_CAPACITY` moved to
+      `data/definitions.ts` so the per-district reading and the basin-wide
+      metric cannot drift apart.
+
+### Performance
+
+The graph runs on the every-tick forecast path, and the first cut timed the
+full-playthrough test out. Three fixes: entities are bucketed into districts in
+a **single pass** instead of a filter per district, each channel's mean and
+worst district are **rolled up once during the build** instead of rescanned per
+read, and the graph is **memoized per world** on tick plus collection lengths.
+The 1600-tick playthrough went from 4.44s at baseline to 3.54s with the graph
+in place.
+
+`vite.config.ts` now sets `testTimeout: 30000`. Several tests play a full game
+out; at the 5s default they passed alone and timed out under parallel load, so
+the suite was failing on machine load rather than on behaviour.
+
+### Verification
+
+- 150 Vitest tests (11 new, covering graph shape, edge validity, the 0..1
+  stress bound, Long Shade raising shade stress, memoization, and generated
+  forecast ranking/determinism) and 20 Playwright tests pass.
+- The Python sidecar's pure logic is exercised with the numeric stack stubbed;
+  that harness caught an ordering bug where an empty graph did Torx work before
+  bailing. The THRML/Torx sampling paths are **unverified on this machine** —
+  see below.

@@ -20,5 +20,10 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Several simulation tests play a full game out — 1600 ticks of a real
+    // settlement — which legitimately takes seconds. At the 5s default they
+    // passed alone and timed out under parallel load, so the suite failed on
+    // machine load rather than on behaviour.
+    testTimeout: 30000,
   },
 });

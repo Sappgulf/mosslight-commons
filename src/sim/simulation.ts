@@ -1,5 +1,7 @@
 import {
+  BASE_HOUSING_CAPACITY,
   BUILDING_DEFINITIONS,
+  HOME_HOUSING_CAPACITY,
   DISTRICT_DEFINITIONS,
   ITEM_DEFINITIONS,
   MAX_BUILDING_LEVEL,
@@ -89,8 +91,6 @@ const STORAGE_YIELD: Partial<Record<BuildingType, Partial<Record<ResourceKey, nu
 const START_DAY = 8;
 const TICKS_PER_DAY = 12;
 const DAYS_PER_SEASON = 7;
-const BASE_HOUSING_CAPACITY = 24;
-const HOME_HOUSING_CAPACITY = 18;
 /*
  * A ceiling on the basin, not on the game. It was 60, which the settlement
  * reached by day 74 and then sat at for the rest of the run with housing no
@@ -2993,11 +2993,7 @@ export class MosslightSimulation {
   }
 
   private calculateLocalForecast(state: WorldState = this.state): Forecast {
-    return calculateLocalForecast(
-      state,
-      (type, world) => this.countBuildings(type, world),
-      (world) => this.averageWaterQuality(world),
-    );
+    return calculateLocalForecast(state);
   }
 
   // --- Ledger and objectives ---------------------------------------------

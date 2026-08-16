@@ -1,3 +1,4 @@
+import { buildStressGraph } from "./graph";
 import type { Forecast, WorldState } from "./types";
 
 export interface TorxPolicy {
@@ -128,7 +129,25 @@ export class TorxThrmlBridge {
  * per poll, so this trims the payload to what the model actually consumes.
  */
 function serializeForBridge(state: WorldState) {
+  const graph = buildStressGraph(state);
   return {
+    /**
+     * The settlement's stress graph. The sidecar builds its Ising model from
+     * this rather than from a hardcoded six-node chain, so the model's shape
+     * follows the town the player actually built.
+     */
+    graph: {
+      nodes: graph.nodes.map((node) => ({
+        id: node.id,
+        district: node.districtId,
+        districtType: node.districtType,
+        label: node.districtLabel,
+        channel: node.channel,
+        stress: node.stress,
+        population: node.population,
+      })),
+      edges: graph.edges.map((edge) => ({ a: edge.a, b: edge.b, weight: edge.weight, kind: edge.kind })),
+    },
     // `seed` and `tick` key the sidecar's THRML sampler; keep both.
     seed: state.seed,
     tick: state.tick,
