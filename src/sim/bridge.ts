@@ -171,6 +171,8 @@ function serializeForBridge(state: WorldState) {
       stage: resident.stage,
       needs: resident.needs,
     })),
+    // The evidence the sidecar fits its Ising couplings to.
+    stressHistory: state.stressHistory ?? [],
     relationships: state.relationships.map((relationship) => ({
       kind: relationship.kind,
       strength: relationship.strength,

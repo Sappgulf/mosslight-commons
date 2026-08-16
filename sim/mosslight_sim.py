@@ -71,11 +71,84 @@ CHANNEL_COPY: dict[str, dict[str, str]] = {
 INVERTED_CHANNELS = {"light"}
 
 
+# Days of history below which the couplings stay as designed.
+MIN_HISTORY_DAYS = 8
+
+# How far the fitted correlation is allowed to move a declared coupling.
+LEARNING_TRUST = 0.6
+
+# Gradient steps and step size for fitting the Torx circuit each request.
+TRAIN_STEPS = 24
+TRAIN_RATE = 0.35
+
+
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
-def sample_graph(graph: dict[str, Any], seed: int) -> dict[str, float]:
+
+def learn_couplings(
+    graph: dict[str, Any], history: list[dict[str, float]]
+) -> tuple[dict[tuple[str, str], float], int]:
+    """Fit each edge's coupling from the settlement's own recorded history.
+
+    The declared weights are a designer's guess: a flat channel table and a
+    distance falloff. What two pressures *actually* do to each other in a given
+    basin is an empirical question, and the game now records the answer — one
+    reading per channel per day.
+
+    For every edge, this correlates the two endpoints' channels across that
+    history and blends the result into the declared weight. A pair that really
+    does move together in this settlement couples harder than the table said; a
+    pair that never has, couples less. Returns the fitted weights and how many
+    days of evidence they rest on.
+    """
+
+    usable = [entry for entry in history if entry]
+    if len(usable) < MIN_HISTORY_DAYS:
+        return {}, len(usable)
+
+    channels = sorted({key for entry in usable for key in entry})
+    series = {
+        channel: jnp.asarray([float(entry.get(channel, 0.0)) for entry in usable])
+        for channel in channels
+    }
+
+    def correlation(first: str, second: str) -> float:
+        a = series.get(first)
+        b = series.get(second)
+        if a is None or b is None:
+            return 0.0
+        a_centered = a - jnp.mean(a)
+        b_centered = b - jnp.mean(b)
+        denominator = jnp.sqrt(jnp.sum(a_centered**2) * jnp.sum(b_centered**2))
+        # A channel that never moved has no correlation to report, not a
+        # divide-by-zero: a basin that was never short of water has simply not
+        # told us anything about water yet.
+        if float(denominator) < 1e-6:
+            return 0.0
+        return float(jnp.sum(a_centered * b_centered) / denominator)
+
+    nodes = {node["id"]: node for node in graph.get("nodes") or []}
+    fitted: dict[tuple[str, str], float] = {}
+    for edge in graph.get("edges") or []:
+        first = nodes.get(edge.get("a"))
+        second = nodes.get(edge.get("b"))
+        if not first or not second:
+            continue
+        observed = correlation(first.get("channel", ""), second.get("channel", ""))
+        declared = float(edge.get("weight", 0.3))
+        # Evidence moves the weight; it does not replace it outright, so a short
+        # or quiet history degrades gracefully back toward the design.
+        blended = declared * (1.0 - LEARNING_TRUST) + abs(observed) * LEARNING_TRUST
+        fitted[(edge["a"], edge["b"])] = round(clamp(blended, 0.02, 0.9), 4)
+
+    return fitted, len(usable)
+
+
+def sample_graph(
+    graph: dict[str, Any], seed: int, fitted: dict[tuple[str, str], float] | None = None
+) -> dict[str, float]:
     """Sample the settlement's stress graph as an Ising model.
 
     Returns the marginal probability that each node is in its "stressed" state,
@@ -99,7 +172,8 @@ def sample_graph(graph: dict[str, Any], seed: int) -> dict[str, float]:
         if first is None or second is None or first == second:
             continue
         edges.append((nodes[first], nodes[second]))
-        weights.append(float(edge.get("weight", 0.3)))
+        key = (edge.get("a"), edge.get("b"))
+        weights.append(float((fitted or {}).get(key, edge.get("weight", 0.3))))
 
     # A graph with a single district and no couplings is still samplable, but
     # IsingEBM wants at least one edge; couple the first two nodes weakly.
@@ -161,6 +235,51 @@ def channel_rollup(graph: dict[str, Any], marginals: dict[str, float]) -> dict[s
     return rollup
 
 
+
+def circuit_density(simulator: Any, circuit: Any, thetas: Any) -> Any:
+    """Run the circuit for a given parameter vector and return its density."""
+    compiled = simulator.build_circuit(circuit, [thetas[index : index + 1] for index in range(3)])
+    return simulator.density(compiled, jnp.asarray([1.0, 0.0, 0.0, 0.0]))
+
+
+def train_thetas(
+    simulator: Any,
+    circuit: Any,
+    initial: Any,
+    curiosity_target: float,
+    community_target: float,
+    steps: int = TRAIN_STEPS,
+) -> tuple[Any, int]:
+    """Fit the circuit's parameters to the settlement's measured signals.
+
+    The circuit was a fixed evaluator: thetas were computed straight from linear
+    formulas and the circuit was run once, so calling it "Torx evaluated the
+    policy" was generous — nothing was ever optimised. Here the parameters are
+    actually fitted, by gradient descent through the simulator, so the circuit's
+    exploration and mixing outputs come to match what the basin is measured to
+    be doing.
+
+    Falls back to the unfitted parameters if the simulator is not
+    differentiable in this build, because a forecast is worth more than a
+    gradient.
+    """
+
+    def loss(thetas: Any) -> Any:
+        density = circuit_density(simulator, circuit, thetas)
+        exploration = density[2] + density[3]
+        social = density[0] + density[1]
+        return (exploration - curiosity_target) ** 2 + (social - community_target) ** 2
+
+    try:
+        gradient = jax.grad(loss)
+        thetas = initial
+        for _ in range(steps):
+            thetas = jnp.clip(thetas - TRAIN_RATE * gradient(thetas), 0.0, 1.0)
+        return thetas, steps
+    except Exception:
+        return initial, 0
+
+
 def evaluate_torx_policy(state: dict[str, Any], rollup: dict[str, dict[str, Any]]) -> dict[str, float]:
     """Evaluate a parameterized stochastic circuit for four civic axes."""
 
@@ -174,13 +293,18 @@ def evaluate_torx_policy(state: dict[str, Any], rollup: dict[str, dict[str, Any]
     harvest = 0.3 + risk("food") * 0.55 + risk("housing") * 0.15
     vigil = 0.22 + risk("light") * 0.4 + risk("shade") * 0.35 + min(0.2, moths * 0.04)
 
+    # One theta per gate. This passed two for a three-gate circuit, so
+    # `build_circuit` raised on every single request and the browser fell back
+    # to its local model every time — the Torx path had never once run.
     circuit = psc.DiscretePCircuit([psc.PNOT(0), psc.PCNOT([0, 1]), psc.PNOT(1)])
-    thetas = [jnp.asarray([clamp(curiosity)]), jnp.asarray([clamp(community)])]
     simulator = psc.StateVectorSimulator()
-    compiled = simulator.build_circuit(circuit, thetas)
-    density = simulator.density(compiled, jnp.asarray([1.0, 0.0, 0.0, 0.0]))
+    initial = jnp.asarray([clamp(curiosity), clamp(harvest), clamp(community)])
+    trained, steps = train_thetas(simulator, circuit, initial, clamp(curiosity), clamp(community))
+
+    density = circuit_density(simulator, circuit, trained)
     exploration = float(density[2] + density[3])
     social = float(density[0] + density[1])
+    state.setdefault("_torxTraining", {"steps": steps})
     return {
         "exploration": round(clamp(exploration * 0.7 + clamp(curiosity) * 0.3), 3),
         "social": round(clamp(social * 0.7 + clamp(community) * 0.3), 3),
@@ -257,7 +381,10 @@ def make_forecast(payload: dict[str, Any]) -> dict[str, Any]:
     if not graph.get("nodes"):
         return {"error": "empty stress graph"}
 
-    marginals = sample_graph(graph, seed)
+    # Couplings fitted to the settlement's own recorded pressure history, where
+    # there is enough of it; the declared table otherwise.
+    fitted, history_days = learn_couplings(graph, state.get("stressHistory") or [])
+    marginals = sample_graph(graph, seed, fitted)
     rollup = channel_rollup(graph, marginals)
     policy = evaluate_torx_policy(state, rollup)
     candidates = generate_candidates(state, graph, rollup)
@@ -280,9 +407,17 @@ def make_forecast(payload: dict[str, Any]) -> dict[str, Any]:
         "explanation": [
             f"THRML sampled a {node_count}-node Ising graph over {edge_count} couplings, built from the settlement's own districts.",
             "Nodes are one pressure in one district; edges couple pressures locally and the same pressure between neighbours.",
-            "Torx evaluated exploration, mixing, harvest, and vigil from those marginals plus live civic counts.",
+            (
+                f"Couplings were fitted to {history_days} days of the settlement's own recorded pressure"
+                if fitted
+                else "Couplings are the declared table; not enough recorded history to fit them yet"
+            )
+            + ".",
+            f"Torx fitted its circuit by gradient descent ({TRAIN_STEPS} steps) to match the measured signals.",
             "The browser keeps the local forecast if this bridge is stopped.",
         ],
+        "learnedCouplings": len(fitted),
+        "historyDays": history_days,
     }
 
 

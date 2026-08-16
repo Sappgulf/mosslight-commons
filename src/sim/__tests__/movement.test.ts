@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MosslightSimulation } from "../simulation";
-import { paceFor } from "../systems/movement";
+import { FOCUS_BONUS, dwellFor, paceFor } from "../systems/movement";
 import type { Resident } from "../types";
 
 const walker = (over: Partial<Resident> = {}): Resident =>
@@ -112,5 +112,52 @@ describe("households travel together", () => {
       occupancy.set(key, (occupancy.get(key) ?? 0) + 1);
     }
     expect(Math.max(...occupancy.values())).toBeLessThanOrEqual(6);
+  });
+});
+
+describe("residents commit to what they came to do", () => {
+  /**
+   * Dwelling was attempted twice and removed once. The first cut let a resident
+   * stand at the market being tested against their bench, so they never ate;
+   * the second cost so much throughput that the ledger could not be finished.
+   * It works now because a committed resident does the thing properly — the
+   * focus bonus is what pays for standing still.
+   */
+  it("gives a resident a spell of standing still once they arrive", () => {
+    const simulation = new MosslightSimulation(2048);
+    for (let tick = 0; tick < 300; tick += 1) simulation.advance();
+    const settled = simulation.state.residents.filter((resident) => resident.dwell > 0);
+    expect(settled.length).toBeGreaterThan(0);
+  });
+
+  it("never leaves anyone parked for longer than the longest commitment", () => {
+    const simulation = new MosslightSimulation(2048);
+    for (let tick = 0; tick < 600; tick += 1) {
+      simulation.advance();
+      for (const resident of simulation.state.residents) {
+        expect(resident.dwell).toBeLessThanOrEqual(dwellFor("rest"));
+      }
+    }
+  });
+
+  it("breaks a commitment for a genuinely pressing need", () => {
+    const simulation = new MosslightSimulation(2048);
+    for (let tick = 0; tick < 200; tick += 1) simulation.advance();
+
+    const resident = simulation.state.residents.find(
+      (candidate) => candidate.dwell > 0 && candidate.goal !== "forage",
+    );
+    expect(resident).toBeDefined();
+    const wasDoing = resident!.goal;
+
+    // Starve them. The old commitment must not survive it — though they may
+    // well commit to the *new* activity immediately, which is the point.
+    resident!.needs.food = 5;
+    simulation.advance();
+    expect(resident!.goal).not.toBe(wasDoing);
+  });
+
+  it("is worth more than flip-flopping", () => {
+    expect(FOCUS_BONUS).toBeGreaterThan(1);
   });
 });

@@ -144,6 +144,35 @@ export function paceFor(resident: Resident): number {
 }
 
 /**
+ * How long a resident stays put once they arrive, by what they came to do.
+ *
+ * Kept short. An earlier attempt used six to eleven ticks and cost so much
+ * throughput that the ledger could no longer be finished; the fix is not a
+ * longer commitment but a commitment that pays for itself.
+ */
+const DWELL: Record<ResidentGoal, number> = {
+  rest: 3,
+  work: 3,
+  forage: 2,
+  socialize: 2,
+  explore: 1,
+};
+
+export function dwellFor(goal: ResidentGoal): number {
+  return DWELL[goal] ?? 2;
+}
+
+/**
+ * How much more an activity counts for while a resident is committed to it.
+ *
+ * Without this, dwelling is pure loss: a resident who used to switch to
+ * whatever need was most pressing every tick now sticks with one thing, meets
+ * their needs worse, and the settlement grows more slowly. Focus is what makes
+ * standing still worth doing.
+ */
+export const FOCUS_BONUS = 1.6;
+
+/**
  * Advances a resident one step, or two when they are travelling on a packed
  * road.
  *

@@ -38,9 +38,27 @@ import {
   RESIDENTS_PER_MARKET,
   type BuildSite,
 } from "./systems/construction";
+import {
+  createDistricts,
+  createGrid,
+  createRelationships,
+  createResident,
+  createResidents,
+  createRevealedGrid,
+  createSeasonalEvent,
+  stageForAge,
+  ADULT_AGE,
+  ELDER_AGE,
+  ZONE_BOUNDS,
+  clampCell,
+  type IdSource,
+} from "./worldgen";
+import { STRESS_CHANNELS, buildStressGraph, channelStress } from "./graph";
 import { tickSpecies } from "./species";
 import {
+  dwellFor,
   findWalkableNear,
+  FOCUS_BONUS,
   invalidateAllPaths,
   isInside,
   reachableNear,
@@ -128,8 +146,6 @@ const SEASONS: Season[] = ["mosswake", "suncrest", "emberfall", "longshade"];
 const DEPARTURE_THRESHOLD = 26;
 /** Ticks the settlement may sit in a failing state before it collapses. */
 const COLLAPSE_THRESHOLD = TICKS_PER_DAY * 4;
-const ADULT_AGE = 6;
-const ELDER_AGE = 42;
 /**
  * What one visit to a stall, a hearth or a lit path actually costs the stores.
  * Consumption used to be a flat per-head subtraction in the production step,
@@ -161,6 +177,12 @@ const WORKPLACE_CROWDING = 1.6;
 const KINSHIP_MOVE_THRESHOLD = 70;
 /** Bond strength at which two residents will travel and stand together. */
 const COMPANION_STRENGTH = 62;
+/** Days of pressure history kept for the sidecar to fit couplings against. */
+const STRESS_HISTORY_DAYS = 40;
+/** Distress that overrides a resident's commitment to what they are doing. */
+const DISTRESS_INTERRUPT = 3;
+/** A need this low pulls a resident off whatever they had settled into. */
+const NEED_INTERRUPT = 46;
 /** How many cells around a companion a household spreads over. */
 const COMPANION_SPREAD = 5;
 /** How much one builder standing at a site adds to a tick of progress. */
@@ -192,7 +214,16 @@ const WORKPLACE_CRAFT: Partial<Record<BuildingType, keyof Resident["skills"]>> =
 };
 
 /** Crossings before bare ground packs into a road, and the daily cap on that. */
-const DESIRE_PATH_FOOTFALL = 260;
+/*
+ * Footfall a tile needs before it wears into a road.
+ *
+ * 260 was calibrated against residents who never stood still. Now that arriving
+ * somewhere commits them for a few ticks, the same settlement over the same
+ * period walks slightly less — the busiest tile settles around 210, under the
+ * old line — so the threshold is restated in the new units. The intent is
+ * unchanged: only genuinely well-walked ground paves itself.
+ */
+const DESIRE_PATH_FOOTFALL = 190;
 const DESIRE_PATHS_PER_DAY = 1;
 
 /** How far ahead a worker must be to count as a teacher, and where teaching stops. */
@@ -227,12 +258,6 @@ const WANT_INTERVAL = TICKS_PER_DAY;
 const WANT_PATIENCE = 6;
 
 /** What answering a request pays out. */
-
-const ZONE_BOUNDS: Record<MapZoneKey, { xMin: number; xMax: number; yMin: number; yMax: number }> = {
-  "sunken-reach": { xMin: 24, xMax: 31, yMin: 13, yMax: 20 },
-  "old-hollow": { xMin: 19, xMax: 25, yMin: 3, yMax: 8 },
-  "canopy-rift": { xMin: 0, xMax: 6, yMin: 17, yMax: 23 },
-};
 
 const ZONE_TARGETS: Record<MapZoneKey, Vec2> = {
   "sunken-reach": { x: 27, y: 16 },
@@ -1128,7 +1153,7 @@ export class MosslightSimulation {
   // --- World construction -------------------------------------------------
 
   private createInitialState(seed: number): WorldState {
-    const grid = this.createGrid();
+    const grid = createGrid();
     const makeBuilding = (id: string, type: BuildingType, position: Vec2): Building => ({
       id,
       type,
@@ -1145,8 +1170,8 @@ export class MosslightSimulation {
       makeBuilding("commons-market-0", "commons-market", { x: 17, y: 12 }),
     ];
 
-    const residents = this.createResidents(buildings);
-    const districts = this.createDistricts();
+    const residents = createResidents(this.rng, this.ids, buildings);
+    const districts = createDistricts();
     const state: WorldState = {
       seed,
       tick: 0,
@@ -1157,16 +1182,16 @@ export class MosslightSimulation {
       grid,
       resources: { food: 68, water: 58, warmth: 46, light: 76 },
       items: { "seed-pod": 0, resin: 0, moonwater: 0, "map-fragment": 0 },
-      revealed: this.createRevealedGrid(),
+      revealed: createRevealedGrid(),
       revealedAreas: [],
       regrowth: [],
       buildings,
       residents,
       districts,
       districtFocus: "market",
-      relationships: this.createRelationships(residents),
+      relationships: createRelationships(this.rng, residents),
       expeditions: [],
-      seasonalEvent: this.createSeasonalEvent("mosswake"),
+      seasonalEvent: createSeasonalEvent("mosswake"),
       crafting: null,
       crafted: { "lantern-kit": 0, "bridge-kit": 0, "comfort-kit": 0, "sky-lantern": 0 },
       objectives: createObjectives(),
@@ -1229,6 +1254,7 @@ export class MosslightSimulation {
       speciesLost: [],
       factions: [],
       lastFoundingDay: -FOUNDING_COOLDOWN,
+      stressHistory: [],
       peakPopulation: 0,
       longShadeCrisis: false,
       longShadeStartDay: 0,
@@ -1252,208 +1278,17 @@ export class MosslightSimulation {
     return state;
   }
 
-  private createGrid(): TileKind[][] {
-    const grid: TileKind[][] = [];
-    for (let y = 0; y < GRID_HEIGHT; y += 1) {
-      const row: TileKind[] = [];
-      for (let x = 0; x < GRID_WIDTH; x += 1) {
-        const lowerWetland = y > 17 && x < 29;
-        const sidePool = x < 4 && y > 5;
-        row.push(lowerWetland || sidePool ? "water" : "grass");
-      }
-      grid.push(row);
-    }
-
-    // Stone as a handful of small outcrops rather than one isolated cell every
-    // 29th tile. Scattered single cells read as rendering artifacts speckled
-    // across the field; clustered rock reads as terrain.
-    const outcrops: Array<[number, number]> = [
-      [5, 3], [12, 7], [20, 15], [26, 11], [9, 12], [29, 3],
-    ];
-    for (const [ox, oy] of outcrops) {
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          // A ragged 3x3 blob: the centre always, the ring most of the time.
-          const isCenter = dx === 0 && dy === 0;
-          if (!isCenter && (ox * 7 + oy * 13 + dx * 3 + dy * 5) % 3 === 0) continue;
-          const x = ox + dx;
-          const y = oy + dy;
-          if (grid[y]?.[x] === "grass") grid[y]![x] = "stone";
-        }
-      }
-    }
-
-    for (let x = 2; x < 30; x += 1) {
-      if (grid[12]?.[x] !== "water") grid[12]![x] = "path";
-    }
-    for (let y = 7; y < 22; y += 1) {
-      if (grid[y]?.[16] !== "water") grid[y]![16] = "path";
-    }
-    for (let y = 16; y < 20; y += 1) {
-      for (let x = 4; x < 12; x += 1) {
-        if (grid[y]?.[x] === "water") grid[y]![x] = "wetland";
-      }
-    }
-
-    const nodes: Array<[CollectibleTile, number, number]> = [
-      ["fern", 14, 5],
-      ["fern", 18, 4],
-      ["fern", 27, 16],
-      ["mushroom", 27, 5],
-      ["mushroom", 6, 15],
-      ["crystal", 28, 8],
-      ["crystal", 25, 15],
-      ["ruin", 8, 15],
-      ["ruin", 29, 18],
-      ["crystal", 21, 4],
-      ["ruin", 23, 6],
-    ];
-    for (const [kind, x, y] of nodes) {
-      if (grid[y]?.[x] && grid[y]![x] !== "water") grid[y]![x] = kind;
-    }
-    return grid;
-  }
-
-  private createRevealedGrid(): boolean[][] {
-    const revealed = Array.from({ length: GRID_HEIGHT }, () => Array.from({ length: GRID_WIDTH }, () => true));
-    for (const bounds of Object.values(ZONE_BOUNDS)) {
-      for (let y = bounds.yMin; y <= bounds.yMax; y += 1) {
-        for (let x = bounds.xMin; x <= bounds.xMax; x += 1) {
-          if (revealed[y]?.[x] !== undefined) revealed[y]![x] = false;
-        }
-      }
-    }
-    return revealed;
-  }
-
-  private createDistricts(): District[] {
-    const layout: Record<DistrictType, { xMin: number; xMax: number; yMin: number; yMax: number; center: Vec2 }> = {
-      meadow: { xMin: 2, xMax: 13, yMin: 2, yMax: 11, center: { x: 8, y: 7 } },
-      wetland: { xMin: 3, xMax: 12, yMin: 14, yMax: 20, center: { x: 8, y: 17 } },
-      lantern: { xMin: 20, xMax: 30, yMin: 2, yMax: 11, center: { x: 24, y: 7 } },
-      market: { xMin: 13, xMax: 22, yMin: 9, yMax: 15, center: { x: 17, y: 12 } },
-      ruin: { xMin: 23, xMax: 31, yMin: 13, yMax: 20, center: { x: 27, y: 16 } },
-    };
-    return (Object.keys(layout) as DistrictType[]).map((type) => {
-      const { center, xMin, xMax, yMin, yMax } = layout[type];
-      return {
-        id: `district-${type}`,
-        type,
-        center,
-        bounds: { xMin, xMax, yMin, yMax },
-        ...DISTRICT_DEFINITIONS[type],
-      };
-    });
-  }
-
-  private createRelationships(residents: Resident[]): Relationship[] {
-    const relationships: Relationship[] = [];
-    // Every resident gets at least one bond, so the social layer is real rather
-    // than decorative. Pairing with a neighbour two seats along avoids giving
-    // everyone the same partner.
-    for (let index = 0; index < residents.length; index += 1) {
-      const first = residents[index];
-      const second = residents[(index + 2) % residents.length];
-      if (!first || !second || first.id === second.id) continue;
-      if (relationships.some((existing) =>
-        (existing.aId === first.id && existing.bId === second.id)
-        || (existing.aId === second.id && existing.bId === first.id))) continue;
-
-      const kind: RelationshipKind = first.species === second.species
-        ? this.rng.next() > 0.7 ? "family" : "kinship"
-        : this.rng.next() > 0.2 ? "friendship" : "rivalry";
-      relationships.push({
-        id: `relationship-${relationships.length + 1}`,
-        aId: first.id,
-        bId: second.id,
-        kind,
-        strength: this.rng.range(42, 78),
-        sharedDays: 1,
-      });
-    }
-    return relationships;
-  }
-
-  private createSeasonalEvent(season: Season): WorldState["seasonalEvent"] {
-    const definition = SEASONAL_EVENT_DEFINITIONS[season];
-    return {
-      ...definition,
-      season,
-      daysRemaining: DAYS_PER_SEASON,
-    };
-  }
-
-  private createResidents(buildings: Building[]): Resident[] {
-    const residents: Resident[] = [];
-
-    for (let index = 0; index < 36; index += 1) {
-      const resident = this.createResident(index, buildings);
-      if (resident) residents.push(resident);
-    }
-    return residents;
-  }
-
-  private createResident(index: number, buildings: Building[]): Resident | undefined {
-    const homes = buildings.filter((building) => building.type === "burrow-home");
-    const market = buildings.find((building) => building.type === "commons-market");
-    const farm = buildings.find((building) => building.type === "reed-farm");
-    const grove = buildings.find((building) => building.type === "lantern-grove");
-    const home = homes[index % homes.length];
-    if (!home || !market || !farm || !grove) return undefined;
-
-    const species = speciesOrder[index % speciesOrder.length]!;
-    const work = species === "brambleback" ? home : species === "mireling" ? farm : grove;
-    const offset = { x: (index % 5) - 2, y: Math.floor(index / 5) % 3 - 1 };
-    const age = this.rng.int(ADULT_AGE, 30);
-    return {
-      /*
-       * The name is keyed to the resident's own id, not to their position in
-       * the array.
-       *
-       * It used to be `names[index % names.length]` with the index taken from
-       * the current population size — so every departure freed an index for the
-       * next arrival to reuse, and a settlement that had lost anybody ended up
-       * with two residents answering to "Sedge 3". Ids only ever go up.
-       */
-      id: `resident-${this.nextResidentId}`,
-      name: `${names[this.nextResidentId % names.length]!} ${Math.floor(this.nextResidentId++ / names.length) + 1}`,
-      species,
-      position: {
-        x: clampCell(home.position.x + offset.x, 1, GRID_WIDTH - 2),
-        y: clampCell(home.position.y + offset.y, 1, GRID_HEIGHT - 2),
-      },
-      homeId: home.id,
-      workplaceId: work.id,
-      needs: {
-        shelter: this.rng.range(58, 92),
-        food: this.rng.range(55, 90),
-        safety: this.rng.range(60, 94),
-        belonging: this.rng.range(42, 86),
-      },
-      traits: {
-        curiosity: this.rng.next(),
-        sociability: this.rng.next(),
-        routine: this.rng.next(),
-        resilience: this.rng.next(),
-      },
-      skills: {
-        farming: this.rng.range(4, 22),
-        crafting: this.rng.range(4, 22),
-        scouting: this.rng.range(4, 22),
-      },
-      goal: index % 3 === 0 ? "work" : "socialize",
-      target: index % 3 === 0 ? work.position : market.position,
-      path: [],
-      lastDecisionExplanation: "Settling into a new neighborhood.",
-      age,
-      stage: stageForAge(age),
-      distress: 0,
-      masteryTier: 0,
-      taught: 0,
-      memories: [],
-      moveCredit: 0,
-    };
-  }
+  /**
+   * The resident id counter, handed to worldgen as a shared source.
+   *
+   * Worldgen mutates `next`, and the simulation must see that: names are keyed
+   * to the id, so two generators with separate counters would hand out the
+   * same name twice.
+   */
+  private readonly ids: IdSource = ((owner: MosslightSimulation): IdSource => ({
+    get next(): number { return owner.nextResidentId; },
+    set next(value: number) { owner.nextResidentId = value; },
+  }))(this);
 
   // --- Tick ---------------------------------------------------------------
 
@@ -1490,6 +1325,7 @@ export class MosslightSimulation {
       { name: "kinship-homes", dailyOnly: true, run: () => this.rehomeByKinship() },
       { name: "species", dailyOnly: true, run: () => this.updateSpecies() },
       { name: "factions", dailyOnly: true, run: () => this.updateFactions() },
+      { name: "stress-history", dailyOnly: true, run: () => this.recordStress() },
       { name: "mastery", run: () => this.checkMastery() },
       { name: "desire-paths", dailyOnly: true, run: () => this.wearDesirePaths() },
       { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
@@ -1548,7 +1384,7 @@ export class MosslightSimulation {
 
   private updateSeasonalEvent(previousSeason: Season): void {
     if (previousSeason !== this.state.season) {
-      this.state.seasonalEvent = this.createSeasonalEvent(this.state.season);
+      this.state.seasonalEvent = createSeasonalEvent(this.state.season);
       this.addMessage(
         `SEASON · ${this.state.seasonalEvent.title} begins. ${this.state.seasonalEvent.description}`,
         this.state.seasonalEvent.tone === "warning" ? "warning" : "info",
@@ -1928,12 +1764,42 @@ export class MosslightSimulation {
        * instead of going somewhere and doing something. Arriving commits them
        * for a while, and only real distress interrupts it.
        */
-      resident.goal = goal;
-      resident.lastDecisionExplanation = explanation;
-      if (target) this.setResidentTarget(resident, target);
+      /*
+       * Somebody already busy is left alone. Only a genuinely pressing need
+       * interrupts a commitment — otherwise a resident settled at their bench
+       * would keep working while their food slid.
+       */
+      const lowest = Math.min(
+        resident.needs.food,
+        resident.needs.shelter,
+        resident.needs.safety,
+        resident.needs.belonging,
+      );
+      const urgent = lowest < NEED_INTERRUPT || resident.distress >= DISTRESS_INTERRUPT;
+      if (resident.dwell > 0 && !urgent) {
+        resident.dwell -= 1;
+      } else {
+        resident.dwell = 0;
+        resident.goal = goal;
+        resident.lastDecisionExplanation = explanation;
+        if (target) this.setResidentTarget(resident, target);
+      }
       this.stepAlongPath(resident);
 
-      if (target && sameCell(resident.position, target)) {
+      /*
+       * Effects read the resident's committed goal and their own target, not
+       * the decision computed this tick. While dwelling the two disagree — a
+       * resident standing at the market still has a bench in mind — and an
+       * earlier cut tested the fresh decision, so a dwelling resident arrived
+       * somewhere and then never actually ate there.
+       */
+      const settled = Boolean(resident.target) && sameCell(resident.position, resident.target!);
+      if (settled && resident.dwell === 0) resident.dwell = dwellFor(resident.goal);
+      // Doing one thing properly beats flip-flopping between four.
+      const focus = resident.dwell > 0 ? FOCUS_BONUS : 1;
+
+      if (settled) {
+        const goal = resident.goal;
         // Satiety thresholds. Without them a resident who reached the market
         // simply stood there eating on every tick for as long as they lingered,
         // which emptied a full granary in about twenty days.
@@ -1942,22 +1808,22 @@ export class MosslightSimulation {
           const fed = this.drawFromStore("food", MEAL_FOOD);
           const watered = this.drawFromStore("water", MEAL_WATER);
           const table = hasTradition(this.state, "open-table") ? 1.3 : 1;
-          resident.needs.food = clamp(resident.needs.food + 9 * table * Math.min(1, fed * 0.7 + watered * 0.3));
+          resident.needs.food = clamp(resident.needs.food + 9 * focus * table * Math.min(1, fed * 0.7 + watered * 0.3));
           if (fed < 0.5) resident.lastDecisionExplanation = "The stalls are bare. I went hungry.";
         }
         if (goal === "rest" && resident.needs.shelter < SATED) {
           // A warm burrow burns fuel.
           const warmed = this.drawFromStore("warmth", REST_WARMTH);
           const hearth = hasTradition(this.state, "hearthcraft") ? 1.35 : 1;
-          resident.needs.shelter = clamp(resident.needs.shelter + (4 + 5 * warmed) * hearth);
+          resident.needs.shelter = clamp(resident.needs.shelter + (4 + 5 * warmed) * focus * hearth);
           if (warmed < 0.5) resident.lastDecisionExplanation = "There was no fuel left for the hearth.";
         }
         if (goal === "socialize") {
           const veil = resident.species === "cloudmoth" && hasTradition(this.state, "sky-veil") ? 1.4 : 1;
-          resident.needs.belonging = clamp(resident.needs.belonging + 7 * veil);
+          resident.needs.belonging = clamp(resident.needs.belonging + 7 * focus * veil);
         }
         if (goal === "explore") {
-          resident.needs.safety = clamp(resident.needs.safety + 3);
+          resident.needs.safety = clamp(resident.needs.safety + 3 * focus);
           resident.skills.scouting = clamp(resident.skills.scouting + 0.25);
         }
         if (goal === "work") {
@@ -2244,7 +2110,7 @@ export class MosslightSimulation {
     if (this.state.metrics.averageWellbeing < 57 || this.state.metrics.resourceSecurity < 42) return;
     if (Math.min(...Object.values(this.state.resources)) < 30) return;
 
-    const resident = this.createResident(this.state.residents.length, this.state.buildings);
+    const resident = createResident(this.rng, this.ids, this.state.residents.length, this.state.buildings);
     if (!resident) return;
     // New arrivals start young and unskilled; they grow into the settlement.
     resident.age = 1;
@@ -2809,6 +2675,21 @@ export class MosslightSimulation {
     }
   }
 
+  /**
+   * One day's basin-wide pressure per channel, kept as the evidence the sidecar
+   * fits its couplings to. Bounded so a long run cannot bloat a save.
+   */
+  private recordStress(): void {
+    const graph = buildStressGraph(this.state);
+    const entry: Record<string, number> = {};
+    for (const channel of STRESS_CHANNELS) entry[channel] = Number(channelStress(graph, channel).toFixed(4));
+    this.state.stressHistory ??= [];
+    this.state.stressHistory.push(entry);
+    if (this.state.stressHistory.length > STRESS_HISTORY_DAYS) {
+      this.state.stressHistory.splice(0, this.state.stressHistory.length - STRESS_HISTORY_DAYS);
+    }
+  }
+
   private buildingIndexResident(id: string): Resident | undefined {
     return this.state.residents.find((resident) => resident.id === id);
   }
@@ -2921,7 +2802,7 @@ export class MosslightSimulation {
     const family = this.rng.pick(families);
     const parent = this.state.residents.find((resident) => resident.id === family.aId);
     if (!parent) return;
-    const child = this.createResident(this.state.residents.length, this.state.buildings);
+    const child = createResident(this.rng, this.ids, this.state.residents.length, this.state.buildings);
     if (!child) return;
     child.age = 0;
     child.stage = "sprout";
@@ -2969,7 +2850,7 @@ export class MosslightSimulation {
   private spawnSpecies(species: Species, count: number, explanation?: string): number {
     let spawned = 0;
     for (let index = 0; index < count; index += 1) {
-      const resident = this.createResident(this.state.residents.length + index, this.state.buildings);
+      const resident = createResident(this.rng, this.ids, this.state.residents.length + index, this.state.buildings);
       if (!resident) continue;
       resident.species = species;
       resident.age = this.rng.int(8, 20);
@@ -3082,14 +2963,6 @@ export class MosslightSimulation {
   private isCollectibleTile(tile: TileKind): tile is CollectibleTile {
     return tile === "fern" || tile === "mushroom" || tile === "crystal" || tile === "ruin";
   }
-}
-
-function stageForAge(age: number): LifeStage {
-  return age < ADULT_AGE ? "sprout" : age < ELDER_AGE ? "adult" : "elder";
-}
-
-function clampCell(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, Math.round(value)));
 }
 
 export const SAVE_VERSION = 10;

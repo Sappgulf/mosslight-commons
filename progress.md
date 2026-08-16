@@ -1275,3 +1275,78 @@ Eight warnings, carried since the beginning of this work, are gone:
 - 250 Vitest tests (14 new) and 20 Playwright tests pass; `npm run lint` is
   clean; the build is clean.
 - One snapshot updated on purpose, for the household clustering.
+
+## Closing the open list
+
+All three items that had been sitting open.
+
+### Worldgen extracted
+
+`createGrid`, `createRevealedGrid`, `createDistricts`, `createRelationships`,
+`createSeasonalEvent`, `createResidents` and `createResident` move to
+`src/sim/worldgen.ts` — the most self-contained thing the simulation did: it
+runs once, reads no world state, and answers only to the seeded RNG.
+
+`simulation.ts` 3293 → 3153.
+
+**A transcription bug, caught by the snapshot.** The move copied `ELDER_AGE` as
+46 against the simulation's 42, which silently reclassified part of the
+population and changed what the basin produced — buildings and residents came
+back identical while resources drifted. That is the second constant this
+refactor has got wrong by hand (after `RESIDENTS_PER_MARKET` 34 → 28), and both
+were caught only because the tests compare real numbers. They are single-source
+now.
+
+### The Torx sidecar had never run
+
+`sim/requirements.txt` pointed at a venv in a parent workspace that does not
+exist on a fresh machine, so this was never installed and never executed. It
+installs fine — `python3 -m venv .venv` and three packages — and the moment it
+ran, it raised:
+
+> `ValueError: expected 3 thetas aligned with circuit.gates, got 2.`
+
+The policy circuit had **three** gates and was handed **two** parameters. It
+threw on every request, the browser fell back to the local model exactly as
+designed, and nothing said the research path was dead. It is fixed, and the
+whole pipeline now runs end to end: a 30-node Ising graph over 71 couplings.
+
+- [x] **Couplings are learned** (#2). The flat declared table is now blended
+      with the correlation between each edge's two channels across the
+      settlement's own recorded pressure history — 40 days of it, written daily
+      by a new `stress-history` stage. Measured: **all 71 couplings move**,
+      mean weight 0.220 → 0.389. Under eight days of history it falls back to
+      the declared table rather than fitting noise.
+- [x] **The circuit is trained** (#3). Thetas were computed from linear formulas
+      and the circuit run once; calling that "Torx evaluated the policy" was
+      generous. They are now fitted by gradient descent through the simulator,
+      24 steps per request, against the measured signals — with a fallback to
+      the unfitted parameters if a build is not differentiable, because a
+      forecast is worth more than a gradient.
+- [x] **12 Python tests**, against a real captured request rather than a
+      hand-made fixture, plus a README that says how to create the environment.
+
+### Dwelling, on the third attempt
+
+Twice built, once removed. It works now because the earlier attempts had it
+backwards: dwelling was pure loss, since a resident who used to switch to
+whatever need was most pressing every tick now stuck with one thing and met
+their needs worse.
+
+A committed resident does the thing *properly*, so the activity counts for 1.6×
+while it lasts. That is what makes standing still affordable — and with it the
+ledger finishes on the existing pacing budget, which is what needed fixing all
+along rather than the dwell.
+
+Commitments are short (1–3 ticks), and any genuinely pressing need breaks one.
+
+**One knock-on, measured not guessed:** residents walk slightly less, so the
+busiest tile fell from crossing 260 footfall to settling around 210 and no new
+roads wore in. The desire-path threshold is restated in the new units at 190.
+The intent is unchanged; the units moved.
+
+### Verification
+
+- 254 Vitest tests (4 new), 20 Playwright tests, 12 Python tests. Lint clean,
+  build clean.
+- Two snapshots updated deliberately.

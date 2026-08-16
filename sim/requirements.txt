@@ -1,7 +1,11 @@
-# Run this adapter with the parent workspace environment:
-# ../.venv/bin/python sim/mosslight_sim.py
+# The sidecar's own environment. Create it from the repo root:
 #
-# The parent environment already contains editable extro-torx and thrml installs.
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r sim/requirements.txt
+#
+# This used to say "use the parent workspace environment", which did not exist
+# on a fresh checkout — so the research path went unrun, and unrun code does not
+# work.
 jax
 extro-torx
 thrml

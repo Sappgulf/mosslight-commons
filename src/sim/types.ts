@@ -208,6 +208,16 @@ export interface Resident {
    * than stuttering every other tick.
    */
   moveCredit: number;
+  /**
+   * Ticks left standing still, doing the thing they walked here for.
+   *
+   * Residents re-decided their goal every single tick, so the board jittered:
+   * someone reached the market and was reassigned to their bench immediately.
+   * Arriving commits them — and because a committed resident does the thing
+   * properly rather than flip-flopping, the activity counts for more while it
+   * lasts. That is what makes the commitment affordable.
+   */
+  dwell: number;
 }
 
 /**
@@ -461,6 +471,14 @@ export interface WorldState {
   factions: Faction[];
   /** Day the last bloc formed, so a bad week cannot spawn a dozen. */
   lastFoundingDay: number;
+  /**
+   * A rolling record of basin-wide pressure per channel, one entry a day.
+   *
+   * The sidecar's Ising couplings were a flat 0.32 everywhere — a placeholder
+   * standing in for a real relationship between pressures. This is the evidence
+   * it needs to learn them from the settlement's own past instead.
+   */
+  stressHistory: Array<Record<string, number>>;
   /**
    * The largest the settlement has ever been.
    *
