@@ -249,7 +249,6 @@ export class WorldScene extends Phaser.Scene {
   private expeditionLayer!: Phaser.GameObjects.Container;
   private hoverLayer!: Phaser.GameObjects.Graphics;
   private previewLabel!: Phaser.GameObjects.Text;
-  private titleText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
 
   private readonly residentViews = new Map<string, ResidentView>();
@@ -394,16 +393,24 @@ export class WorldScene extends Phaser.Scene {
       strokeThickness: 2,
     }).setOrigin(0.5, 1).setDepth(DEPTH.labels).setVisible(false);
 
-    this.titleText = this.add.text(OFFSET_X, OFFSET_Y - 44, "M O S S L I G H T   B A S I N", {
-      color: "#63e6d4",
-      fontFamily: "Georgia, serif",
-      fontSize: "15px",
-    }).setDepth(DEPTH.labels).setScrollFactor(0);
-    this.hintText = this.add.text(OFFSET_X + 1, OFFSET_Y - 24, "", {
-      color: "#9eb9ad",
+    /*
+     * The board carries no permanent furniture.
+     *
+     * It used to wear a decorative "M O S S L I G H T   B A S I N" title and a
+     * standing line of instructions — "drag to pan · scroll to zoom" — printed
+     * over the world at all times, plus the weather described in words on top
+     * of weather the player can already see. That is chrome sitting on the one
+     * surface the game is actually about. The hint survives only for the moments
+     * it says something the board cannot: what a build tool will place, or what
+     * the thing under the cursor is.
+     */
+    this.hintText = this.add.text(OFFSET_X + 1, OFFSET_Y - 20, "", {
+      color: "#c4d7cc",
       fontFamily: "system-ui, sans-serif",
       fontSize: "11px",
-    }).setDepth(DEPTH.labels).setScrollFactor(0);
+      backgroundColor: "#08151bcc",
+      padding: { x: 6, y: 3 },
+    }).setDepth(DEPTH.labels).setScrollFactor(0).setVisible(false);
 
     // Sheets are generated from the loaded base textures, so this must run
     // after preload and before the first resident is drawn.
@@ -1436,10 +1443,18 @@ export class WorldScene extends Phaser.Scene {
       const wantKey = resident.want && !resident.want.fulfilled ? `${resident.want.kind}:${resident.want.createdDay}` : "";
       if (view.lastWant !== wantKey) {
         view.lastWant = wantKey;
-        if (resident.want && !resident.want.fulfilled) {
-          const impatient = this.simulation.state.day - resident.want.createdDay > 6;
+        /*
+         * Only requests that are actually running out of time get a mark.
+         *
+         * Every open want used to float a glyph over its resident, and with a
+         * hundred residents the board wore a permanent forest of hearts that
+         * said nothing about which of them needed answering. The impatient
+         * ones are the actionable ones, so they are the only ones that speak.
+         */
+        const impatient = this.simulation.state.day - (resident.want?.createdDay ?? 0) > 4;
+        if (resident.want && !resident.want.fulfilled && impatient) {
           view.wantMark.setText(WANT_GLYPH[resident.want.kind]);
-          view.wantMark.setColor(impatient ? "#e87968" : "#ffd58b");
+          view.wantMark.setColor("#e87968");
           view.wantMark.setVisible(true);
         } else {
           view.wantMark.setVisible(false);
@@ -1634,14 +1649,6 @@ export class WorldScene extends Phaser.Scene {
     const hoveredBuilding = this.hoverCell ? this.simulation.getBuildingAt(this.hoverCell) : undefined;
     const hoveredDistrict = this.hoverCell ? this.simulation.getDistrictAt(this.hoverCell) : undefined;
     const activeExpedition = this.simulation.state.expeditions.find((expedition) => expedition.status === "active");
-    const weatherHint =
-      this.simulation.state.season === "longshade"
-        ? "Long Shade ash is falling · keep the lanterns"
-        : this.simulation.state.season === "emberfall"
-          ? "emberfall motes lift from the canopy"
-          : this.simulation.state.season === "mosswake"
-            ? "mosswake petals drift across the reeds"
-            : "suncrest spores hang in the warm air";
 
     const hint = buildMode === "path"
       ? "hover to preview PATH · click to pack earth"
@@ -1655,11 +1662,12 @@ export class WorldScene extends Phaser.Scene {
             ? `${activeExpedition.title} · scout ${activeExpedition.progress}/${activeExpedition.duration}`
             : hoveredDistrict
               ? `${DISTRICT_DEFINITIONS[hoveredDistrict.type].label} · ${DISTRICT_DEFINITIONS[hoveredDistrict.type].bonus}`
-              : `${weatherHint} · drag to pan · scroll to zoom`;
+              // Nothing under the cursor and no tool held: say nothing.
+              : "";
 
     if (hint !== this.lastHintText) {
       this.lastHintText = hint;
-      this.hintText.setText(hint);
+      this.hintText.setText(hint).setVisible(hint !== "");
     }
   }
 

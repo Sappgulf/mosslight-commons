@@ -153,6 +153,18 @@ const WORKPLACE_CROWDING = 1.6;
  * bonds that actually deepened, rather than on the first morning.
  */
 const KINSHIP_MOVE_THRESHOLD = 70;
+/** How far from the Root a young settlement will build. */
+const BASE_SETTLEMENT_REACH = 9;
+/** The furthest a mature settlement will push, short of the basin's rim. */
+const MAX_SETTLEMENT_REACH = 26;
+/*
+ * What a population warrants. These set how far a prosperous settlement keeps
+ * building once its immediate needs are met.
+ */
+const RESIDENTS_PER_FARM = 14;
+const RESIDENTS_PER_GROVE = 16;
+const RESIDENTS_PER_HOME = 10;
+const RESIDENTS_PER_WORKSHOP = 45;
 /** How much one builder standing at a site adds to a tick of progress. */
 const CREW_CONTRIBUTION = 0.34;
 /** However big the crowd, a raising cannot go more than this much faster. */
@@ -1396,8 +1408,17 @@ export class MosslightSimulation {
     const offset = { x: (index % 5) - 2, y: Math.floor(index / 5) % 3 - 1 };
     const age = this.rng.int(ADULT_AGE, 30);
     return {
-      id: `resident-${this.nextResidentId++}`,
-      name: `${names[index % names.length]!} ${Math.floor(index / names.length) + 1}`,
+      /*
+       * The name is keyed to the resident's own id, not to their position in
+       * the array.
+       *
+       * It used to be `names[index % names.length]` with the index taken from
+       * the current population size — so every departure freed an index for the
+       * next arrival to reuse, and a settlement that had lost anybody ended up
+       * with two residents answering to "Sedge 3". Ids only ever go up.
+       */
+      id: `resident-${this.nextResidentId}`,
+      name: `${names[this.nextResidentId % names.length]!} ${Math.floor(this.nextResidentId++ / names.length) + 1}`,
       species,
       position: {
         x: clampCell(home.position.x + offset.x, 1, GRID_WIDTH - 2),
@@ -2152,12 +2173,56 @@ export class MosslightSimulation {
     this.addMessage(`COMMONS · The residents raised a ${definition.label} of their own.`, "good");
   }
 
+  /**
+   * What a settlement of this size should have and does not yet, in the order
+   * it should want it. Returns undefined once the town has caught up with its
+   * own population.
+   */
+  private chooseGrowth(): Exclude<BuildingType, "root-heart"> | undefined {
+    const population = this.state.residents.length;
+    if (population < 12) return undefined;
+
+    const targets: Array<[Exclude<BuildingType, "root-heart">, number]> = [
+      ["reed-farm", Math.ceil(population / RESIDENTS_PER_FARM)],
+      ["lantern-grove", Math.ceil(population / RESIDENTS_PER_GROVE)],
+      ["commons-market", Math.ceil(population / RESIDENTS_PER_MARKET)],
+      ["burrow-home", Math.ceil(population / RESIDENTS_PER_HOME)],
+      ["root-workshop", Math.ceil(population / RESIDENTS_PER_WORKSHOP)],
+    ];
+
+    // The largest shortfall first, so the town fills its worst gap next.
+    let wanted: Exclude<BuildingType, "root-heart"> | undefined;
+    let worst = 0;
+    for (const [type, target] of targets) {
+      const shortfall = target - this.countBuildings(type);
+      if (shortfall > worst) {
+        worst = shortfall;
+        wanted = type;
+      }
+    }
+    return wanted;
+  }
+
   /** The building the Commons most needs next, or undefined if it needs none. */
   private chooseSelfBuild(): Exclude<BuildingType, "root-heart"> | undefined {
     const { housingPressure, diagnosis } = this.state.metrics;
     // Build ahead of the crunch rather than only once it has arrived, so the
     // settlement visibly keeps growing instead of settling at its first cap.
     if (housingPressure > 0.88) return "burrow-home";
+
+    /*
+     * A settlement that is doing well keeps building.
+     *
+     * This used to return nothing unless housing was tight or the report was a
+     * warning, so a thriving Commons raised nothing at all: a hundred and four
+     * residents lived in eleven buildings, and the town only ever grew out of
+     * crisis. Below is what a population of this size warrants — farms, groves,
+     * workshops and burrows in proportion to the people — so growth comes from
+     * prosperity too, and the settlement visibly spreads as it succeeds.
+     */
+    const ambition = this.chooseGrowth();
+    if (ambition) return ambition;
+
     if (diagnosis.tone !== "warning") return undefined;
 
     const byNeed: Record<NeedKey, Exclude<BuildingType, "root-heart">> = {
@@ -2231,10 +2296,25 @@ export class MosslightSimulation {
         const tile = this.state.grid[y]?.[x];
         if (tile !== "grass") continue;
 
-        // Nothing should end up marooned on the far edge of the basin.
+        /*
+         * The settlement's reach grows with the settlement.
+         *
+         * This was a flat sixteen tiles from the Root, with a standing pull
+         * back toward the centre — so a Commons of thirty and a Commons of a
+         * hundred and thirty occupied the same small blob, and the town could
+         * never push outward however large it got. The cap now opens as the
+         * town grows, and the centre-pull relaxes with it, so a mature
+         * settlement spreads across the basin instead of stacking on itself.
+         */
         const reach = manhattan(cell, anchor);
-        if (reach > 16) continue;
-        let score = -reach * 0.35;
+        const reachLimit = Math.min(
+          MAX_SETTLEMENT_REACH,
+          BASE_SETTLEMENT_REACH + Math.floor(this.state.residents.length / 9) + this.state.buildings.length,
+        );
+        if (reach > reachLimit) continue;
+        // Big towns stop hugging the Root; small ones still gather round it.
+        const centrePull = 0.35 * Math.max(0.25, 1 - this.state.buildings.length / 18);
+        let score = -reach * centrePull;
 
         // Never wall a building in against its neighbours.
         const crowding = this.state.buildings.filter(
@@ -2249,7 +2329,9 @@ export class MosslightSimulation {
             const nearestHome = homes.length
               ? Math.min(...homes.map((home) => manhattan(home.position, cell)))
               : 4;
-            score -= Math.abs(nearestHome - 4) * 1.4;
+            // A denser town wants its next burrow further out, not wedged in.
+            const spacing = homes.length >= 6 ? 5 : 4;
+            score -= Math.abs(nearestHome - spacing) * 1.4;
             break;
           }
           case "reed-farm": {

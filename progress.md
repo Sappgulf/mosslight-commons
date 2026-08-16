@@ -1064,3 +1064,62 @@ organised body inside it forever, at no cost.
   that lone wolves are exempt, and that seceding actually reduces population)
   and 20 Playwright tests pass.
 - Browser: all three stances render with their own colour and label.
+
+## Legibility pass — the board, and a town that actually grows
+
+Player feedback, and it was right: the movement felt the same, the settlement
+never expanded, and the map was covered in things that should not have been on
+it. Seven passes had gone into simulation depth while the three things a player
+actually looks at went untouched.
+
+### The board carries no furniture
+
+- [x] Removed the permanent "M O S S L I G H T   B A S I N" title painted over
+      the world, and the standing instruction line — "drag to pan · scroll to
+      zoom", plus the weather described in words on top of weather already
+      visible. The hint survives only when it says something the board cannot:
+      what a held tool will place, or what is under the cursor.
+- [x] The board went from **36% to 56%** of the stacked layout's height. The
+      brand block and its six file-management buttons — SAVE, LOAD, EXPORT,
+      IMPORT, NEW, ? — were sitting between the map and the settlement's own
+      readouts; they now go to the bottom of the stack where they belong.
+- [x] Want glyphs only mark requests actually running out of time. Every open
+      want used to float a heart, so a hundred residents wore a permanent
+      forest of them that said nothing about which needed answering.
+
+### A settlement that grows out of prosperity, not only crisis
+
+`chooseSelfBuild` returned nothing unless housing was tight or the report was a
+warning. A thriving Commons therefore built **nothing at all**: 104 residents
+lived in 11 buildings, and the town only ever grew when it was already in
+trouble. `chooseGrowth` adds what a population of that size warrants — farms,
+groves, markets, burrows and workshops in proportion to the people.
+
+Measured over the same 1400-tick run: **buildings 11 → 23**, footprint 17×17 →
+20×17, occupied tiles 53 → 66.
+
+### A wrong diagnosis, corrected
+
+The first attempt raised the hard 16-tile cap on how far from the Root anything
+could be built, on the theory that the cap was pinning the town in place. It
+was not: the footprint came back **byte-identical to baseline**, because the
+cap was never the binding constraint — the settlement simply was not building.
+Measuring before and after is what caught it. The reach change was kept, since
+a growing town does now need the room, but it was not the fix.
+
+### A naming bug the growth exposed
+
+More population surfaced duplicate residents: two `Sedge 3`, a `Moss 3`
+glowtail and a `Moss 3` mireling. Names were built from the population array's
+index, so every departure freed an index for the next arrival to reuse. Names
+are keyed to the resident's own ever-increasing id now — **0 duplicates across
+a 106-resident run**, where before a settlement that had lost anybody produced
+them routinely. A mastery test had been quietly absorbing this by keying its
+counts on names.
+
+### Verification
+
+- 230 Vitest and 20 Playwright tests pass. One snapshot updated on purpose: the
+  500-tick digest now shows 13 buildings where it showed 8.
+- Browser: at day 171 the basin holds 110 residents across 25 buildings, spread
+  over the board rather than banked in one strip.
