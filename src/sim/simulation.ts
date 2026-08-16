@@ -132,6 +132,12 @@ const RESIDENTS_PER_MARKET = 34;
 
 /** How much each existing worker discourages another from joining a bench. */
 const WORKPLACE_CROWDING = 1.6;
+/**
+ * How strong a family or kinship tie has to be before a resident will move in
+ * with that relative. Set above the starting strength so households form out of
+ * bonds that actually deepened, rather than on the first morning.
+ */
+const KINSHIP_MOVE_THRESHOLD = 70;
 
 /** Which craft each workplace teaches. */
 const WORKPLACE_CRAFT: Partial<Record<BuildingType, keyof Resident["skills"]>> = {
@@ -1398,6 +1404,7 @@ export class MosslightSimulation {
       { name: "arrivals", run: () => this.maybeWelcomeResident() },
       { name: "self-build", dailyOnly: true, run: () => this.maybeSelfBuild() },
       { name: "workplaces", dailyOnly: true, run: () => this.rebalanceWorkplaces() },
+      { name: "kinship-homes", dailyOnly: true, run: () => this.rehomeByKinship() },
       { name: "mastery", run: () => this.checkMastery() },
       { name: "desire-paths", dailyOnly: true, run: () => this.wearDesirePaths() },
       { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
@@ -2800,6 +2807,62 @@ export class MosslightSimulation {
         counts.set(best.id, (counts.get(best.id) ?? 0) + 1);
         resident.workplaceId = best.id;
       }
+    }
+  }
+
+  /**
+   * Families drift toward one another's burrows.
+   *
+   * Kinship and family ties were tracked, strengthened, and promoted from
+   * friendship — and then did nothing at all except colour a line in the
+   * inspector. Residents were housed by `index % homes.length` at world
+   * creation and never moved again, so a settlement's social graph had no
+   * bearing on where anybody actually lived. Once a day a resident with a
+   * strong family or kinship tie moves in with that relative, if the burrow has
+   * room, which turns the relationship system into something visible on the
+   * board.
+   */
+  private rehomeByKinship(): void {
+    const homes = this.buildingsByType.get("burrow-home");
+    if (!homes || homes.length < 2) return;
+
+    const occupancy = new Map<string, number>();
+    for (const resident of this.state.residents) {
+      occupancy.set(resident.homeId, (occupancy.get(resident.homeId) ?? 0) + 1);
+    }
+
+    const capacityOf = (building: Building): number =>
+      Math.floor(
+        (building.type === "root-heart" ? BASE_HOUSING_CAPACITY : HOME_HOUSING_CAPACITY) *
+          (OUTPUT_MULTIPLIER[building.level] ?? 1),
+      );
+
+    const byId = new Map(this.state.residents.map((resident) => [resident.id, resident]));
+
+    for (const resident of this.state.residents) {
+      // The strongest family or kinship tie is the one worth moving for.
+      let kin: Resident | undefined;
+      let strongest = KINSHIP_MOVE_THRESHOLD;
+      for (const relationship of this.state.relationships) {
+        if (relationship.kind !== "family" && relationship.kind !== "kinship") continue;
+        if (relationship.aId !== resident.id && relationship.bId !== resident.id) continue;
+        const otherId = relationship.aId === resident.id ? relationship.bId : relationship.aId;
+        const other = byId.get(otherId);
+        if (!other || other.homeId === resident.homeId) continue;
+        if (relationship.strength > strongest) {
+          strongest = relationship.strength;
+          kin = other;
+        }
+      }
+      if (!kin) continue;
+
+      const kinHome = this.buildingIndex.get(kin.homeId);
+      if (!kinHome) continue;
+      if ((occupancy.get(kinHome.id) ?? 0) >= capacityOf(kinHome)) continue;
+
+      occupancy.set(resident.homeId, Math.max(0, (occupancy.get(resident.homeId) ?? 1) - 1));
+      occupancy.set(kinHome.id, (occupancy.get(kinHome.id) ?? 0) + 1);
+      resident.homeId = kinHome.id;
     }
   }
 

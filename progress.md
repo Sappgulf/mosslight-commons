@@ -671,3 +671,41 @@ the suite was failing on machine load rather than on behaviour.
   that harness caught an ordering bug where an empty graph did Torx work before
   bailing. The THRML/Torx sampling paths are **unverified on this machine** —
   see below.
+
+## Consequence pass — the social graph does something
+
+Relationships were tracked in detail — four kinds, strength, shared days,
+friendships promoted to family — and then changed almost nothing. Traditions
+were framed as "lasting choices" that every settlement eventually took all of.
+
+- [x] **Rivalry is felt where it happens.** It was a single settlement-wide
+      multiplier on food and water, so two residents who could not stand each
+      other slowed farms on the far side of the basin, and splitting them
+      across benches changed nothing at all. It now costs the bench they
+      actually share — 8% per rival pair standing on it, floored at 0.6 — so
+      moving one of them fixes it and assignment matters.
+- [x] **Families move in together.** Kinship and family ties were promoted,
+      strengthened, and then only ever coloured a line in the inspector:
+      residents were housed by `index % homes.length` at world creation and
+      never moved again. Once a day a resident with a family or kinship tie
+      above 70 moves into that relative's burrow if it has room, so the social
+      graph is now visible on the board.
+- [x] **Traditions rule each other out.** Seed Vault ↔ Open Table (store the
+      harvest or give it away) and Hearthcraft ↔ Lantern Vigil (build around
+      the hearth or the lantern) are now exclusive pairs, which makes chapters
+      one and two a decision rather than a checklist. Sky Veil is deliberately
+      unpaired: a chapter-four objective requires it, and no choice may lock
+      the ledger. A ruled-out practice stays on the list, struck through and
+      naming what closed it, rather than silently vanishing.
+
+### Verification
+
+- 168 Vitest tests (18 new across rivalry penalties, kinship rehoming, and the
+  exclusion rules — including one asserting the Sky Veil stays reachable
+  whatever else the Commons kept) and 20 Playwright tests pass.
+- Browser-checked: the game boots clean, the only console errors are the
+  optional sidecar's refused polls, and the blocked-practice styling resolves
+  to opacity 0.45 with a struck-through label.
+- Two snapshots updated on purpose: the pipeline gained a `kinship-homes`
+  stage, and the 500-tick digest moved slightly now that rivalry is local
+  rather than global.

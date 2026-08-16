@@ -17,7 +17,7 @@ import { WANT_GLYPH } from "../sim/wants";
 import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
 import { isActivationOnControl, isTypingTarget, type Binding, type BindingGroup, type KeyLayer } from "./keymap";
 import { masteryTitle, tierFor } from "../sim/mastery";
-import { canAfford, isAvailable, missingFor, TRADITION_DEFINITIONS, TRADITION_ORDER } from "../sim/traditions";
+import { blockedBy, canAfford, isAvailable, missingFor, TRADITION_DEFINITIONS, TRADITION_ORDER } from "../sim/traditions";
 import type { TraditionKey } from "../sim/types";
 
 const shortcutGroups: BindingGroup[] = ["Time", "View", "World", "Session"];
@@ -873,20 +873,29 @@ export class HUD {
     const state = this.simulation.state;
 
     const rows = TRADITION_ORDER
-      .filter((key) => state.traditions.includes(key) || isAvailable(state, key))
+      .filter(
+        (key) =>
+          state.traditions.includes(key) ||
+          isAvailable(state, key) ||
+          // A practice ruled out by one already kept still belongs on the list:
+          // vanishing silently would hide that the choice was ever made.
+          (state.chapter >= TRADITION_DEFINITIONS[key].chapter && blockedBy(state, key) !== undefined),
+      )
       .map((key) => {
         const definition = TRADITION_DEFINITIONS[key];
         const kept = state.traditions.includes(key);
+        const blocker = kept ? undefined : blockedBy(state, key);
         const affordable = canAfford(state, key);
 
         const button = document.createElement("button");
         button.type = "button";
         button.className = "tradition";
         button.dataset.tradition = key;
-        button.disabled = kept || !affordable;
+        button.disabled = kept || Boolean(blocker) || !affordable;
         button.classList.toggle("is-kept", kept);
-        button.classList.toggle("is-unaffordable", !kept && !affordable);
-        button.title = definition.effect;
+        button.classList.toggle("is-blocked", Boolean(blocker));
+        button.classList.toggle("is-unaffordable", !kept && !blocker && !affordable);
+        button.title = blocker ? `Ruled out by the ${blocker.label}.` : definition.effect;
 
         const head = document.createElement("span");
         head.className = "tradition-head";
@@ -906,6 +915,8 @@ export class HUD {
         cost.className = "tradition-cost";
         if (kept) {
           cost.textContent = "KEPT";
+        } else if (blocker) {
+          cost.textContent = `RULED OUT BY ${blocker.label.toUpperCase()}`;
         } else {
           const missing = missingFor(state, key);
           cost.textContent = missing.length === 0

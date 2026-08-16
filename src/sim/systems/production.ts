@@ -10,10 +10,51 @@ const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max,
 /** Resin the workshop will never burn, so recipes always have something to use. */
 const RESIN_RESERVE = 4;
 
+/** Strength above which a rivalry is bad enough to disrupt a shared bench. */
+const RIVALRY_THRESHOLD = 60;
+
+/** How much output one active rivalry costs the bench it happens on. */
+const RIVALRY_COST = 0.08;
+
+/** A bench never loses more than this, however badly its crew get on. */
+const RIVALRY_FLOOR = 0.6;
+
+/** Unordered key for a pair of residents, so lookups do not care about order. */
+const pairKey = (first: string, second: string): string =>
+  first < second ? `${first}|${second}` : `${second}|${first}`;
+
+/**
+ * The pairs currently in open rivalry.
+ *
+ * Built once per call rather than scanned per building: `weightedOutput` runs
+ * several times a tick and the relationship list grows with the settlement.
+ */
+export function activeRivalries(state: SimContext["state"]): Set<string> {
+  const rivals = new Set<string>();
+  for (const relationship of state.relationships) {
+    if (relationship.kind !== "rivalry") continue;
+    if (relationship.strength <= RIVALRY_THRESHOLD) continue;
+    rivals.add(pairKey(relationship.aId, relationship.bId));
+  }
+  return rivals;
+}
+
+/** How much a bench loses to rivalries among the people actually standing on it. */
+export function benchRivalryPenalty(workers: Resident[], rivals: Set<string>): number {
+  if (workers.length < 2 || rivals.size === 0) return 1;
+  let pairs = 0;
+  for (let first = 0; first < workers.length; first += 1) {
+    for (let second = first + 1; second < workers.length; second += 1) {
+      if (rivals.has(pairKey(workers[first]!.id, workers[second]!.id))) pairs += 1;
+    }
+  }
+  return Math.max(RIVALRY_FLOOR, 1 - pairs * RIVALRY_COST);
+}
+
 /**
  * Effective count of a building type: each building contributes its level
  * multiplier scaled by its placement bonus, then by the average relevant skill
- * of whoever works there.
+ * of whoever works there, then by how well that crew actually get on.
  */
 export function weightedOutput(
   context: SimContext,
@@ -21,6 +62,7 @@ export function weightedOutput(
   skill?: keyof Resident["skills"],
 ): number {
   let total = 0;
+  const rivals = activeRivalries(context.state);
   for (const building of context.state.buildings) {
     if (building.type !== type) continue;
     // Where a building sits now matters as much as what level it is.
@@ -28,6 +70,14 @@ export function weightedOutput(
     if (skill) {
       const workers = context.state.residents.filter((resident) => resident.workplaceId === building.id);
       if (workers.length > 0) {
+        /*
+         * Rivalry is felt where it happens. It used to be a single settlement-
+         * wide multiplier on food and water, so two residents who could not
+         * stand each other slowed down farms on the far side of the basin and
+         * splitting them across benches changed nothing. Now it costs the bench
+         * they share, and moving one of them fixes it.
+         */
+        contribution *= benchRivalryPenalty(workers, rivals);
         /*
          * Mastery, not just raw skill. Each worker contributes their tier's
          * multiplier, so a bench of Masters is worth substantially more than a
@@ -80,13 +130,6 @@ export function updateResources(context: SimContext): void {
   const farmPolicy = context.hasPolicy("wetland-first") ? 1.12 : 1;
   const marketPolicy = context.hasPolicy("market-first") ? 1.16 : 1;
 
-  // Rivalries in the settlement drag on every workplace.
-  const rivalryDrag = clamp(
-    1 - state.relationships.filter((relationship) => relationship.kind === "rivalry" && relationship.strength > 60).length * 0.015,
-    0.75,
-    1,
-  );
-
   const basinQuality = context.averageWaterQuality();
   const habitatPenalty = 1 - Math.min(0.28, state.habitatStress * 0.012);
   const storage = state.metrics.storage;
@@ -104,10 +147,10 @@ export function updateResources(context: SimContext): void {
 
   // Practices the Commons keeps, applied to what it makes.
   const seedVault = hasTradition(state, "seed-vault") ? 1.2 : 1;
-  store("food", farmOutput * 1.0 * farmFactor * farmPolicy * rivalryDrag * habitatPenalty * seedVault);
+  store("food", farmOutput * 1.0 * farmFactor * farmPolicy * habitatPenalty * seedVault);
   store(
     "water",
-    farmOutput * 0.9 * farmFactor * rivalryDrag * (0.65 + basinQuality / 280) - state.habitatStress * 0.02,
+    farmOutput * 0.9 * farmFactor * (0.65 + basinQuality / 280) - state.habitatStress * 0.02,
   );
   state.marketShortages = marketShortages(state.buildings, state.resources.food);
   store("warmth", homeOutput * 0.55 + craftedResin * 0.18 + seasonalWarmth - seasonalDrain);

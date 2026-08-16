@@ -18,6 +18,17 @@ export interface TraditionDefinition {
   readonly cost: Partial<Record<ItemKey, number>>;
   /** Chapter the practice becomes available in. */
   readonly chapter: number;
+  /**
+   * Practices this one rules out, and which rule it out in turn.
+   *
+   * Six practices that were all eventually affordable meant every settlement
+   * ended up with the same six, so a "lasting choice" was really just a
+   * checklist. A Commons that stores its harvest cannot also be the one that
+   * gives it away; a Commons built around its hearths is not the one built
+   * around its lanterns. Sky Veil is deliberately unpaired — a chapter-four
+   * objective requires it, and no choice should be able to lock the ledger.
+   */
+  readonly excludes?: readonly TraditionKey[];
 }
 
 export const TRADITION_DEFINITIONS: Record<TraditionKey, TraditionDefinition> = {
@@ -28,6 +39,7 @@ export const TRADITION_DEFINITIONS: Record<TraditionKey, TraditionDefinition> = 
     effect: "Reed farms yield a fifth more, in every season.",
     cost: { "seed-pod": 14 },
     chapter: 0,
+    excludes: ["open-table"],
   },
   "open-table": {
     key: "open-table",
@@ -36,6 +48,7 @@ export const TRADITION_DEFINITIONS: Record<TraditionKey, TraditionDefinition> = 
     effect: "The Commons holds more food and water, and meals go further.",
     cost: { "seed-pod": 10, moonwater: 4 },
     chapter: 1,
+    excludes: ["seed-vault"],
   },
   hearthcraft: {
     key: "hearthcraft",
@@ -44,6 +57,7 @@ export const TRADITION_DEFINITIONS: Record<TraditionKey, TraditionDefinition> = 
     effect: "Burrows keep their warmth, and rest restores more.",
     cost: { resin: 6 },
     chapter: 1,
+    excludes: ["lantern-vigil"],
   },
   "lantern-vigil": {
     key: "lantern-vigil",
@@ -52,6 +66,7 @@ export const TRADITION_DEFINITIONS: Record<TraditionKey, TraditionDefinition> = 
     effect: "Lantern light reaches half again as far across the basin.",
     cost: { moonwater: 8, resin: 4 },
     chapter: 2,
+    excludes: ["hearthcraft"],
   },
   "long-memory": {
     key: "long-memory",
@@ -100,6 +115,28 @@ export function missingFor(state: WorldState, key: TraditionKey): Array<{ item: 
     .map(([item, amount]) => ({ item, amount: amount - state.items[item] }));
 }
 
+/**
+ * The practice already kept that rules this one out, if any.
+ *
+ * Exclusions are declared on both sides, but this checks the whole set rather
+ * than trusting that, so a one-sided declaration cannot open a door that should
+ * be shut.
+ */
+export function blockedBy(state: WorldState, key: TraditionKey): TraditionDefinition | undefined {
+  for (const held of state.traditions) {
+    if (held === key) continue;
+    const definition = TRADITION_DEFINITIONS[held];
+    if (!definition) continue;
+    if (definition.excludes?.includes(key)) return definition;
+    if (TRADITION_DEFINITIONS[key].excludes?.includes(held)) return definition;
+  }
+  return undefined;
+}
+
 export function isAvailable(state: WorldState, key: TraditionKey): boolean {
-  return state.chapter >= TRADITION_DEFINITIONS[key].chapter && !hasTradition(state, key);
+  return (
+    state.chapter >= TRADITION_DEFINITIONS[key].chapter &&
+    !hasTradition(state, key) &&
+    blockedBy(state, key) === undefined
+  );
 }

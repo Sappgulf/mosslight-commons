@@ -802,6 +802,15 @@ kbd {
 .tradition.is-kept { border-color: rgba(99, 230, 212, 0.5); background: rgba(99, 230, 212, 0.12); }
 .tradition.is-kept .tradition-cost { color: var(--gold); }
 
+/*
+ * A practice ruled out by one already kept. It reads as closed rather than
+ * merely unaffordable — the door is shut for the rest of the run, and the
+ * strikethrough says so at a glance.
+ */
+.tradition.is-blocked { opacity: 0.45; }
+.tradition.is-blocked .tradition-head strong { text-decoration: line-through; }
+.tradition.is-blocked .tradition-cost { color: var(--muted); }
+
 /* A craft the resident has genuinely mastered reads gold, not muted. */
 .need-row.is-mastered b { color: var(--gold); font-weight: 800; }
 
