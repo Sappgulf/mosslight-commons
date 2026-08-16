@@ -30,7 +30,7 @@ import { DAYS_PER_SEASON, TICKS_PER_DAY } from "./constants";
 import { GRID_HEIGHT, GRID_WIDTH } from "./grid";
 import { applySpeciesMood } from "./mood";
 import { maybeAssignWant, updateWants } from "./systems/wants";
-import { FOUNDING_COOLDOWN, tickFactions } from "./factions";
+import { FOUNDING_COOLDOWN, STRIKE_AFTER, secededFactions, tickFactions } from "./factions";
 import { tickSpecies } from "./species";
 import {
   findWalkableNear,
@@ -2775,6 +2775,22 @@ export class MosslightSimulation {
   private updateFactions(): void {
     const { founded, dissolved } = tickFactions(this.state, this.rng);
 
+    /*
+     * A bloc that has been ignored long enough stops being a grievance and
+     * becomes a departure. Their people leave the Commons the same way any
+     * other resident does, so population, housing and the decline reading all
+     * account for it — a settlement can lose a fifth of itself to politics.
+     */
+    for (const faction of secededFactions(this.state)) {
+      const leaving = this.state.residents.filter((resident) => faction.memberIds.includes(resident.id));
+      for (const resident of leaving) this.removeResident(resident);
+      faction.active = false;
+      this.addMessage(
+        `SECESSION · ${faction.name} has left the Commons, taking ${leaving.length} with them. "${faction.creed}"`,
+        "warning",
+      );
+    }
+
     for (const faction of founded) {
       const opening =
         faction.kind === "cult"
@@ -2791,6 +2807,16 @@ export class MosslightSimulation {
 
     for (const faction of dissolved) {
       this.addMessage(`DISBANDED · ${faction.name} is no more.`, "info");
+    }
+
+    // Strikes are announced once, on the day they start.
+    for (const faction of this.state.factions) {
+      if (!faction.active || faction.stance !== "striking") continue;
+      if (faction.unrestDays !== STRIKE_AFTER) continue;
+      this.addMessage(
+        `STRIKE · ${faction.name} has downed tools until the Commons answers them. "${faction.creed}"`,
+        "warning",
+      );
     }
   }
 

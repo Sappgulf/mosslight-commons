@@ -1,5 +1,6 @@
 import { OUTPUT_MULTIPLIER } from "../../data/definitions";
 import { marketShortages } from "../civic";
+import { strikingResidents } from "../factions";
 import { tierFor } from "../mastery";
 import { hasTradition } from "../traditions";
 import type { BuildingType, Resident, ResourceKey } from "../types";
@@ -63,12 +64,16 @@ export function weightedOutput(
 ): number {
   let total = 0;
   const rivals = activeRivalries(context.state);
+  // A bloc withholding its labour is felt at the benches its members work.
+  const striking = strikingResidents(context.state);
   for (const building of context.state.buildings) {
     if (building.type !== type) continue;
     // Where a building sits now matters as much as what level it is.
     let contribution = (OUTPUT_MULTIPLIER[building.level] ?? 1) * context.adjacencyFor(building).multiplier;
     if (skill) {
-      const workers = context.state.residents.filter((resident) => resident.workplaceId === building.id);
+      const workers = context.state.residents.filter(
+        (resident) => resident.workplaceId === building.id && !striking.has(resident.id),
+      );
       if (workers.length > 0) {
         /*
          * Rivalry is felt where it happens. It used to be a single settlement-

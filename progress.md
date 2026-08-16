@@ -1030,3 +1030,37 @@ remain explicit placeholders.
 - Browser: all three kinds render with distinct emblems and colour families,
   and a dissolved bloc greys out. Confirmed on screen.
 - `SAVE_VERSION` is 10.
+
+## Consequence pass — blocs that act
+
+Blocs held grievances and did nothing with them. Standing fell to zero and the
+only consequence was a number in a panel: the settlement could ignore every
+organised body inside it forever, at no cost.
+
+- [x] **An escalation with real bite.** `content → restless → striking →
+      seceded`. Restless is an attitude; the other two cost the settlement.
+- [x] **A strike is felt at the bench.** Striking members are excluded from
+      `weightedOutput`, so the loss lands on the buildings those particular
+      residents work rather than as an abstract settlement-wide penalty —
+      the same principle as the rivalry fix.
+- [x] **Secession takes its people.** A bloc ignored through a long strike
+      leaves the Commons entirely, removing its members through the ordinary
+      departure path so population, housing and the peak-based decline reading
+      all account for it. A settlement can lose a fifth of itself to politics.
+- [x] **Slow to anger, and reversible.** Standing falls about two a day, so
+      unrest does not begin until the middle of a season, and answering the
+      doctrine at any point sends them back to work with a line in their
+      history saying so.
+- [x] **A lone wolf never strikes** — they have already withdrawn and have
+      nothing left to withhold.
+- [x] The panel leads with the stance rather than the kind once a bloc is
+      unhappy, because a strike is output being lost right now: gold for
+      restless, coral card and "withholding labour" for a strike.
+
+### Verification
+
+- 230 Vitest tests (6 new, covering the full escalation, its reversal, the
+  striker set production consults, that secession needs a long strike first,
+  that lone wolves are exempt, and that seceding actually reduces population)
+  and 20 Playwright tests pass.
+- Browser: all three stances render with their own colour and label.

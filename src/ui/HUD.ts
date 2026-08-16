@@ -936,9 +936,20 @@ export class HUD {
       name.textContent = faction.name;
       const kind = document.createElement("span");
       kind.className = "faction-kind";
+      /*
+       * The stance is the urgent thing once a bloc is unhappy — a strike is
+       * costing the settlement output right now — so it takes the label over
+       * the kind, which never changes.
+       */
+      const stanceLabel: Record<string, string> = {
+        restless: "RESTLESS",
+        striking: "ON STRIKE",
+        seceded: "SECEDING",
+      };
       kind.textContent = faction.active
-        ? faction.kind === "lone" ? "APART" : faction.kind.toUpperCase()
+        ? stanceLabel[faction.stance] ?? (faction.kind === "lone" ? "APART" : faction.kind.toUpperCase())
         : "GONE";
+      row.dataset.stance = faction.active ? faction.stance : "gone";
       head.append(name, kind);
 
       const creed = document.createElement("small");
@@ -948,7 +959,7 @@ export class HUD {
       const stat = document.createElement("small");
       stat.className = "faction-stat";
       stat.textContent = faction.active
-        ? `${faction.memberIds.length} member${faction.memberIds.length === 1 ? "" : "s"} · standing ${Math.round(faction.standing)} · since day ${faction.foundedDay}`
+        ? `${faction.memberIds.length} member${faction.memberIds.length === 1 ? "" : "s"} · standing ${Math.round(faction.standing)}${faction.stance === "striking" ? " · withholding labour" : ""} · since day ${faction.foundedDay}`
         : `founded day ${faction.foundedDay} · dissolved`;
 
       const latest = faction.history.at(-1);

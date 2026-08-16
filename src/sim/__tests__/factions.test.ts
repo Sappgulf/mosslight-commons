@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import { MosslightSimulation, SeededRandom } from "../simulation";
-import { DOCTRINES, FOUNDING_COOLDOWN, factionOf, foundFaction, membersOf, satisfaction, tickFactions } from "../factions";
+import {
+  DOCTRINES,
+  FOUNDING_COOLDOWN,
+  factionOf,
+  foundFaction,
+  membersOf,
+  satisfaction,
+  secededFactions,
+  strikingResidents,
+  tickFactions,
+} from "../factions";
 import type { Resident, WorldState } from "../types";
 
 const SEED = 20260811;
@@ -204,5 +214,90 @@ describe("membership", () => {
         seen.add(id);
       }
     }
+  });
+});
+
+describe("a bloc acts on being ignored", () => {
+  it("escalates from content to restless to striking", () => {
+    const { state, rng } = world();
+    const faction = foundFaction(state, rng, "faction", state.residents[0]!, "provision");
+    expect(faction.stance).toBe("content");
+
+    /*
+     * Standing starts at 55 and falls two a day while the doctrine goes
+     * unanswered, so unrest does not even begin until the middle of a season.
+     * A bloc is slow to anger on purpose.
+     */
+    state.resources.food = 0;
+    days(state, rng, 15);
+    expect(faction.stance).toBe("restless");
+
+    days(state, rng, 6);
+    expect(faction.stance).toBe("striking");
+  });
+
+  it("puts the grievance down when the Commons delivers", () => {
+    const { state, rng } = world();
+    const faction = foundFaction(state, rng, "faction", state.residents[0]!, "provision");
+    state.resources.food = 0;
+    days(state, rng, 22);
+    expect(faction.stance).toBe("striking");
+
+    state.resources.food = state.metrics.storage.food;
+    days(state, rng, 30);
+    expect(faction.stance).toBe("content");
+    expect(faction.unrestDays).toBe(0);
+  });
+
+  it("names its strikers so production can feel it", () => {
+    const { state, rng } = world();
+    const faction = foundFaction(state, rng, "faction", state.residents[0]!, "provision");
+    expect(strikingResidents(state).size).toBe(0);
+
+    state.resources.food = 0;
+    days(state, rng, 22);
+    expect(faction.stance).toBe("striking");
+    expect(strikingResidents(state).has(state.residents[0]!.id)).toBe(true);
+  });
+
+  it("secedes only after a long strike goes unanswered", () => {
+    const { state, rng } = world();
+    const faction = foundFaction(state, rng, "faction", state.residents[0]!, "provision");
+    state.resources.food = 0;
+
+    days(state, rng, 15);
+    expect(secededFactions(state)).toHaveLength(0);
+
+    days(state, rng, 40);
+    expect(faction.stance).toBe("seceded");
+    expect(secededFactions(state).map((entry) => entry.id)).toContain(faction.id);
+  });
+
+  it("never asks a lone wolf to strike — they already left", () => {
+    const { state, rng } = world();
+    const faction = foundFaction(state, rng, "lone", state.residents[0]!, "solitude");
+    state.resources.food = 0;
+    days(state, rng, 60);
+    expect(faction.stance).toBe("content");
+    expect(strikingResidents(state).size).toBe(0);
+  });
+});
+
+describe("secession costs the settlement", () => {
+  it("takes its members out of the Commons", () => {
+    const simulation = new MosslightSimulation(SEED);
+    const state = simulation.state;
+    const rng = new SeededRandom(7);
+    const faction = foundFaction(state, rng, "faction", state.residents[0]!, "provision");
+    faction.memberIds = state.residents.slice(0, 4).map((resident) => resident.id);
+
+    // Drive them out through the simulation's own daily stage.
+    const before = state.residents.length;
+    faction.stance = "seceded";
+    for (let tick = 0; tick < 12; tick += 1) simulation.advance();
+
+    expect(state.residents.length).toBeLessThan(before);
+    expect(faction.active).toBe(false);
+    expect(state.history.some((message) => message.text.includes("SECESSION"))).toBe(true);
   });
 });

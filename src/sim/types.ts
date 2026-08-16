@@ -208,6 +208,15 @@ export interface Resident {
  */
 export type FactionKind = "faction" | "cult" | "lone";
 
+/**
+ * How a bloc is expressing itself.
+ *
+ * `content` and `restless` are attitudes; `striking` and `seceded` are actions
+ * with mechanical bite — a striking bloc's members stop producing, and a
+ * seceded one takes its people out of the Commons entirely.
+ */
+export type FactionStance = "content" | "restless" | "striking" | "seceded";
+
 /** A dated line in a bloc's own account of itself. */
 export interface HistoryEntry {
   day: number;
@@ -231,6 +240,16 @@ export interface Faction {
   memberIds: string[];
   /** How the bloc regards the Commons, 0-100. */
   standing: number;
+  /**
+   * What the bloc is currently doing about it.
+   *
+   * Blocs used to hold a grievance and act on it in no way at all: standing
+   * fell to zero and the only consequence was a number in a panel. The stance
+   * is the escalation — restless, then withholding labour, then gone.
+   */
+  stance: FactionStance;
+  /** Consecutive days spent below the patience threshold. */
+  unrestDays: number;
   history: HistoryEntry[];
   active: boolean;
 }

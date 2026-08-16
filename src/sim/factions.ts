@@ -54,6 +54,18 @@ const FACTION_QUORUM = 3;
 /** Members below which a bloc dissolves. */
 const DISSOLVE_AT = 1;
 
+/** Standing below which a bloc starts counting days against the Commons. */
+const UNREST_STANDING = 28;
+
+/** Days of unrest before members stop working. */
+export const STRIKE_AFTER = 5;
+
+/** Further days of being ignored while striking before the bloc leaves for good. */
+const SECEDE_AFTER = 14;
+
+/** Standing at which a bloc puts its grievance down and goes back to work. */
+const SETTLED_STANDING = 45;
+
 const FACTION_NAMES = {
   first: ["Reed", "Root", "Ash", "Lantern", "Mire", "Bramble", "Stone", "Shade", "Amber", "Fen"],
   second: ["Covenant", "Circle", "Assembly", "Bloc", "Hand", "Compact", "Union", "Bough"],
@@ -130,6 +142,26 @@ function countSpecies(state: WorldState, species: Species): number {
   return total;
 }
 
+/**
+ * Residents currently withholding their labour.
+ *
+ * Production consults this rather than the faction list directly, so the cost
+ * of a strike is felt at the bench the striker actually works.
+ */
+export function strikingResidents(state: WorldState): Set<string> {
+  const striking = new Set<string>();
+  for (const faction of state.factions ?? []) {
+    if (!faction.active || faction.stance !== "striking") continue;
+    for (const id of faction.memberIds) striking.add(id);
+  }
+  return striking;
+}
+
+/** Blocs that have walked out and are owed removal from the settlement. */
+export function secededFactions(state: WorldState): Faction[] {
+  return (state.factions ?? []).filter((faction) => faction.active && faction.stance === "seceded");
+}
+
 export function membersOf(state: WorldState, faction: Faction): Resident[] {
   const ids = new Set(faction.memberIds);
   return state.residents.filter((resident) => ids.has(resident.id));
@@ -163,6 +195,8 @@ export function foundFaction(
     creed: DOCTRINES[doctrine].creed,
     memberIds: [founder.id],
     standing: kind === "lone" ? 30 : 55,
+    stance: "content",
+    unrestDays: 0,
     history: [],
     active: true,
   };
@@ -224,6 +258,29 @@ export function tickFactions(state: WorldState, rng: SeededRandom): FactionTick 
     faction.memberIds = faction.memberIds.filter((id) => present.has(id));
     if (faction.memberIds.length < before) {
       record(faction, state, `${before - faction.memberIds.length} left the Commons entirely.`);
+    }
+
+    // Escalation. A lone wolf has already withdrawn and has nothing to withhold.
+    if (faction.kind !== "lone") {
+      if (faction.standing < UNREST_STANDING) {
+        faction.unrestDays += 1;
+        if (faction.stance === "content") {
+          faction.stance = "restless";
+          record(faction, state, `Grew restless. ${DOCTRINES[faction.doctrine as DoctrineKey].label} is going unanswered.`);
+        } else if (faction.stance === "restless" && faction.unrestDays >= STRIKE_AFTER) {
+          faction.stance = "striking";
+          record(faction, state, `Downed tools after ${faction.unrestDays} days unheard.`);
+        } else if (faction.stance === "striking" && faction.unrestDays >= STRIKE_AFTER + SECEDE_AFTER) {
+          faction.stance = "seceded";
+          record(faction, state, `Left the Commons after ${faction.unrestDays} days. They will not be back.`);
+        }
+      } else if (faction.standing >= SETTLED_STANDING && faction.stance !== "seceded") {
+        if (faction.stance !== "content") {
+          record(faction, state, `Went back to work. The Commons answered them.`);
+        }
+        faction.stance = "content";
+        faction.unrestDays = 0;
+      }
     }
 
     if (faction.memberIds.length < DISSOLVE_AT) {

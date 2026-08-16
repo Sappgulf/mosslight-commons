@@ -845,6 +845,20 @@ kbd {
 .faction[data-kind="cult"] { border-color: rgba(200, 169, 255, 0.34); }
 .faction[data-kind="lone"] { border-color: rgba(244, 184, 91, 0.32); }
 .faction.is-gone { filter: grayscale(1); opacity: 0.45; }
+/*
+ * A bloc that is actually costing the settlement something reads as an alarm,
+ * whatever kind it is: a strike is output the player is losing right now.
+ */
+.faction[data-stance="restless"] { border-color: rgba(244, 184, 91, 0.42); }
+.faction[data-stance="striking"],
+.faction[data-stance="seceded"] {
+  border-color: rgba(232, 121, 104, 0.6);
+  background: rgba(232, 121, 104, 0.08);
+}
+.faction[data-stance="striking"] .faction-kind,
+.faction[data-stance="seceded"] .faction-kind,
+.faction[data-stance="striking"] .faction-stat { color: var(--warning); }
+.faction[data-stance="restless"] .faction-kind { color: var(--gold); }
 .faction-mark { display: block; }
 .faction-mark svg { display: block; height: 34px; width: 34px; }
 .faction-body { display: grid; gap: 2px; min-width: 0; }
