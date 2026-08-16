@@ -20,6 +20,7 @@ exports[`tick pipeline > runs stages in the recorded order 1`] = `
   "self-build",
   "workplaces",
   "kinship-homes",
+  "species",
   "mastery",
   "desire-paths",
   "births",

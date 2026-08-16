@@ -751,3 +751,50 @@ VAULT* on the board for the first time.
 - Browser-driven: a real game fast-forwarded to a resolved Long Shade recorded
   the memory on 47 of 49 residents — the two without are sprouts — and the
   Commons Report rendered *Juniper 1, elder: "…"* in warning colour.
+
+## Lifecycle pass — a species can leave, and the decline shows
+
+Only Cloudmoths ever had a condition attached to them, and once they arrived
+they stayed forever whatever happened next. Everybody else was simply present
+from the first morning to the last, so a Commons that let its water turn or its
+light fail kept a full complement of Mirelings and Glowtails standing in it and
+the species roster said nothing about how the place was being run.
+
+- [x] **`src/sim/species.ts`.** Each species has a condition keyed to something
+      the player already watches: Bramblebacks need somewhere to sleep,
+      Glowtails need light, Mirelings need clean water, Cloudmoths need light
+      *and* a canopy to rest under.
+- [x] **Patience, then departure.** Past a species' patience (4–6 days) it
+      loses someone a day, least-settled first, with a ledger line naming both
+      the cause and the fix. The last one out is called out as the last.
+- [x] **Strain heals twice as fast as it accrues**, so putting the basin right
+      is rewarded rather than merely stopping the bleeding.
+- [x] **A lost species can come back.** Six consecutive good days and they try
+      the basin again — verified end to end in a live game: the Glowtails went
+      to zero in the dark and two returned once the groves were lit.
+
+### The trap this uncovered
+
+The collapse test started failing: a starved basin that used to collapse now
+only reached `strained`. The cause was the new departures themselves. Failure
+was read from **average wellbeing**, and departures take the least settled
+residents first — so a Commons haemorrhaging people watched its own average
+*rise* and read as recovering. A starved settlement could shed a third of its
+population and call itself strained.
+
+Decline is now measured against `peakPopulation`, the settlement's own
+high-water mark, which cannot be flattered by losing the unhappy: 20% below
+peak is strained, 45% below is failing, whatever the remainder feel.
+
+### Verification
+
+- 190 Vitest tests (13 new) and 20 Playwright tests pass, including the full
+  headless playthrough — the game is still finishable with species able to
+  leave, because a species that leaves can also return.
+- Browser-driven on a live game: holding the basin dark for twelve days took
+  the Glowtails from 12 to 4 and the settlement from `thriving` to `strained`;
+  eight more emptied them out entirely; ten lit days brought them back.
+- Two snapshots updated on purpose: a new `species` pipeline stage, and the
+  500-tick digest.
+- `SAVE_VERSION` is 8. Old saves are rejected rather than migrated, which is
+  the existing convention.

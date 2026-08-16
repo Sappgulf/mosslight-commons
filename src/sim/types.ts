@@ -366,6 +366,27 @@ export interface WorldState {
   buildings: Building[];
   residents: Resident[];
   districts: District[];
+  /**
+   * Consecutive days each species has spent in conditions it cannot abide.
+   * Past that species' patience, they start to leave.
+   */
+  speciesStrain: Record<Species, number>;
+  /**
+   * Consecutive days each species' conditions have been met. An absent species
+   * uses this to decide the basin is worth trying again.
+   */
+  speciesEase: Record<Species, number>;
+  /** Species that have left the Commons entirely, in the order they went. */
+  speciesLost: Species[];
+  /**
+   * The largest the settlement has ever been.
+   *
+   * Failure was read from average wellbeing, which is a trap once residents can
+   * leave: the unhappiest go first, so a settlement bleeding people watched its
+   * own average *rise*. Measuring against the high-water mark means sustained
+   * loss reads as decline no matter how content the remainder are.
+   */
+  peakPopulation: number;
   districtFocus: DistrictType;
   relationships: Relationship[];
   expeditions: Expedition[];

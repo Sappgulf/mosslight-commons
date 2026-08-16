@@ -8,6 +8,7 @@ import {
   OUTPUT_MULTIPLIER,
   PATH_COST,
   RECIPE_DEFINITIONS,
+  SPECIES_DEFINITIONS,
   REGROWTH_DEFINITIONS,
   SEASONAL_EVENT_DEFINITIONS,
   UPGRADE_COSTS,
@@ -25,6 +26,7 @@ import {
 } from "./civic";
 import { beginLongShade, crisisBanner, tickLongShade } from "./crisis";
 import { rememberLongShade } from "./memory";
+import { tickSpecies } from "./species";
 import { annotateForecast, calculateLocalForecast, compareForecasts } from "./forecast";
 import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
 import { describeWant, isWantSatisfied, unmetWantKinds } from "./wants";
@@ -1159,6 +1161,10 @@ export class MosslightSimulation {
       habitatStress: 0,
       births: 0,
       cloudmothsArrived: false,
+      speciesStrain: { brambleback: 0, glowtail: 0, mireling: 0, cloudmoth: 0 },
+      speciesEase: { brambleback: 0, glowtail: 0, mireling: 0, cloudmoth: 0 },
+      speciesLost: [],
+      peakPopulation: 0,
       longShadeCrisis: false,
       longShadeStartDay: 0,
       longShadeEndsDay: 0,
@@ -1407,6 +1413,7 @@ export class MosslightSimulation {
       { name: "self-build", dailyOnly: true, run: () => this.maybeSelfBuild() },
       { name: "workplaces", dailyOnly: true, run: () => this.rebalanceWorkplaces() },
       { name: "kinship-homes", dailyOnly: true, run: () => this.rehomeByKinship() },
+      { name: "species", dailyOnly: true, run: () => this.updateSpecies() },
       { name: "mastery", run: () => this.checkMastery() },
       { name: "desire-paths", dailyOnly: true, run: () => this.wearDesirePaths() },
       { name: "births", dailyOnly: true, run: () => this.maybeBirth() },
@@ -2210,12 +2217,31 @@ export class MosslightSimulation {
      * nobody having left. Empty stores are a warning; they become a failure by
      * way of the meals they stop serving and the needs that then fall.
      */
+    /*
+     * How far the settlement has fallen from its own high-water mark.
+     *
+     * Average wellbeing alone is a trap once residents can leave: the least
+     * settled go first, so a Commons haemorrhaging people watched its average
+     * climb and read as recovering. A starved basin could shed a third of its
+     * population and still call itself strained. Decline is measured against
+     * the peak instead, which cannot be flattered by losing the unhappy.
+     */
+    this.state.peakPopulation = Math.max(this.state.peakPopulation ?? 0, population);
+    const peak = this.state.peakPopulation;
+    const lost = peak > 0 ? 1 - population / peak : 0;
+
     let status: SettlementStatus;
     if (population === 0) {
       status = "collapsed";
-    } else if (averageWellbeing < 30) {
+    } else if (averageWellbeing < 30 || lost >= 0.45) {
       status = "failing";
-    } else if (starving >= 1 || averageWellbeing < 52 || resourceSecurity < 35 || housingPressure > 1) {
+    } else if (
+      starving >= 1 ||
+      averageWellbeing < 52 ||
+      resourceSecurity < 35 ||
+      housingPressure > 1 ||
+      lost >= 0.2
+    ) {
       status = "strained";
     } else {
       status = "thriving";
@@ -2868,6 +2894,61 @@ export class MosslightSimulation {
     }
   }
 
+  /**
+   * A species leaving, or coming back.
+   *
+   * Departures were entirely individual: a resident whose own needs stayed
+   * critical long enough walked out, and the species roster never changed as a
+   * result of how the basin was run. A Commons that let its water turn kept
+   * every Mireling standing in it. Now a species with its conditions unmet past
+   * its patience loses someone a day, and the last one leaving is called out —
+   * a run can lose a species and feel it.
+   */
+  private updateSpecies(): void {
+    const { leaving, returning } = tickSpecies(this.state, this.averageWaterQuality());
+
+    for (const departure of leaving) {
+      const candidates = this.state.residents.filter((resident) => resident.species === departure.species);
+      if (candidates.length === 0) continue;
+      // The least settled of them is the one who goes first.
+      const going = candidates.reduce((worst, resident) =>
+        resident.needs.belonging < worst.needs.belonging ? resident : worst,
+      );
+      const label = SPECIES_DEFINITIONS[departure.species].label;
+
+      this.removeResident(going);
+      if (departure.last) {
+        if (!this.state.speciesLost.includes(departure.species)) {
+          this.state.speciesLost.push(departure.species);
+        }
+        if (departure.species === "cloudmoth") this.state.cloudmothsArrived = false;
+        this.addMessage(
+          `EXODUS · The last ${label} has left the Commons: ${departure.reason}. ${departure.advice}`,
+          "warning",
+        );
+        this.emit({ type: "departure", position: going.position, label: `${label}s gone`, tone: "warning" });
+      } else {
+        this.addMessage(
+          `LEAVING · A ${label} has gone because ${departure.reason}. ${departure.advice}`,
+          "warning",
+        );
+      }
+    }
+
+    for (const species of returning) {
+      // Coming back is the reward for putting the basin right.
+      const arrived = this.spawnSpecies(species, 2);
+      if (arrived === 0) continue;
+      this.state.speciesLost = this.state.speciesLost.filter((lost) => lost !== species);
+      this.state.speciesEase[species] = 0;
+      if (species === "cloudmoth") this.state.cloudmothsArrived = true;
+      this.addMessage(
+        `RETURN · ${arrived} ${SPECIES_DEFINITIONS[species].label}s have found the Commons again.`,
+        "good",
+      );
+    }
+  }
+
   private buildingIndexResident(id: string): Resident | undefined {
     return this.state.residents.find((resident) => resident.id === id);
   }
@@ -3023,20 +3104,31 @@ export class MosslightSimulation {
     this.spawnCloudmoths(3);
   }
 
-  private spawnCloudmoths(count: number): void {
-    this.state.cloudmothsArrived = true;
-    this.state.longShadeCrisis = this.state.season === "longshade";
+  /**
+   * Brings newcomers of a species into the basin. Returns how many actually
+   * arrived, which can be fewer than asked for when there is nowhere to put
+   * them.
+   */
+  private spawnSpecies(species: Species, count: number, explanation?: string): number {
     let spawned = 0;
     for (let index = 0; index < count; index += 1) {
       const resident = this.createResident(this.state.residents.length + index, this.state.buildings);
       if (!resident) continue;
-      resident.species = "cloudmoth";
+      resident.species = species;
       resident.age = this.rng.int(8, 20);
       resident.stage = "adult";
-      resident.lastDecisionExplanation = "We followed the last healthy roots.";
+      resident.lastDecisionExplanation = explanation ?? "We heard the basin was worth another try.";
       this.state.residents.push(resident);
       spawned += 1;
     }
+    if (spawned > 0) this.metricsDirty = true;
+    return spawned;
+  }
+
+  private spawnCloudmoths(count: number): void {
+    this.state.cloudmothsArrived = true;
+    this.state.longShadeCrisis = this.state.season === "longshade";
+    const spawned = this.spawnSpecies("cloudmoth", count, "We followed the last healthy roots.");
     if (spawned > 0) {
       this.addMessage(`LONG SHADE · ${spawned} Cloudmoths found the Commons.`, "good");
     }
@@ -3149,7 +3241,7 @@ function clampCell(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-export const SAVE_VERSION = 7;
+export const SAVE_VERSION = 8;
 
 export interface SavePayload {
   version: number;
