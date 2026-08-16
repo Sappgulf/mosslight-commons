@@ -4,7 +4,7 @@ import Phaser from "phaser";
 import { BUILDING_DEFINITIONS, DISTRICT_DEFINITIONS, SPECIES_DEFINITIONS, UPGRADE_COSTS } from "../data/definitions";
 import { MosslightSimulation, type SimEvent } from "../sim/simulation";
 import { WANT_GLYPH } from "../sim/wants";
-import { masteryMark } from "../sim/mastery";
+import { bestCraft, masteryMark } from "../sim/mastery";
 import type { Building, BuildingType, BuildTool, ItemKey, ResidentGoal, ResourceKey, Species, TileKind, Vec2 } from "../sim/types";
 import { Effects } from "./Effects";
 import {
@@ -148,6 +148,18 @@ const BUILDING_LIGHT: Partial<Record<BuildingType, { radius: number; strength: n
   "reed-farm": { radius: 44, strength: 0.4, color: 0x8dbb72 },
   "sky-walk": { radius: 96, strength: 0.82, color: 0xc8a9ff },
 };
+
+/**
+ * The ground ring under a resident, by mastery rank. An untrained newcomer
+ * casts a plain shadow; a Master stands in a wide warm one.
+ */
+const MASTERY_RING: Array<{ color: number; alpha: number; scale: number }> = [
+  { color: 0x040d10, alpha: 0.45, scale: 1 },
+  { color: 0x0a1f22, alpha: 0.5, scale: 1.05 },
+  { color: 0x2d8c84, alpha: 0.5, scale: 1.15 },
+  { color: 0xf4b85b, alpha: 0.45, scale: 1.28 },
+  { color: 0xffd58b, alpha: 0.6, scale: 1.45 },
+];
 
 const RESIDENT_TEXTURE_KEYS: Record<Species, string> = {
   brambleback: "resident-brambleback",
@@ -1461,12 +1473,26 @@ export class WorldScene extends Phaser.Scene {
         }
       }
 
-      // Mastery mark, refreshed only when the tier actually changes.
+      /*
+       * Mastery, on the ground rather than in a glyph.
+       *
+       * Skill accrued for a hundred days and the only thing that ever said so
+       * was a 10px mark beside the creature, which is invisible in a crowd of a
+       * hundred — so a settlement full of Masters looked exactly like a
+       * settlement of beginners. The ring a resident stands on now carries
+       * their rank: it widens and warms as they get good, which reads at a
+       * glance across the whole board.
+       */
       const mark = masteryMark(resident);
       if (view.lastMastery !== mark) {
         view.lastMastery = mark;
         view.masteryText.setText(mark);
         view.masteryText.setVisible(mark !== "");
+
+        const rank = bestCraft(resident).tier.rank;
+        const ring = MASTERY_RING[rank] ?? MASTERY_RING[0]!;
+        view.shadow.setFillStyle(ring.color, ring.alpha);
+        view.shadow.setSize(22 * ring.scale, 8 * ring.scale);
       }
 
       // Face the direction of travel.

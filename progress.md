@@ -1174,3 +1174,45 @@ wellbeing fell 77 → 63 before that was found.
   real settlement spreads across many speeds, and that fractional steps are
   banked) and 20 Playwright tests pass.
 - One snapshot updated on purpose.
+
+## Desktop legibility, and mastery you can see
+
+Two of the three things left from the last round of feedback.
+
+### The board's share of a desktop screen
+
+At 1280×720 the map was **640×354 — 25% of the screen**, with 588 of 1280
+pixels given to rails and 314 of 720 to the top bar and dock. Worse than the
+stacked layout that had already been fixed.
+
+- [x] **A CSS ordering bug, found on the way.** A `max-height: 860px` block
+      exists specifically to tighten a 1280×720 laptop — and it sat *above* the
+      `max-width: 1280px` block, which reset `--row-dock` from 132 back to 190
+      and `--shell-pad` from 10 to 14 at equal specificity. The optimisation was
+      being silently undone by the exact case it was written for. Width sets the
+      rails; height now gets the last word on the vertical tracks.
+- [x] Rails narrowed from 286/302 to 252/268.
+
+The same trap then bit twice more, which is worth recording as a pattern rather
+than three separate incidents:
+
+1. The narrower rail clipped the item chips to "SEED POE" and "MAP FRA". The
+   one-column fix was itself overridden by a later plain `.item-grid` rule at
+   equal specificity, so it is scoped to `.field-panel` to win outright.
+2. `--row-dock: 132px` had **never once applied**, so it had never been tested
+   against the dock's real content — and the moment the ordering was fixed, the
+   dock clipped by 2px. It needs 144. The e2e layout test caught that; a manual
+   screenshot had not.
+
+### Mastery, on the ground
+
+Skill accrued over a hundred days and the only thing that said so was a 10px
+glyph beside the creature — invisible in a crowd, so a settlement of Masters
+looked exactly like a settlement of beginners. The ring a resident stands on now
+carries their rank, widening and warming from a plain shadow to a broad gold one.
+
+### Verification
+
+- 236 Vitest and 20 Playwright tests pass.
+- Browser at 1280×800: all four item labels render in full with nothing
+  overflowing its panel, and the board holds 720×504.

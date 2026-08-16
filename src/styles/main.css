@@ -585,19 +585,69 @@ kbd {
  * each other and with the map.
  * ========================================================================== */
 
+@media (min-width: 901px) and (max-width: 1280px) {
+  :root {
+    /*
+     * The rails were claiming 588 of 1280 pixels — 46% of the width — for
+     * panels, in a game whose subject is the board. They hold the same content
+     * at these widths; the board gets the difference.
+     */
+    --rail-left: 252px;
+    --rail-right: 268px;
+    --row-dock: 190px;
+    --shell-pad: 14px;
+    --shell-gap: 12px;
+  }
+  .day-card { width: 132px; }
+  .resource-icon { font-size: 19px; }
+  /*
+   * Narrower rails buy the board room, and the item chips are what pays for it
+   * first: at two columns their labels clipped to "SEED POE" and "MAP FRA".
+   * One column per row fits the full name at this width.
+   *
+   * Scoped to `.field-panel` deliberately. The plain `.item-grid` rule in the
+   * later `min-width: 901px` block would otherwise win on equal specificity —
+   * the same trap that was quietly undoing the short-window track sizes.
+   */
+  .field-panel .item-grid { grid-template-columns: minmax(0, 1fr); }
+  .item-chip { padding-block: var(--s1); }
+}
+
+@media (min-width: 901px) and (max-width: 1080px) {
+  :root {
+    --rail-left: 250px;
+    --rail-right: 266px;
+    --row-top: 146px;
+    --row-dock: 182px;
+  }
+  .day-card { width: 116px; }
+  .resource-chip { grid-template-columns: 22px minmax(0, 1fr); column-gap: var(--s1); padding: var(--s2) var(--s1); }
+  .resource-icon { font-size: 17px; }
+  .build-button { padding-inline: 2px; }
+  .brand-card::after { display: none; }
+}
+
 /*
- * Short windows. A 1280x720 laptop gave the board a 640x320 cell because the
- * top bar and dock together claimed 400 of the 720 pixels — more than half the
- * screen for chrome, in a game whose whole point is the board. Here the shell
- * gives that height back: the brand block loses its strapline and eyebrow, the
- * dock tightens, and the board roughly doubles in height.
+ * Ordering is load-bearing.
+ *
+ * This block used to sit *above* the width breakpoints, which meant that at
+ * exactly the size it was written for — a 1280x720 laptop — the later
+ * `max-width: 1280px` rule reset `--row-dock` from 132px back to 190px and
+ * `--shell-pad` from 10 to 14 at equal specificity. The short-window
+ * optimisation was being undone by the case it existed to fix. Width sets the
+ * rails; height gets the last word on the vertical tracks.
  */
 @media (min-width: 901px) and (max-height: 860px) {
   :root {
     --shell-pad: 10px;
     --shell-gap: 10px;
     --row-top: 124px;
-    --row-dock: 132px;
+    /*
+     * 132px here never actually applied — the later width breakpoint reset it
+     * to 190 — so it had never been tested against the dock's real content,
+     * which needs a little more than that. Fixing the ordering exposed it.
+     */
+    --row-dock: 144px;
   }
   .brand-kicker { display: none; }
   .brand-card { padding: var(--s2); }
@@ -627,31 +677,6 @@ kbd {
   .zoom-button, .zoom-reset { min-height: 30px; }
 }
 
-@media (min-width: 901px) and (max-width: 1280px) {
-  :root {
-    --rail-left: 286px;
-    --rail-right: 302px;
-    --row-dock: 190px;
-    --shell-pad: 14px;
-    --shell-gap: 12px;
-  }
-  .day-card { width: 132px; }
-  .resource-icon { font-size: 19px; }
-}
-
-@media (min-width: 901px) and (max-width: 1080px) {
-  :root {
-    --rail-left: 250px;
-    --rail-right: 266px;
-    --row-top: 146px;
-    --row-dock: 182px;
-  }
-  .day-card { width: 116px; }
-  .resource-chip { grid-template-columns: 22px minmax(0, 1fr); column-gap: var(--s1); padding: var(--s2) var(--s1); }
-  .resource-icon { font-size: 17px; }
-  .build-button { padding-inline: 2px; }
-  .brand-card::after { display: none; }
-}
 
 /* --- Type hierarchy ------------------------------------------------------
  * Three levels only: a serif display number, readable body copy, and a small
