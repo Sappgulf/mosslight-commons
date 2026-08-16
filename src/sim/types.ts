@@ -143,6 +143,25 @@ export type TraditionKey =
   | "open-table"
   | "sky-veil";
 
+/**
+ * Something a resident lived through and still talks about.
+ *
+ * The Commons had no memory. A settlement that came through a Long Shade by
+ * three points of light and one that sailed through it read exactly the same
+ * afterwards, and the residents who were actually there had nothing to show for
+ * it. Memories are recorded on the residents who were adults at the time, so
+ * they age out of the settlement naturally as those residents do.
+ */
+export interface Memory {
+  /** Day the thing happened. */
+  day: number;
+  season: Season;
+  /** What the resident says about it, in their own voice. */
+  text: string;
+  /** Whether the memory is a hard one, which colours how it reads. */
+  tone: "good" | "hard";
+}
+
 export interface Resident {
   id: string;
   name: string;
@@ -174,6 +193,11 @@ export interface Resident {
   mentorId?: string;
   /** Lifetime count of sprouts this resident has brought on. */
   taught: number;
+  /**
+   * What this resident remembers, newest last, capped so a long-lived elder
+   * does not accumulate a save-bloating history.
+   */
+  memories: Memory[];
 }
 
 export interface Building {

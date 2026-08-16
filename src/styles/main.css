@@ -776,6 +776,20 @@ kbd {
 .commons-report .objective-heading span:last-child { color: var(--gold); font-weight: 800; }
 .commons-report p { margin: 0; color: var(--paper); font-size: 11px; line-height: 1.45; }
 .commons-report .report-advice { color: var(--muted); }
+/*
+ * An elder speaking for the settlement's past. Set apart from the report's
+ * present-tense diagnosis: quieter, italic, and behind a rule.
+ */
+.commons-report .report-memory {
+  border-top: 1px solid rgba(99, 230, 212, 0.18);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: italic;
+  line-height: 1.5;
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+}
+.commons-report .report-memory[data-tone="hard"] { color: var(--warning); opacity: 0.85; }
 
 /* Traditions: practices the Commons takes up for good. */
 .tradition-list { display: grid; gap: var(--s2); margin-top: var(--s2); }

@@ -506,3 +506,28 @@ const syncResearchForecast = async () => {
 };
 
 void syncResearchForecast();
+
+/*
+ * A handle on the running world, for development only.
+ *
+ * Verifying anything that depends on late game state — a tradition ruled out
+ * by one already kept, an elder's memory, a settlement in decline — meant
+ * playing to it by hand, so those paths got asserted in unit tests and then
+ * never actually looked at in a browser. `import.meta.env.DEV` is statically
+ * replaced at build time, so this whole block is dropped from a production
+ * bundle rather than shipped and guarded at runtime.
+ */
+if (import.meta.env.DEV) {
+  (window as unknown as { mosslight: unknown }).mosslight = {
+    simulation,
+    hud,
+    scene: () => worldScene,
+    /** Advance the world by whole days without waiting on the clock. */
+    days: (count = 1) => {
+      for (let index = 0; index < count * 12; index += 1) simulation.advance();
+      hud.render();
+      worldScene?.renderNow();
+      return simulation.state.day;
+    },
+  };
+}

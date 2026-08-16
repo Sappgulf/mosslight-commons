@@ -709,3 +709,45 @@ were framed as "lasting choices" that every settlement eventually took all of.
 - Two snapshots updated on purpose: the pipeline gained a `kinship-homes`
   stage, and the 500-tick digest moved slightly now that rivalry is local
   rather than global.
+
+## Memory pass — a Commons that remembers
+
+The settlement had no past. A basin that scraped through a Long Shade by three
+points of light and one that sailed through it read identically the next
+morning: the crisis resolved, a line went into the ledger, and nothing carried
+forward. The residents who were actually there had nothing to show for it.
+
+- [x] **`src/sim/memory.ts`.** Residents carry up to four memories. A resolved
+      Long Shade is recorded on everyone who was an adult or elder at the time,
+      in the outcome's own voice — *"I stood the Long Shade when the light
+      guttered. We came through thinner than we went in."*
+- [x] **Sprouts do not remember**, so a settlement's history belongs to the
+      generation that lived it and ages out with them.
+- [x] **The Commons Report speaks for the past.** The oldest resident who
+      actually remembers something is quoted beneath the present-tense
+      diagnosis, set apart in italic behind a rule, and coloured by whether the
+      memory is a hard one.
+- [x] Memory-carrying residents leaving takes the memory with them; a Commons
+      with nobody left who was there says nothing.
+
+### A development handle
+
+Verifying anything that depends on late state — a ruled-out tradition, an
+elder's memory, a settlement in decline — meant playing to it by hand, so those
+paths were unit-tested and then never actually looked at. `window.mosslight`
+now exposes the simulation, the HUD, and a `days(n)` fast-forward. It is behind
+`import.meta.env.DEV`, which is statically replaced at build time, so the block
+is dropped from the production bundle rather than shipped and guarded — checked
+against the built asset.
+
+It immediately paid for itself: the tradition exclusions from the previous pass
+had only ever been asserted in unit tests, and driving a real game to a kept
+Seed Vault showed Open Table struck through and reading *RULED OUT BY SEED
+VAULT* on the board for the first time.
+
+### Verification
+
+- 177 Vitest tests (9 new) and 20 Playwright tests pass.
+- Browser-driven: a real game fast-forwarded to a resolved Long Shade recorded
+  the memory on 47 of 49 residents — the two without are sprouts — and the
+  Commons Report rendered *Juniper 1, elder: "…"* in warning colour.

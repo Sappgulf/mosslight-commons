@@ -24,6 +24,7 @@ import {
   tickWaterQuality,
 } from "./civic";
 import { beginLongShade, crisisBanner, tickLongShade } from "./crisis";
+import { rememberLongShade } from "./memory";
 import { annotateForecast, calculateLocalForecast, compareForecasts } from "./forecast";
 import { findPath, isWalkable, packCell, type PathContext } from "./pathfinding";
 import { describeWant, isWantSatisfied, unmetWantKinds } from "./wants";
@@ -1369,6 +1370,7 @@ export class MosslightSimulation {
       distress: 0,
       masteryTier: 0,
       taught: 0,
+      memories: [],
     };
   }
 
@@ -2952,6 +2954,13 @@ export class MosslightSimulation {
     }
     const { mothsDue, resolved } = tickLongShade(this.state);
     if (mothsDue) this.spawnCloudmoths(3);
+    if (resolved) {
+      // Everyone grown enough to have understood it carries it from here.
+      const recorded = rememberLongShade(this.state, resolved);
+      if (recorded > 0) {
+        this.addMessage(`COMMONS · ${recorded} residents will remember this season.`, "info");
+      }
+    }
     if (resolved === "thrived") {
       this.addMessage("LONG SHADE · The Commons held. Cloudmoths stay and the basin still glows.", "good");
     } else if (resolved === "strained") {

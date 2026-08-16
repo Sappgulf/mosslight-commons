@@ -18,6 +18,7 @@ import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey
 import { isActivationOnControl, isTypingTarget, type Binding, type BindingGroup, type KeyLayer } from "./keymap";
 import { masteryTitle, tierFor } from "../sim/mastery";
 import { blockedBy, canAfford, isAvailable, missingFor, TRADITION_DEFINITIONS, TRADITION_ORDER } from "../sim/traditions";
+import { testimony } from "../sim/memory";
 import type { TraditionKey } from "../sim/types";
 
 const shortcutGroups: BindingGroup[] = ["Time", "View", "World", "Session"];
@@ -864,6 +865,22 @@ export class HUD {
     this.setText("[data-diagnosis-need]", `${diagnosis.need.toUpperCase()} ${Math.round(diagnosis.level)}`);
     this.setText("[data-diagnosis-cause]", diagnosis.cause);
     this.setText("[data-diagnosis-advice]", diagnosis.advice);
+
+    /*
+     * The oldest resident who actually lived through something speaks for the
+     * settlement's past. Before this the Commons Report only ever described the
+     * present, so a basin that had survived three Long Shades sounded exactly
+     * like one on its first morning.
+     */
+    const memoryLine = this.root.querySelector<HTMLElement>("[data-diagnosis-memory]");
+    if (memoryLine) {
+      const spoken = testimony(this.simulation.state);
+      memoryLine.hidden = !spoken;
+      if (spoken) {
+        memoryLine.textContent = `${spoken.resident.name}, ${spoken.resident.stage}: “${spoken.memory.text}”`;
+        memoryLine.dataset.tone = spoken.memory.tone;
+      }
+    }
   }
 
   /** Fills the traditions panel: what the Commons keeps, and what it could. */
@@ -1503,6 +1520,7 @@ export class HUD {
             <div class="objective-heading"><span>COMMONS REPORT</span><span data-diagnosis-need>FOOD 100</span></div>
             <p data-diagnosis-cause></p>
             <p class="report-advice" data-diagnosis-advice></p>
+            <p class="report-memory" data-diagnosis-memory hidden></p>
           </div>
 
           <div class="objective-heading"><span>PETITIONS</span><span>FROM THE MOTES</span></div>
