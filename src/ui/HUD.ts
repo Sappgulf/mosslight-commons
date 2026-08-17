@@ -492,6 +492,19 @@ export class HUD {
     this.setText("[data-pause-icon]", state.paused ? "▶" : "Ⅱ");
     this.setText("[data-pause-label]", state.paused ? "RESUME" : "PAUSE");
 
+    const recoverButton = this.root.querySelector<HTMLButtonElement>('[data-action="recover-from-fail"]');
+    if (recoverButton) {
+      const hasUrgent = this.simulation.openWants().length > 0;
+      const inFailState = state.status === "failing";
+      recoverButton.hidden = !inFailState;
+      recoverButton.disabled = !hasUrgent;
+      const label = hasUrgent
+        ? "Resume and follow the most urgent petition"
+        : "Resume simulation and stabilize the Commons";
+      recoverButton.setAttribute("aria-label", label);
+      recoverButton.title = label;
+    }
+
     const stepDayButton = this.root.querySelector<HTMLButtonElement>('[data-action="step-day"]');
     if (stepDayButton) {
       const canStep = state.paused && state.status !== "collapsed";
@@ -1386,6 +1399,9 @@ export class HUD {
       case "focus-urgent":
         this.focusUrgentResident();
         break;
+      case "recover-from-fail":
+        this.recoverFromFail();
+        break;
       case "mute":
         this.callbacks.onToggleMute();
         break;
@@ -1437,6 +1453,27 @@ export class HUD {
     this.callbacks.onFocusResident(target.id);
     this.notify(`Following ${target.name} · ${urgencyText}`);
     this.render();
+  }
+
+  /**
+   * Recovery helper used in failing state: resume the sim and follow urgent
+   * demands, so the player can take immediate action.
+   */
+  private recoverFromFail(): void {
+    const state = this.simulation.state;
+    if (state.status !== "failing") {
+      this.notify("Recovery mode is only available while the basin is failing.");
+      return;
+    }
+
+    if (state.paused) this.simulation.togglePause();
+    if (this.simulation.openWants().length === 0) {
+      this.notify("No urgent petitions. The Commons is running again.");
+      this.render();
+      return;
+    }
+
+    this.focusUrgentResident();
   }
 
   /**
@@ -1848,6 +1885,7 @@ export class HUD {
     <section class="control-dock panel" aria-label="Simulation controls">
       <div class="control-row">
         <button class="control-button control-button--pause" type="button" data-action="pause" aria-pressed="false" aria-keyshortcuts="Space P" title="Pause simulation (Space or P)"><span class="control-icon" data-pause-icon aria-hidden="true">Ⅱ</span><span class="control-label" data-pause-label>PAUSE</span></button>
+        <button class="control-button control-button--step" type="button" data-action="recover-from-fail" hidden><span class="control-icon" aria-hidden="true">⟲</span><span class="control-label">RECOVER</span></button>
         <button class="control-button control-button--step" type="button" data-action="step-day" disabled><span class="control-icon" aria-hidden="true">›|</span><span class="control-label">DAY +1</span></button>
         <button class="zoom-button mute-button" type="button" data-action="mute" aria-pressed="false" aria-keyshortcuts="M" title="Mute audio (M)">♪</button>
       </div>
@@ -1859,7 +1897,7 @@ export class HUD {
         <button class="zoom-button" type="button" data-zoom="in" aria-label="Zoom map in" title="Zoom map in (plus)">+</button>
         <button class="zoom-reset" type="button" data-zoom="reset" aria-label="Reset map zoom" title="Reset map zoom (0)">RESET</button>
       </div>
-      <span class="control-hint">SPACE pause · DAY +1 while paused · 1/2/4 speed · U urgent · −/+ zoom · M mute</span>
+      <span class="control-hint">SPACE pause · RECOVER when failing · DAY +1 while paused · 1/2/4 speed · U urgent · −/+ zoom · M mute</span>
     </section>
 
     <section class="message-log panel" aria-labelledby="ledger-heading">
