@@ -467,6 +467,15 @@ const GAME_BINDINGS: Binding[] = [
     run: () => { hud.focusUrgentResident(); },
   },
   {
+    id: "recover-failing-commons",
+    chords: ["alt+r"],
+    display: "Alt+R",
+    description: "Recover from a failing Commons",
+    group: "World",
+    preventDefault: true,
+    run: () => { hud.recoverFromFail(); },
+  },
+  {
     id: "shortcuts",
     chords: ["?", "shift+/"],
     display: "?",

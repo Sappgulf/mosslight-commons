@@ -1459,7 +1459,7 @@ export class HUD {
    * Recovery helper used in failing state: resume the sim and follow urgent
    * demands, so the player can take immediate action.
    */
-  private recoverFromFail(): void {
+  public recoverFromFail(): void {
     const state = this.simulation.state;
     if (state.status !== "failing") {
       this.notify("Recovery mode is only available while the basin is failing.");
@@ -1885,7 +1885,7 @@ export class HUD {
     <section class="control-dock panel" aria-label="Simulation controls">
       <div class="control-row">
         <button class="control-button control-button--pause" type="button" data-action="pause" aria-pressed="false" aria-keyshortcuts="Space P" title="Pause simulation (Space or P)"><span class="control-icon" data-pause-icon aria-hidden="true">Ⅱ</span><span class="control-label" data-pause-label>PAUSE</span></button>
-        <button class="control-button control-button--step" type="button" data-action="recover-from-fail" hidden><span class="control-icon" aria-hidden="true">⟲</span><span class="control-label">RECOVER</span></button>
+        <button class="control-button control-button--step" type="button" data-action="recover-from-fail" aria-keyshortcuts="Alt+R" hidden><span class="control-icon" aria-hidden="true">⟲</span><span class="control-label">RECOVER</span></button>
         <button class="control-button control-button--step" type="button" data-action="step-day" disabled><span class="control-icon" aria-hidden="true">›|</span><span class="control-label">DAY +1</span></button>
         <button class="zoom-button mute-button" type="button" data-action="mute" aria-pressed="false" aria-keyshortcuts="M" title="Mute audio (M)">♪</button>
       </div>
@@ -1897,7 +1897,7 @@ export class HUD {
         <button class="zoom-button" type="button" data-zoom="in" aria-label="Zoom map in" title="Zoom map in (plus)">+</button>
         <button class="zoom-reset" type="button" data-zoom="reset" aria-label="Reset map zoom" title="Reset map zoom (0)">RESET</button>
       </div>
-      <span class="control-hint">SPACE pause · RECOVER when failing · DAY +1 while paused · 1/2/4 speed · U urgent · −/+ zoom · M mute</span>
+      <span class="control-hint">SPACE pause · ALT+R recover while failing · DAY +1 while paused · 1/2/4 speed · U urgent · −/+ zoom · M mute</span>
     </section>
 
     <section class="message-log panel" aria-labelledby="ledger-heading">
