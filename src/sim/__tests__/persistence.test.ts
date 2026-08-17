@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MosslightSimulation, SAVE_VERSION } from "../simulation";
 import { SaveManager } from "../persistence";

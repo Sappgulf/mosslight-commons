@@ -1381,9 +1381,11 @@ export class HUD {
    * through all active requests instead of always returning to the same resident.
    */
   public focusUrgentResident(): void {
-    const urgentResidents = this.simulation
+    // Sorting a copy; `toSorted` is not in this project's TS lib target.
+    // oxlint-disable-next-line no-array-sort
+    const urgentResidents = [...this.simulation
       .openWants()
-      .filter((resident): resident is Resident & { want: NonNullable<Resident["want"]> } => Boolean(resident.want))
+      .filter((resident): resident is Resident & { want: NonNullable<Resident["want"]> } => Boolean(resident.want))]
       .sort((a, b) => {
         const deadlineDelta = a.want.deadlineDay - b.want.deadlineDay;
         if (deadlineDelta !== 0) return deadlineDelta;

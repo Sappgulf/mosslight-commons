@@ -12,7 +12,7 @@ const BASE_WARNING_BANDS: Record<ResourceKey, number> = {
   light: 0,
 };
 
-type RecordEnvelope = { payload: unknown; savedAt: number };
+type RecordEnvelope = { payload: SavePayload; savedAt: number };
 
 type RawRecord = {
   payload?: unknown;
@@ -64,7 +64,15 @@ function isLegacyPayload(value: unknown): value is RawPayload {
   if (!isRecord(value)) return false;
   const payload = value as RawPayload;
   if (!payload.state || typeof payload.state !== "object") return false;
-  const state = payload.state as { grid?: unknown; residents?: unknown; buildings?: unknown; tick?: unknown; resources?: unknown; revealed?: unknown; objectives?: unknown };
+      const state = payload.state as {
+        grid?: unknown;
+        residents?: unknown;
+        buildings?: unknown;
+        tick?: unknown;
+        resources?: unknown;
+        revealed?: unknown;
+        objectives?: unknown;
+      };
   return (
     payload.version !== undefined
     && typeof payload.version === "number"
