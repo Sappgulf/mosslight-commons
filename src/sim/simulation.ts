@@ -2175,6 +2175,7 @@ export class MosslightSimulation {
     const { averageWellbeing, resourceSecurity, population, housingPressure } = this.state.metrics;
     const starving = Object.values(this.state.resources).filter((value) => value < 12).length;
     const previous = this.state.status;
+    const wasPaused = this.state.paused;
 
     /*
      * Failure is measured in residents, not in numbers on a bar. An empty
@@ -2220,6 +2221,12 @@ export class MosslightSimulation {
       this.state.collapseTimer = Math.max(0, this.state.collapseTimer - 2);
     }
 
+    const enteredFailing = previous !== "failing" && status === "failing";
+
+    if (enteredFailing && !wasPaused && status === "failing") {
+      this.state.paused = true;
+    }
+
     this.state.status = status;
 
     if (status !== previous) {
@@ -2231,8 +2238,11 @@ export class MosslightSimulation {
         );
       } else if (status === "failing") {
         const { diagnosis } = this.state.metrics;
+        const pauseHelp = enteredFailing && this.state.paused && !wasPaused
+          ? " Time is paused for recovery planning; press Space to resume."
+          : "";
         this.addMessage(
-          `CRISIS · The Commons is failing. ${diagnosis.cause} ${diagnosis.advice}`,
+          `CRISIS · The Commons is failing. ${diagnosis.cause} ${diagnosis.advice}${pauseHelp}`,
           "warning",
         );
       } else if (status === "strained" && previous === "failing") {
