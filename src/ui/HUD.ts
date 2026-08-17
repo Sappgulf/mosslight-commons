@@ -58,6 +58,7 @@ export interface HUDCallbacks {
   isMuted: () => boolean;
   onSaveMeta: () => SaveMeta | null;
   onFocusResident: (id: string) => void;
+  onFollowedResidentName: () => string | null;
   onFocusCell: (x: number, y: number) => void;
 }
 
@@ -207,11 +208,17 @@ export class HUD {
     if (saveMetaDisplay) {
       if (saveMeta) {
         const age = formatSaveAge(saveMeta.savedAt);
-        saveMetaDisplay.textContent = `SAVE DAY ${String(saveMeta.day).padStart(2, "0")} · ${saveMeta.population} RESIDENTS · V${saveMeta.version} · ${age}`;
+        const backup = saveMeta.backupSavedAt
+          ? ` · BACKUP ${formatSaveAge(saveMeta.backupSavedAt)}`
+          : " · NO BACKUP";
+        const source = saveMeta.source === "backup" ? "BACKUP" : "PRIMARY";
+        saveMetaDisplay.textContent = `SAVE DAY ${String(saveMeta.day).padStart(2, "0")} · ${saveMeta.population} RESIDENTS · V${saveMeta.version} · ${age} · ${source}${backup}`;
         saveMetaDisplay.dataset.state = "ready";
+        saveMetaDisplay.dataset.slot = saveMeta.source;
       } else {
         saveMetaDisplay.textContent = "NO SAVE FILE YET";
         saveMetaDisplay.dataset.state = "empty";
+        saveMetaDisplay.dataset.slot = "none";
       }
     }
 
@@ -224,7 +231,7 @@ export class HUD {
         : `URGENT (${urgentResidents.length})`;
       urgentButton.title = urgentResidents.length === 0
         ? "No active resident requests right now"
-        : `Follow the most urgent resident request (U), ${urgentResidents.length} open`;
+        : `Focus one of ${urgentResidents.length} open resident requests (U) and cycle with the same key`;
     }
 
     // Settlement health banner — the visible face of the new fail state.
@@ -689,7 +696,15 @@ export class HUD {
     this.setText("[data-resident-explanation]", resident.lastDecisionExplanation);
     this.setText("[data-resident-glyph]", resident.species === "glowtail" ? "✧" : resident.species === "mireling" ? "◌" : resident.species === "cloudmoth" ? "☽" : "●");
     this.setText("[data-resident-stage]", `${resident.stage.toUpperCase()} · ${resident.age}d`);
-    this.setText("[data-resident-follow]", "Camera follows · drag the map to look around");
+    const followedResidentName = this.callbacks.onFollowedResidentName();
+    const followHint = this.root.querySelector<HTMLElement>('[data-resident-follow]');
+    const isTracking = Boolean(followedResidentName && followedResidentName === resident.name);
+    if (followHint) {
+      followHint.textContent = isTracking
+        ? `CAMERA TRACKING · ${followedResidentName}`
+        : "CAMERA FOLLOWS · DRAG THE MAP TO LOOK AROUND";
+      followHint.classList.toggle("is-tracking", isTracking);
+    }
 
     // A resident's personal request is the most player-actionable thing about
     // them, so it sits above the generic decision note.
@@ -815,7 +830,20 @@ export class HUD {
   private renderPetitions(): void {
     const list = this.root.querySelector<HTMLElement>("[data-petitions]");
     if (!list) return;
-    const open = this.simulation.state.residents.filter((resident) => resident.want && !resident.want.fulfilled).slice(0, 4);
+    const open = this.simulation.state.residents
+      .filter((resident) => resident.want && !resident.want.fulfilled)
+      // Sorting a copy; `toSorted` is not in this project's TS lib target.
+      // oxlint-disable-next-line no-array-sort
+      .sort((left, right) => {
+        const leftDaysLeft = left.want!.deadlineDay - this.simulation.state.day;
+        const rightDaysLeft = right.want!.deadlineDay - this.simulation.state.day;
+        const delta = leftDaysLeft - rightDaysLeft;
+        if (delta !== 0) return delta;
+        const ageDelta = (right.age ?? 0) - (left.age ?? 0);
+        if (ageDelta !== 0) return ageDelta;
+        return left.name.localeCompare(right.name);
+      })
+      .slice(0, 4);
     if (open.length === 0) {
       list.replaceChildren();
       const empty = document.createElement("p");
@@ -831,11 +859,13 @@ export class HUD {
       item.className = "petition";
       item.dataset.focusResident = resident.id;
       const daysLeft = want.deadlineDay - this.simulation.state.day;
+      const age = Math.max(0, this.simulation.state.day - want.createdDay);
       item.classList.toggle("is-impatient", daysLeft <= 2);
+      item.classList.toggle("is-urgent", daysLeft <= 1);
 
       const text = document.createElement("span");
       text.className = "petition-text";
-      text.textContent = `${WANT_GLYPH[want.kind]} ${want.description}`;
+      text.textContent = `${WANT_GLYPH[want.kind]} ${resident.name}: ${want.description}`;
 
       // A request is a small contract, so show both halves of the bargain.
       const terms = document.createElement("span");
@@ -845,7 +875,7 @@ export class HUD {
         ? "LAST DAY"
         : `${daysLeft} DAY${daysLeft === 1 ? "" : "S"} LEFT`;
       const reward = document.createElement("em");
-      reward.textContent = `+${want.rewardAmount} ${ITEM_DEFINITIONS[want.rewardItem].label}`;
+      reward.textContent = `AGE ${age} DAY${age === 1 ? "" : "S"} · +${want.rewardAmount} ${ITEM_DEFINITIONS[want.rewardItem].label}`;
       terms.append(clock, reward);
 
       item.append(text, terms);

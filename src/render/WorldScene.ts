@@ -709,6 +709,16 @@ export class WorldScene extends Phaser.Scene {
     this.renderNow();
   }
 
+  public getFollowedResidentName(): string | null {
+    if (!this.followId) return null;
+    const resident = this.simulation.state.residents.find((candidate) => candidate.id === this.followId);
+    if (!resident) {
+      this.followId = null;
+      return null;
+    }
+    return resident.name;
+  }
+
   private drawWaterOverlay(): void {
     this.waterOverlay.clear();
     const quality = this.simulation.state.waterQuality;

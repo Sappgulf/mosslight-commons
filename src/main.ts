@@ -68,6 +68,7 @@ const hud = new HUD(hudElement, simulation, {
   },
   onToggleMute: () => audio.toggleMute(),
   isMuted: () => audio.isMuted,
+  onFollowedResidentName: () => worldScene?.getFollowedResidentName() ?? null,
   onFocusResident: (id) => worldScene?.focusResident(id),
   onFocusCell: (x, y) => worldScene?.focusOn({ x, y }),
 });

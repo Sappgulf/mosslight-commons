@@ -468,6 +468,8 @@ kbd {
   text-transform: uppercase;
 }
 .save-meta[data-state="ready"] { color: var(--paper); border-color: rgba(99, 230, 212, 0.25); background: rgba(8, 21, 27, 0.64); }
+.save-meta[data-slot="primary"] { border-left: 3px solid var(--teal); }
+.save-meta[data-slot="backup"] { border-left: 3px solid var(--gold); }
 
 .settlement-status {
   margin: 9px 0 0;
@@ -832,6 +834,7 @@ kbd {
   background: #061018;
 }
 .follow-hint { margin: 4px 0 0; color: var(--muted); font-size: 10px; letter-spacing: 0.04em; }
+.follow-hint.is-tracking { color: var(--gold); font-weight: 800; }
 .save-row button.is-armed { border-color: var(--warning); color: var(--warning); }
 .resident-portrait {
   width: 44px;
@@ -990,6 +993,8 @@ kbd {
   cursor: pointer;
 }
 .petition.is-impatient { border-left-color: var(--warning); color: #f0c4bb; }
+.petition.is-urgent { border-left-color: var(--gold); }
+.petition.is-urgent .petition-terms strong { color: #f9d18a; }
 .forecast-lesson { margin: 6px 0 0; padding-left: 14px; color: var(--muted); font-size: 10px; line-height: 1.4; }
 .crisis-banner {
   margin: 8px 0 0;

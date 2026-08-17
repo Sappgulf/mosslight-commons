@@ -36,7 +36,14 @@ export interface SaveMeta {
   population: number;
   savedAt: number;
   version: number;
+  source: "primary" | "backup";
+  backupSavedAt?: number;
 }
+
+type SaveSlot = {
+  source: "primary" | "backup";
+  record: RecordEnvelope;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -153,18 +160,16 @@ export class SaveManager {
     }
   }
 
-  private availableRecords(): RecordEnvelope[] {
+  private availableRecords(): SaveSlot[] {
     const primary = this.readSlot(STORAGE_KEY);
     const backup = this.readSlot(BACKUP_STORAGE_KEY);
-    if (!primary && !backup) return [];
-    if (primary && !backup) return [primary];
-    if (!primary && backup) return [backup];
-    return [primary, backup]
-      .filter((record): record is RecordEnvelope => record !== null)
-      .sort((a, b) => b.savedAt - a.savedAt);
+    const slots: SaveSlot[] = [];
+    if (primary) slots.push({ source: "primary", record: primary });
+    if (backup) slots.push({ source: "backup", record: backup });
+    return slots.sort((a, b) => b.record.savedAt - a.record.savedAt);
   }
 
-  private latestRecord(): RecordEnvelope | null {
+  private latestRecord(): SaveSlot | null {
     return this.availableRecords()[0] ?? null;
   }
 
@@ -173,14 +178,18 @@ export class SaveManager {
   }
 
   peek(): SaveMeta | null {
-    const record = this.latestRecord();
-    if (!record) return null;
-    const payload = record.payload;
+    const slots = this.availableRecords();
+    const active = slots[0];
+    if (!active) return null;
+    const payload = active.record.payload;
+    const alternate = slots.find((slot) => slot.source !== active.source);
     return {
       day: payload.state.day,
       population: payload.state.residents.length,
-      savedAt: record.savedAt,
+      savedAt: active.record.savedAt,
       version: payload.version,
+      source: active.source,
+      backupSavedAt: alternate?.record.savedAt,
     };
   }
 
@@ -209,7 +218,7 @@ export class SaveManager {
     if (records.length === 0) return false;
     for (const record of records) {
       try {
-        this.simulation.restore(record.payload);
+        this.simulation.restore(record.record.payload);
         return true;
       } catch {
         // try older fallback.
