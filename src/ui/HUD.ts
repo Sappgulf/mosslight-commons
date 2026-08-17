@@ -557,7 +557,7 @@ export class HUD {
     }
     panel.hidden = false;
     // Sorting a fresh array from `Object.entries`, so nothing shared is mutated.
-    // oxlint-disable-next-line no-array-sort
+    // oxlint-disable-next-line unicorn/no-array-sort
     const hottest = Object.entries(research.sampledRisks).sort((left, right) => right[1] - left[1])[0];
     this.setText("[data-torx-risk]", hottest ? `THRML ${hottest[0]} ${Math.round(hottest[1] * 100)}%` : "THRML");
 
@@ -1383,9 +1383,9 @@ export class HUD {
   public focusUrgentResident(): void {
     // Sorting a copy; `toSorted` is not in this project's TS lib target.
     // oxlint-disable-next-line no-array-sort
-    const urgentResidents = [...this.simulation
+    const urgentResidents = this.simulation
       .openWants()
-      .filter((resident): resident is Resident & { want: NonNullable<Resident["want"]> } => Boolean(resident.want))]
+      .filter((resident): resident is Resident & { want: NonNullable<Resident["want"]> } => Boolean(resident.want))
       .sort((a, b) => {
         const deadlineDelta = a.want.deadlineDay - b.want.deadlineDay;
         if (deadlineDelta !== 0) return deadlineDelta;

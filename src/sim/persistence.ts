@@ -106,8 +106,9 @@ function extractPayload(value: unknown): RecordEnvelope | null {
   if (!isRecord(value)) return null;
 
   const rawEnvelope = value as RawRecord;
-  const direct = isLegacyPayload(rawEnvelope.payload ?? rawEnvelope)
-    ? { payload: normalizePayload(rawEnvelope.payload as RawPayload), savedAt: parseSavedAt(rawEnvelope) }
+  const directPayload = rawEnvelope.payload ?? rawEnvelope;
+  const direct = isLegacyPayload(directPayload)
+    ? { payload: normalizePayload(directPayload), savedAt: parseSavedAt(rawEnvelope) }
     : null;
   if (direct) return direct;
 
@@ -156,9 +157,11 @@ export class SaveManager {
     const primary = this.readSlot(STORAGE_KEY);
     const backup = this.readSlot(BACKUP_STORAGE_KEY);
     if (!primary && !backup) return [];
-    if (!primary) return [backup];
-    if (!backup) return [primary];
-    return [primary, backup].sort((a, b) => b.savedAt - a.savedAt);
+    if (primary && !backup) return [primary];
+    if (!primary && backup) return [backup];
+    return [primary, backup]
+      .filter((record): record is RecordEnvelope => record !== null)
+      .sort((a, b) => b.savedAt - a.savedAt);
   }
 
   private latestRecord(): RecordEnvelope | null {
