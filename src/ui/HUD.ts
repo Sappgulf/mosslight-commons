@@ -14,13 +14,14 @@ import {
 import { MosslightSimulation, ZONE_COUNT } from "../sim/simulation";
 import { crisisBanner } from "../sim/crisis";
 import { WANT_GLYPH } from "../sim/wants";
-import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey } from "../sim/types";
+import type { BuildingType, BuildTool, DistrictType, ItemKey, Message, RecipeKey, ResourceKey, Resident } from "../sim/types";
 import { isActivationOnControl, isTypingTarget, type Binding, type BindingGroup, type KeyLayer } from "./keymap";
 import { masteryTitle, tierFor } from "../sim/mastery";
 import { blockedBy, canAfford, isAvailable, missingFor, TRADITION_DEFINITIONS, TRADITION_ORDER } from "../sim/traditions";
 import { testimony } from "../sim/memory";
 import { emblemSvg } from "./emblem";
 import type { TraditionKey } from "../sim/types";
+import type { SaveMeta } from "../sim/persistence";
 
 const shortcutGroups: BindingGroup[] = ["Time", "View", "World", "Session"];
 
@@ -55,11 +56,20 @@ export interface HUDCallbacks {
   onImport: (file: File) => void;
   onToggleMute: () => boolean;
   isMuted: () => boolean;
+  onSaveMeta: () => SaveMeta | null;
   onFocusResident: (id: string) => void;
   onFocusCell: (x: number, y: number) => void;
 }
 
 const formatResourceName = (resource: ResourceKey): string => RESOURCE_DEFINITIONS[resource].label.toUpperCase();
+
+const formatSaveAge = (savedAt: number): string => {
+  const ageMs = Math.max(0, Date.now() - savedAt);
+  if (ageMs < 60_000) return "just now";
+  if (ageMs < 3_600_000) return `${Math.round(ageMs / 60_000)}m ago`;
+  if (ageMs < 86_400_000) return `${Math.round(ageMs / 3_600_000)}h ago`;
+  return `${Math.round(ageMs / 86_400_000)}d ago`;
+};
 
 /** Drops a trailing S when the count is one. */
 const singularise = (label: string, amount: number): string =>
@@ -92,6 +102,7 @@ export class HUD {
   private ledgerFilter: LedgerFilter = "all";
   private shortcutsOpen = false;
   private shortcutBindings: readonly Binding[] = [];
+  private urgentFocusIndex = 0;
   private victoryDismissed = false;
   private victoryPaused = false;
   private resetArmedUntil = 0;
@@ -191,6 +202,31 @@ export class HUD {
     this.zoomPercent = this.callbacks.getZoomPercent();
     this.setText("[data-zoom-value]", `${this.zoomPercent}%`);
 
+    const saveMeta = this.callbacks.onSaveMeta();
+    const saveMetaDisplay = this.root.querySelector<HTMLElement>("[data-save-meta]");
+    if (saveMetaDisplay) {
+      if (saveMeta) {
+        const age = formatSaveAge(saveMeta.savedAt);
+        saveMetaDisplay.textContent = `SAVE DAY ${String(saveMeta.day).padStart(2, "0")} · ${saveMeta.population} RESIDENTS · V${saveMeta.version} · ${age}`;
+        saveMetaDisplay.dataset.state = "ready";
+      } else {
+        saveMetaDisplay.textContent = "NO SAVE FILE YET";
+        saveMetaDisplay.dataset.state = "empty";
+      }
+    }
+
+    const urgentResidents = this.simulation.openWants();
+    const urgentButton = this.root.querySelector<HTMLButtonElement>("[data-action=\"focus-urgent\"]");
+    if (urgentButton) {
+      urgentButton.disabled = urgentResidents.length === 0;
+      urgentButton.textContent = urgentResidents.length === 0
+        ? "URGENT"
+        : `URGENT (${urgentResidents.length})`;
+      urgentButton.title = urgentResidents.length === 0
+        ? "No active resident requests right now"
+        : `Follow the most urgent resident request (U), ${urgentResidents.length} open`;
+    }
+
     // Settlement health banner — the visible face of the new fail state.
     const statusBanner = this.root.querySelector<HTMLElement>("[data-settlement-status]");
     if (statusBanner) {
@@ -218,12 +254,12 @@ export class HUD {
     }
     this.setText("[data-collapse-summary]", `The Commons held for ${state.day - 8} days. ${state.departures} residents left before the light failed.`);
 
-    this.root.querySelectorAll<HTMLButtonElement>("[data-field-tab]").forEach((button) => {
+    this.applyEach<HTMLButtonElement>("[data-field-tab]", (button) => {
       const active = button.dataset.fieldTab === this.activeFieldTab;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
     });
-    this.root.querySelectorAll<HTMLElement>("[data-field-view]").forEach((view) => {
+    this.applyEach<HTMLElement>("[data-field-view]", (view) => {
       view.hidden = view.dataset.fieldView !== this.activeFieldTab;
     });
     const brandStatus = this.root.querySelector<HTMLElement>(".brand-status");
@@ -448,6 +484,14 @@ export class HUD {
     }
     this.setText("[data-pause-icon]", state.paused ? "▶" : "Ⅱ");
     this.setText("[data-pause-label]", state.paused ? "RESUME" : "PAUSE");
+
+    const stepDayButton = this.root.querySelector<HTMLButtonElement>('[data-action="step-day"]');
+    if (stepDayButton) {
+      const canStep = state.paused && state.status !== "collapsed";
+      stepDayButton.disabled = !canStep;
+      stepDayButton.setAttribute("aria-label", canStep ? "Advance one day" : "Advance one day (pause the simulation first)");
+      stepDayButton.title = canStep ? "Advance one day" : "Pause the simulation to advance one day";
+    }
 
     const muteButton = this.root.querySelector<HTMLButtonElement>('[data-action="mute"]');
     if (muteButton) {
@@ -1060,9 +1104,11 @@ export class HUD {
     if (!pending || !proposal) return;
     this.setText("[data-council-title]", proposal.title);
     this.setText("[data-council-body]", proposal.body);
+    const daysRemaining = proposal.deadlineDay - this.simulation.state.day;
+    const deadlineCopy = daysRemaining === 0 ? "TODAY" : `${Math.max(0, daysRemaining)} DAYS LEFT`;
     this.setText(
       "[data-council-deadline]",
-      `Vote by day ${proposal.deadlineDay} · ${Math.max(0, proposal.deadlineDay - this.simulation.state.day)} days left`,
+      `Vote by day ${proposal.deadlineDay} · ${deadlineCopy}`,
     );
     const votes = this.root.querySelector<HTMLElement>("[data-council-votes]");
     if (votes) {
@@ -1230,6 +1276,10 @@ export class HUD {
       case "pause":
         this.simulation.togglePause();
         break;
+      case "step-day":
+        this.simulation.stepDay();
+        this.callbacks.onChange();
+        break;
       case "clear-build":
         this.simulation.setBuildMode(null);
         this.callbacks.onChange();
@@ -1303,6 +1353,9 @@ export class HUD {
       case "import":
         this.root.querySelector<HTMLInputElement>("[data-import-input]")?.click();
         break;
+      case "focus-urgent":
+        this.focusUrgentResident();
+        break;
       case "mute":
         this.callbacks.onToggleMute();
         break;
@@ -1321,6 +1374,37 @@ export class HUD {
       input.value = "";
     }
     input.value = "";
+  }
+
+  /**
+   * Focuses the most urgent open petition, rotating so repeated presses step
+   * through all active requests instead of always returning to the same resident.
+   */
+  public focusUrgentResident(): void {
+    const urgentResidents = this.simulation
+      .openWants()
+      .filter((resident): resident is Resident & { want: NonNullable<Resident["want"]> } => Boolean(resident.want))
+      .sort((a, b) => {
+        const deadlineDelta = a.want.deadlineDay - b.want.deadlineDay;
+        if (deadlineDelta !== 0) return deadlineDelta;
+        return b.age - a.age;
+      });
+
+    if (urgentResidents.length === 0) {
+      this.notify("No resident requests are active right now.");
+      return;
+    }
+
+    const index = this.urgentFocusIndex % urgentResidents.length;
+    const target = urgentResidents[index];
+    this.urgentFocusIndex = (index + 1) % urgentResidents.length;
+    if (!target || !this.simulation.selectResident(target.id)) return;
+
+    const timeLeft = target.want.deadlineDay - this.simulation.state.day;
+    const urgencyText = timeLeft <= 0 ? "due today" : `${timeLeft} day${timeLeft === 1 ? "" : "s"} left`;
+    this.callbacks.onFocusResident(target.id);
+    this.notify(`Following ${target.name} · ${urgencyText}`);
+    this.render();
   }
 
   /**
@@ -1542,6 +1626,10 @@ export class HUD {
     if (element) element.textContent = value;
   }
 
+  private applyEach<T extends Element>(selector: string, action: (node: T) => void): void {
+    this.root.querySelectorAll(selector).forEach((node) => action(node as T));
+  }
+
   private template(): string {
     const resourceMarkup = resourceOrder.map((resource) => {
       const definition = RESOURCE_DEFINITIONS[resource];
@@ -1590,10 +1678,12 @@ export class HUD {
         <button type="button" data-action="load" title="Load the last save">LOAD</button>
         <button type="button" data-action="export" title="Download this world as a file">EXPORT</button>
         <button type="button" data-action="import" title="Load a world from a file">IMPORT</button>
+        <button type="button" data-action="focus-urgent" title="Focus the most urgent resident request (U)">URGENT</button>
         <button type="button" data-action="reset" title="Start a new Commons">NEW</button>
         <button type="button" data-action="shortcuts" title="Keyboard shortcuts (?)" aria-haspopup="dialog">?</button>
         <input type="file" accept="application/json,.json" data-import-input hidden aria-label="Import a saved world" />
       </div>
+      <p class="save-meta" data-save-meta role="status" aria-live="polite">NO SAVE FILE YET</p>
       <p class="settlement-status" data-settlement-status role="status" aria-live="polite" hidden></p>
     </section>
 
@@ -1726,6 +1816,7 @@ export class HUD {
     <section class="control-dock panel" aria-label="Simulation controls">
       <div class="control-row">
         <button class="control-button control-button--pause" type="button" data-action="pause" aria-pressed="false" aria-keyshortcuts="Space P" title="Pause simulation (Space or P)"><span class="control-icon" data-pause-icon aria-hidden="true">Ⅱ</span><span class="control-label" data-pause-label>PAUSE</span></button>
+        <button class="control-button control-button--step" type="button" data-action="step-day" disabled><span class="control-icon" aria-hidden="true">›|</span><span class="control-label">DAY +1</span></button>
         <button class="zoom-button mute-button" type="button" data-action="mute" aria-pressed="false" aria-keyshortcuts="M" title="Mute audio (M)">♪</button>
       </div>
       <div class="speed-group" role="group" aria-label="Simulation speed"><button type="button" data-speed="1" class="is-active" aria-pressed="true" aria-keyshortcuts="1">1×</button><button type="button" data-speed="2" aria-pressed="false" aria-keyshortcuts="2">2×</button><button type="button" data-speed="4" aria-pressed="false" aria-keyshortcuts="4">4×</button></div>
@@ -1736,7 +1827,7 @@ export class HUD {
         <button class="zoom-button" type="button" data-zoom="in" aria-label="Zoom map in" title="Zoom map in (plus)">+</button>
         <button class="zoom-reset" type="button" data-zoom="reset" aria-label="Reset map zoom" title="Reset map zoom (0)">RESET</button>
       </div>
-      <span class="control-hint">SPACE pause · 1/2/4 speed · −/+ zoom · M mute</span>
+      <span class="control-hint">SPACE pause · DAY +1 while paused · 1/2/4 speed · U urgent · −/+ zoom · M mute</span>
     </section>
 
     <section class="message-log panel" aria-labelledby="ledger-heading">

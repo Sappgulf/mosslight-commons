@@ -465,6 +465,34 @@ export class MosslightSimulation {
     }
   }
 
+  /**
+   * Advances exactly one in-world day from a deliberate pause.
+   *
+   * This is intentionally separate from `advance()`: the live clock honours
+   * the selected speed, while a day-step is a management verb with a fixed,
+   * predictable cost in time.
+   */
+  public stepDay(): boolean {
+    if (!this.state.paused || this.state.status === "collapsed") return false;
+
+    for (let index = 0; index < TICKS_PER_DAY; index += 1) {
+      this.tickOnce();
+      if (this.isCollapsed()) break;
+    }
+
+    if (!this.isCollapsed()) {
+      this.addMessage(
+        `TIME · Advanced one day to day ${String(this.state.day).padStart(2, "0")} under the Steward's watch.`,
+        "info",
+      );
+    }
+    return true;
+  }
+
+  private isCollapsed(): boolean {
+    return this.state.status === "collapsed";
+  }
+
   public togglePause(): void {
     this.state.paused = !this.state.paused;
     this.addMessage(

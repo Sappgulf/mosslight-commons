@@ -17,6 +17,7 @@ assets/generated/
 # Playwright run artifacts
 test-results/
 playwright-report/
+output/playwright/
 
 # Local Python environment for the Torx/THRML sidecar.
 .venv/

@@ -179,6 +179,16 @@ const NODE_TEXTURE_KEYS: Partial<Record<TileKind, string>> = {
 const sameCell = (a: Vec2 | null, b: Vec2 | null): boolean =>
   a !== null && b !== null && a.x === b.x && a.y === b.y;
 
+/** Stable visual phase so an entity keeps its own rhythm across redraws. */
+const phaseFor = (value: string): number => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return ((hash >>> 0) / 4294967295) * Math.PI * 2;
+};
+
 interface BuildPreviewState {
   valid: boolean;
   reason: string;
@@ -209,8 +219,14 @@ interface ResidentView {
 interface BuildingView {
   container: Phaser.GameObjects.Container;
   art: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
+  aura: Phaser.GameObjects.Ellipse;
   shadow: Phaser.GameObjects.Ellipse;
   baseSize: { width: number; height: number } | null;
+  artBaseY: number;
+  baseArtScaleX: number;
+  baseArtScaleY: number;
+  levelScale: number;
+  ambientPhase: number;
   levelPips: Phaser.GameObjects.Graphics;
   /** Redrawn every tick while a raising is under way. */
   scaffold: Phaser.GameObjects.Graphics;
@@ -801,6 +817,7 @@ export class WorldScene extends Phaser.Scene {
     if (!this.ready) return;
 
     const t = this.time.now / 1000;
+    const motion = this.reduceMotion ? 0 : 1;
 
     /*
      * Residents are driven by real animations now. The body container still
@@ -809,11 +826,62 @@ export class WorldScene extends Phaser.Scene {
      * squash applied to one static image.
      */
     for (const view of this.residentViews.values()) {
-      view.body.y = view.walking ? -6.2 : Math.sin(t * 2.4 + view.bobPhase) * 1.6 - 5;
+      const beat = Math.sin(t * (view.walking ? 4.6 : 2.2) + view.bobPhase);
+      const sway = Math.sin(t * (view.walking ? 3.1 : 1.35) + view.bobPhase * 0.7);
+      view.body.y = view.walking ? -6.2 + beat * 0.75 * motion : beat * 1.6 * motion - 5;
+      view.body.setScale(
+        1 + beat * (view.walking ? 0.012 : 0.018) * motion,
+        1 - beat * (view.walking ? 0.009 : 0.014) * motion,
+      );
+      view.body.rotation = sway * (view.walking ? 0.018 : 0.012) * motion;
+
+      // The shadow is a second timing layer: it stays grounded while the body
+      // breathes, which sells weight much better than moving the whole group.
+      view.shadow.setScale(1 - beat * 0.045 * motion, 1 + beat * 0.022 * motion);
+      if (view.lastSelected) {
+        view.marker.setScale(1 + (0.035 + beat * 0.025) * motion);
+        view.marker.setAlpha(0.9 + beat * 0.06 * motion);
+      } else {
+        view.marker.setScale(1);
+        view.marker.setAlpha(1);
+      }
+      view.wantMark.y = -22 + Math.sin(t * 2 + view.bobPhase) * motion;
+      view.masteryText.y = -22 + Math.sin(t * 1.7 + view.bobPhase + 1.2) * 0.6 * motion;
     }
+
+    for (const [id, view] of this.buildingViews) {
+      const building = this.simulation.state.buildings.find((candidate) => candidate.id === id);
+      if (!building) continue;
+
+      const isHero = building.type === "root-heart";
+      const beat = Math.sin(t * (isHero ? 1.25 : 0.82) + view.ambientPhase);
+      const shimmer = Math.sin(t * 1.7 + view.ambientPhase * 0.5);
+      const lift = (isHero ? 0.9 : 0.42) * beat * motion;
+      const scalePulse = (isHero ? 0.022 : 0.009) * beat * motion;
+
+      view.art.y = view.artBaseY + lift;
+      view.art.rotation = beat * (isHero ? 0.012 : 0.006) * motion;
+      view.art.setScale(
+        view.baseArtScaleX * (1 + scalePulse),
+        view.baseArtScaleY * (1 - scalePulse * 0.6),
+      );
+      view.shadow.setScale(
+        view.levelScale * (1 - beat * 0.045 * motion),
+        view.levelScale * (1 + beat * 0.018 * motion),
+      );
+
+      const auraPulse = isHero ? 0.05 : 0.025;
+      view.aura.setScale(
+        view.levelScale * (1 + auraPulse * shimmer * motion),
+        view.levelScale * (1 - auraPulse * shimmer * 0.45 * motion),
+      );
+      view.aura.setAlpha((isHero ? 0.12 : 0.055) + (isHero ? 0.04 : 0.018) * beat * motion);
+      view.scaffold.setAlpha(building.upgrading ? 0.82 + shimmer * 0.12 * motion : 1);
+    }
+
     for (const view of this.nodeViews.values()) {
-      view.sprite.rotation = Math.sin(t * 1.1 + view.bobPhase) * 0.045;
-      view.sprite.y = view.sprite.getData("baseY") + Math.sin(t * 1.8 + view.bobPhase) * 1.8;
+      view.sprite.rotation = Math.sin(t * 1.1 + view.bobPhase) * 0.045 * motion;
+      view.sprite.y = view.sprite.getData("baseY") + Math.sin(t * 1.8 + view.bobPhase) * 1.8 * motion;
     }
 
     this.drawWaterShimmer(t);
@@ -1052,7 +1120,7 @@ export class WorldScene extends Phaser.Scene {
           duration: 420,
           ease: "Back.easeOut",
         });
-        this.nodeViews.set(cell, { sprite, bobPhase: Math.random() * Math.PI * 2 });
+        this.nodeViews.set(cell, { sprite, bobPhase: phaseFor(`node:${cell}`) });
       }
     }
 
@@ -1161,19 +1229,25 @@ export class WorldScene extends Phaser.Scene {
         const textureKey = BUILDING_TEXTURE_KEYS[building.type];
         const displaySize = BUILDING_DISPLAY_SIZES[building.type] ?? { width: 55, height: 55 };
 
+        const auraColor = BUILDING_LIGHT[building.type]?.color ?? Phaser.Display.Color.HexStringToColor(definition.color).color;
+        const aura = this.add.ellipse(0, 5, displaySize.width * 0.88, Math.max(9, displaySize.height * 0.24), auraColor, 0.055);
         // A grounded contact shadow is what stops sprites from floating.
         const shadow = this.add.ellipse(0, displaySize.height * 0.32, displaySize.width * 0.78, displaySize.height * 0.22, 0x040d10, 0.42);
 
         let art: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
         let baseSize: { width: number; height: number } | null = null;
+        let artBaseY = 0;
         if (textureKey && this.textures.exists(textureKey)) {
           art = this.add.image(0, -6, textureKey).setDisplaySize(displaySize.width, displaySize.height);
           baseSize = displaySize;
+          artBaseY = -6;
         } else {
           const graphics = this.add.graphics();
           this.drawBuildingVector(graphics, building.type, definition.color);
           art = graphics;
         }
+        const baseArtScaleX = art.scaleX;
+        const baseArtScaleY = art.scaleY;
 
         const levelPips = this.add.graphics();
         const scaffold = this.add.graphics();
@@ -1185,9 +1259,25 @@ export class WorldScene extends Phaser.Scene {
           strokeThickness: 3,
         }).setOrigin(0.5).setVisible(false);
 
-        container.add([shadow, art, levelPips, scaffold, label]);
+        container.add([aura, shadow, art, levelPips, scaffold, label]);
         this.entityLayer.add(container);
-        view = { container, art, shadow, baseSize, levelPips, scaffold, label, lastLevel: -1, lastUpgrading: false };
+        view = {
+          container,
+          art,
+          aura,
+          shadow,
+          baseSize,
+          artBaseY,
+          baseArtScaleX,
+          baseArtScaleY,
+          levelScale: 1,
+          ambientPhase: phaseFor(`building:${building.id}`),
+          levelPips,
+          scaffold,
+          label,
+          lastLevel: -1,
+          lastUpgrading: false,
+        };
         this.buildingViews.set(building.id, view);
 
         // Placement pop.
@@ -1207,7 +1297,11 @@ export class WorldScene extends Phaser.Scene {
         const next = night && this.textures.exists(nightKey) ? nightKey : dayKey;
         if (view.art.texture.key !== next && this.textures.exists(next)) {
           view.art.setTexture(next);
-          if (view.baseSize) view.art.setDisplaySize(view.baseSize.width, view.baseSize.height);
+          if (view.baseSize) {
+            view.art.setDisplaySize(view.baseSize.width * view.levelScale, view.baseSize.height * view.levelScale);
+            view.baseArtScaleX = view.art.scaleX;
+            view.baseArtScaleY = view.art.scaleY;
+          }
         }
       }
 
@@ -1222,11 +1316,14 @@ export class WorldScene extends Phaser.Scene {
           }
         }
         const scale = 1 + (building.level - 1) * 0.12;
+        view.levelScale = scale;
         if (view.baseSize && view.art instanceof Phaser.GameObjects.Image) {
           view.art.setDisplaySize(view.baseSize.width * scale, view.baseSize.height * scale);
         } else {
           view.art.setScale(scale);
         }
+        view.baseArtScaleX = view.art.scaleX;
+        view.baseArtScaleY = view.art.scaleY;
         view.shadow.setScale(scale);
       }
 
@@ -1369,7 +1466,12 @@ export class WorldScene extends Phaser.Scene {
           sprite = this.add.sprite(0, 0, sheetKeyFor(resident.species), 0).setDisplaySize(30, 37);
           body.add(sprite);
         } else {
-          this.drawResidentVector(marker, resident.species);
+          // Keep fallback art inside the animated body as well. The previous
+          // fallback was drawn on the selection marker, so static-vector
+          // residents quietly ignored every body motion pass.
+          const vector = this.add.graphics();
+          this.drawResidentVector(vector, resident.species);
+          body.add(vector);
         }
 
         const label = this.add.text(0, -26, "", {
@@ -1415,7 +1517,7 @@ export class WorldScene extends Phaser.Scene {
           lastSelected: null,
           lastWant: null,
           walking: false,
-          bobPhase: Math.random() * Math.PI * 2,
+          bobPhase: phaseFor(`resident:${resident.id}`),
           facing: 1,
           lastX: resident.position.x,
         };
@@ -1522,7 +1624,6 @@ export class WorldScene extends Phaser.Scene {
           view.marker.fillStyle(intentColor, 0.7);
           view.marker.fillTriangle(0, -16, 4, -11, -4, -11);
         }
-        if (!view.sprite) this.drawResidentVector(view.marker, resident.species);
         view.label.setVisible(selected);
         if (selected) view.label.setText(`${resident.name}  ·  ${GOAL_LABELS[resident.goal]}`);
       }

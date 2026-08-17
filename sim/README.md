@@ -1,18 +1,18 @@
 # Torx + THRML bridge
 
-The browser game stays playable without this process. When it is running, the forecast panel uses live JAX-backed sampling:
+The browser game stays playable without this process. When it is running, the
+forecast panel uses live JAX-backed sampling:
 
 ```bash
-cd /Users/austinbeatty/Documents/ChatGPT/torx/creaturecity
-../.venv/bin/python sim/mosslight_sim.py
+# Run these commands from the repository root.
+.venv/bin/python sim/mosslight_sim.py
 ```
 
 The bridge listens on `http://127.0.0.1:8001`.
 
-- THRML samples a four-node resource-risk graph.
+- THRML samples a settlement-shaped resource-risk graph.
 - Torx evaluates a small parameterized stochastic circuit to derive exploration and social signals.
 - The browser receives a forecast, sampled risk values, and a short explanation.
-
 
 ## Running it
 
@@ -20,20 +20,18 @@ The sidecar needs its own environment. From the repo root:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r sim/requirements.txt
+.venv/bin/python -m pip install -r sim/requirements.txt
 .venv/bin/python sim/mosslight_sim.py
 ```
 
-`requirements.txt` used to point at a venv in the parent workspace that does not
-exist on a fresh machine, which is why this had gone a long time without being
-run at all — and why a three-gate circuit handed two parameters raised on every
-request without anyone noticing.
+The requirements file includes the test runner as well as the sidecar runtime,
+so a fresh environment can run the full adapter contract without a second
+manual install.
 
 ## Tests
 
 ```bash
-.venv/bin/pip install pytest
-cd sim && ../.venv/bin/python -m pytest test_mosslight_sim.py -q
+npm run test:python
 ```
 
 `fixtures/payload.json` is a real request captured from a 1400-tick settlement,

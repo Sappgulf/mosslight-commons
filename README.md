@@ -58,9 +58,22 @@ Three layers, kept apart on purpose:
 npm test          # unit and simulation tests
 npm run test:e2e  # Playwright, boots the real game
 npm run lint      # oxlint
+npm run verify    # build, browser, and sidecar checks
 ```
 
 `npm run build` lints, type-checks, runs the test suite, and then builds.
+
+The optional Python adapter has its own reproducible environment and test
+command:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r sim/requirements.txt
+npm run test:python
+```
+
+The same setup is used by CI; `npm run verify` assumes that `.venv` has been
+created first.
 
 The unit suite covers simulation determinism (including a recorded golden
 snapshot), save/load round-trip fidelity, long-run invariants, gathering and

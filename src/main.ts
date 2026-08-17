@@ -35,6 +35,7 @@ const hud = new HUD(hudElement, simulation, {
   onSave: () => {
     hud.notify(saves.save() ? "The Commons is saved." : "Could not write a save.");
   },
+  onSaveMeta: () => saves.peek(),
   onLoad: () => {
     if (!saves.load()) {
       hud.notify("No save to load.");
@@ -136,11 +137,12 @@ function refreshAll(): void {
 const existingSave = saves.peek();
 if (existingSave) {
   // Resuming is the friendlier default; the HUD exposes NEW for a fresh basin.
-  saves.load();
-  // A resumed world has already met the basin. Never trap a returning player
-  // behind the first-run cards.
-  simulation.dismissTitle();
-  simulation.dismissOnboarding();
+  if (saves.load()) {
+    // A resumed world has already met the basin. Never trap a returning player
+    // behind the first-run cards.
+    simulation.dismissTitle();
+    simulation.dismissOnboarding();
+  }
 }
 saves.startAutosave();
 hud.render();
@@ -454,6 +456,14 @@ const GAME_BINDINGS: Binding[] = [
     // Saving from a focused button is still saving; never swallow it.
     allowOnControl: true,
     run: () => { hud.notify(saves.save() ? "The Commons is saved." : "Could not write a save."); },
+  },
+  {
+    id: "focus-urgent-resident",
+    chords: ["u"],
+    display: "U",
+    description: "Follow the most urgent resident request",
+    group: "World",
+    run: () => { hud.focusUrgentResident(); },
   },
   {
     id: "shortcuts",

@@ -85,13 +85,69 @@ describe("SaveManager", () => {
     expect(meta?.population).toBe(simulation.state.residents.length);
   });
 
-  it("rejects a save from an older schema and clears it", () => {
+  it("imports a raw simulation payload file", async () => {
+    const source = new MosslightSimulation(SEED);
+    advance(source, 120);
+    const expected = digest(source.state);
+    const restored = new MosslightSimulation(SEED);
+    const saves = new SaveManager(restored);
+    const file = new File([source.serialize()], "mosslight-save.json", { type: "application/json" });
+
+    expect(await saves.importFromFile(file)).toBe(true);
+    expect(digest(restored.state)).toBe(expected);
+  });
+
+  it("imports a wrapped save file with metadata", async () => {
+    const source = new MosslightSimulation(SEED);
+    advance(source, 120);
+    const wrapped = {
+      payload: JSON.parse(source.serialize()) as unknown,
+      savedAt: Date.now(),
+    };
+    const expected = digest(source.state);
+    const restored = new MosslightSimulation(SEED);
+    const saves = new SaveManager(restored);
+    const file = new File([JSON.stringify(wrapped)], "mosslight-save.json", { type: "application/json" });
+
+    expect(await saves.importFromFile(file)).toBe(true);
+    expect(digest(restored.state)).toBe(expected);
+  });
+
+  it("writes on pagehide while autosaving and stops after teardown", () => {
+    const simulation = new MosslightSimulation(SEED);
+    const saves = new SaveManager(simulation);
+    const saveSpy = vi.spyOn(saves, "save");
+
+    saves.startAutosave();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+
+    saves.stopAutosave();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads a save from an older schema version", () => {
     const simulation = new MosslightSimulation(SEED);
     const saves = new SaveManager(simulation);
     saves.save();
 
     const raw = JSON.parse(localStorage.getItem("mosslight.save.v7")!);
     raw.payload.version = SAVE_VERSION - 1;
+    localStorage.setItem("mosslight.save.v7", JSON.stringify(raw));
+
+    expect(saves.load()).toBe(true);
+    expect(simulation.state.day).toBeGreaterThan(0);
+    expect(saves.peek()?.version).toBe(SAVE_VERSION - 1);
+  });
+
+  it("rejects a save from a future schema version and clears it", () => {
+    const simulation = new MosslightSimulation(SEED);
+    const saves = new SaveManager(simulation);
+    saves.save();
+
+    const raw = JSON.parse(localStorage.getItem("mosslight.save.v7")!);
+    raw.payload.version = SAVE_VERSION + 1;
     localStorage.setItem("mosslight.save.v7", JSON.stringify(raw));
 
     expect(saves.load()).toBe(false);
@@ -103,6 +159,27 @@ describe("SaveManager", () => {
     const saves = new SaveManager(new MosslightSimulation(SEED));
     expect(saves.peek()).toBeNull();
     expect(saves.load()).toBe(false);
+  });
+
+  it("falls back to backup when the primary save cannot be restored", () => {
+    const simulation = new MosslightSimulation(SEED);
+    const saves = new SaveManager(simulation);
+    advance(simulation, 42);
+    saves.save();
+    const backup = JSON.parse(localStorage.getItem("mosslight.save.v7")!);
+    const backupDay = backup.payload.state.day;
+
+    advance(simulation, 90);
+    saves.save();
+
+    const raw = JSON.parse(localStorage.getItem("mosslight.save.v7")!);
+    raw.payload.state.grid = null;
+    localStorage.setItem("mosslight.save.v7", JSON.stringify(raw));
+
+    const restored = new MosslightSimulation(SEED);
+    const restoredSaves = new SaveManager(restored);
+    expect(restoredSaves.load()).toBe(true);
+    expect(restored.state.day).toBe(backupDay);
   });
 
   it("rejects a payload whose shape would crash the renderer", () => {

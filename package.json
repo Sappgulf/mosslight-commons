@@ -13,7 +13,9 @@
     "assets": "./scripts/optimize-assets.sh",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:python": ".venv/bin/python -m pytest sim/test_mosslight_sim.py -q",
+    "verify": "npm run build && npm run test:e2e && npm run test:python"
   },
   "dependencies": {
     "phaser": "^4.2.1"

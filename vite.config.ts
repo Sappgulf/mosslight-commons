@@ -24,6 +24,6 @@ export default defineConfig({
     // settlement — which legitimately takes seconds. At the 5s default they
     // passed alone and timed out under parallel load, so the suite failed on
     // machine load rather than on behaviour.
-    testTimeout: 30000,
+    testTimeout: 60000,
   },
 });

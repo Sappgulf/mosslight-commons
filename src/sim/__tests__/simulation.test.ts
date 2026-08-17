@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MosslightSimulation } from "../simulation";
+import { TICKS_PER_DAY } from "../constants";
 import { isWalkable } from "../pathfinding";
+import { MosslightSimulation } from "../simulation";
 import type { CollectibleTile, Vec2 } from "../types";
 
 const SEED = 2048;
@@ -454,6 +455,30 @@ describe("MosslightSimulation", () => {
       simulation.setSpeed(4);
       simulation.advance();
       expect(simulation.state.tick).toBe(4);
+    });
+
+    it("steps exactly one day while paused and preserves the selected speed", () => {
+      simulation.setSpeed(4);
+      simulation.togglePause();
+      const before = { day: simulation.state.day, tick: simulation.state.tick };
+
+      expect(simulation.stepDay()).toBe(true);
+      expect(simulation.state.day).toBe(before.day + 1);
+      expect(simulation.state.tick).toBe(before.tick + TICKS_PER_DAY);
+      expect(simulation.state.speed).toBe(4);
+      expect(simulation.state.paused).toBe(true);
+    });
+
+    it("does not step while live or after collapse", () => {
+      const liveTick = simulation.state.tick;
+      expect(simulation.stepDay()).toBe(false);
+      expect(simulation.state.tick).toBe(liveTick);
+
+      simulation.togglePause();
+      simulation.state.status = "collapsed";
+      const collapsedTick = simulation.state.tick;
+      expect(simulation.stepDay()).toBe(false);
+      expect(simulation.state.tick).toBe(collapsedTick);
     });
 
     it("does not advance after collapse", () => {

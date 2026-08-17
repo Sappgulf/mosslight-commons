@@ -129,6 +129,24 @@ test.describe("keyboard", () => {
     expect((await snapshot(page)).paused).toBe(false);
   });
 
+  test("steps exactly one day from a deliberate pause", async ({ page }) => {
+    await freshStart(page);
+    await takeUpTheLedger(page);
+
+    await page.getByRole("button", { name: "Pause simulation" }).click();
+    const before = await snapshot(page);
+    const stepButton = page.getByRole("button", { name: "Advance one day" });
+    await expect(stepButton).toBeEnabled();
+
+    await stepButton.click();
+    const after = await snapshot(page);
+
+    expect(after.paused).toBe(true);
+    expect(after.day).toBe(before.day + 1);
+    expect(after.tick).toBe(before.tick + 12);
+    await expect(page.locator("[data-feedback]")).toContainText("Advanced one day");
+  });
+
   test("changes speed with the number keys", async ({ page }) => {
     await freshStart(page);
     await takeUpTheLedger(page);

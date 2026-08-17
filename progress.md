@@ -10,6 +10,34 @@ Original prompt: Keep improving the Mosslight Commons creature-city simulation u
 - `HUD` owns the DOM overlay.
 - The optional Python bridge returns Torx+THRML forecasts and the browser falls back to the local model when it is unavailable.
 
+## AAA presentation pass · 2026-08-16
+
+- [x] Give fallback-vector residents a real animated body layer so selection
+      markers and creature motion no longer share one drawing surface.
+- [x] Add stable per-entity animation phases for residents, buildings, and
+      gatherable nodes; redraws no longer reshuffle the settlement's rhythm.
+- [x] Add grounded building aura/shadow motion, level-preserving art scaling,
+      and safe day/night texture swaps.
+- [x] Add reduced-motion handling to the new renderer motion and a restrained
+      HUD entrance/alert animation layer with accessible fallbacks.
+- [x] Stage the sprite-edit canvas pipeline from the approved brambleback seed;
+      frame 1 remains the locked anchor for generated strips.
+
+### Presentation verification
+
+- `npm run build` passes: lint, typecheck, 254 Vitest tests, and production build.
+- `npm run test:e2e` passes all 20 browser tests, including 390×844 mobile and
+      two-tap touch placement.
+- Production preview browser session boots and clears onboarding with zero
+      console warnings or errors.
+
+### Art-generation boundary
+
+- Live image generation is staged but not run because `OPENAI_API_KEY` is not
+      present in the local environment. No unreviewed generated frames were
+      committed; the renderer keeps its safe procedural fallback until the
+      normalized strips are available.
+
 ## This pass
 
 - [x] Improve simulation depth and player-facing feedback.
@@ -1350,3 +1378,44 @@ The intent is unchanged; the units moved.
 - 254 Vitest tests (4 new), 20 Playwright tests, 12 Python tests. Lint clean,
   build clean.
 - Two snapshots updated deliberately.
+
+## Reproducible verification pass
+
+- [x] Pulled and reconciled `main` with `origin/main`; the working tree was
+      already at the remote tip before this pass.
+- [x] Refreshed in-range npm dependencies and regenerated the lockfile. No
+      direct npm packages are outdated and `npm audit` reports zero findings.
+- [x] Added `pytest` to `sim/requirements.txt`, so the sidecar's checked-in
+      tests work from the documented fresh environment without a manual extra
+      install.
+- [x] Added `npm run test:python` and `npm run verify`; CI now provisions the
+      Python environment and runs the adapter contract alongside the web suite.
+- [x] Raised the Vitest long-run test budget from 30s to 60s after a legitimate
+      1,600-tick settlement test exceeded the old budget under normal load.
+
+### Verification
+
+- `npm run verify` passes: lint, type-check, 254 Vitest tests, production build,
+  20 Playwright tests, and 12 Python sidecar tests.
+- The Playwright CLI browser pass confirms the live HUD/map layout and saved a
+  desktop inspection at `output/playwright/final-desktop.png`.
+- `npm run format:check` still reports legacy formatting drift across 44 files;
+  it remains separate from the behavioral gate to avoid a 3,500-line style-only
+  rewrite without an agreed Prettier configuration.
+
+## Gameplay control pass · 2026-08-16
+
+- Added a paused-only `DAY +1` control that advances exactly one in-world day
+  through the authoritative simulation pipeline, while preserving the chosen
+  live speed and stopping safely if the settlement collapses mid-step.
+- Clarified council deadlines at zero days remaining: proposals now read
+  `TODAY` while they are still actionable on the current day.
+- Added simulation and browser coverage for the exact `+12 ticks / +1 day`
+  contract, pause gating, feedback, and the responsive control dock.
+
+### Verification
+
+- `npm run verify` passes: lint, type-check, 256 Vitest tests, production build,
+  21 Playwright tests, and 12 Python sidecar tests.
+- In-app browser playtest advanced the existing saved world from day 25 to day
+  26, updated the ledger feedback, and disabled `DAY +1` while live time ran.
