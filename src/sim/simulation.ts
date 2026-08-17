@@ -313,6 +313,10 @@ export interface TickStage {
   run(info: TickInfo): void;
 }
 
+interface SimulationOptions {
+  autoPauseOnFail?: boolean;
+}
+
 export class SeededRandom {
   private value: number;
 
@@ -360,6 +364,7 @@ const sameCell = (a: Vec2, b: Vec2) => a.x === b.x && a.y === b.y;
 export class MosslightSimulation {
   state: WorldState;
   private rng: SeededRandom;
+  private readonly autoPauseOnFail: boolean;
   private nextMessageId = 1;
   private nextResidentId = 1;
   private nextBuildingId = 1;
@@ -434,8 +439,9 @@ export class MosslightSimulation {
     buildingById: (id) => owner.buildingIndex.get(id),
   }))(this);
 
-  constructor(seed = 20260811) {
+  constructor(seed = 20260811, options: SimulationOptions = {}) {
     this.rng = new SeededRandom(seed);
+    this.autoPauseOnFail = options.autoPauseOnFail ?? false;
     this.state = this.createInitialState(seed);
     this.reindexBuildings();
     this.localForecast = this.state.forecast;
@@ -2223,7 +2229,7 @@ export class MosslightSimulation {
 
     const enteredFailing = previous !== "failing" && status === "failing";
 
-    if (enteredFailing && !wasPaused && status === "failing") {
+    if (enteredFailing && this.autoPauseOnFail && !wasPaused && status === "failing") {
       this.state.paused = true;
     }
 

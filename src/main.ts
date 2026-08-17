@@ -11,7 +11,7 @@ import { KeyboardRouter, bindingLayer, type Binding } from "./ui/keymap";
 import { canRenderGame, showBootError } from "./ui/boot";
 import "./styles/main.css";
 
-const simulation = new MosslightSimulation(2048);
+const simulation = new MosslightSimulation(2048, { autoPauseOnFail: true });
 const bridge = new TorxThrmlBridge();
 const audio = new AudioEngine();
 const saves = new SaveManager(simulation);
