@@ -74,6 +74,8 @@ const MIN_VISIBLE_TILES_Y = 13;
 const MIN_ZOOM_RATIO = 1;
 const MAX_ZOOM_RATIO = 3.2;
 const ZOOM_STEP = 0.12;
+const RESIDENT_DRAG_START_PX = 7;
+const QUICK_MOVE_WINDOW_MS = 280;
 
 const INK = 0x08151b;
 const PAPER = 0xf5e6c8;
@@ -294,6 +296,9 @@ export class WorldScene extends Phaser.Scene {
   private cameraOrigin = { x: 0, y: 0 };
   private residentDragId: string | null = null;
   private residentDragMoved = false;
+  private residentDragTarget: Vec2 | null = null;
+  private lastQuickMoveAt = 0;
+  private lastQuickMoveCell: Vec2 | null = null;
 
   /**
    * Touch placement is two-stage. A mouse player sees a live preview under the
@@ -473,6 +478,7 @@ export class WorldScene extends Phaser.Scene {
       this.dragMoved = false;
       this.residentDragId = null;
       this.residentDragMoved = false;
+      this.residentDragTarget = null;
       this.dragOrigin = { x: pointer.x, y: pointer.y };
       this.cameraOrigin = { x: this.cameras.main.scrollX, y: this.cameras.main.scrollY };
 
@@ -483,6 +489,7 @@ export class WorldScene extends Phaser.Scene {
       const residentId = this.residentIdAt(startCell);
       if (!residentId) return;
       this.residentDragId = residentId;
+      this.residentDragTarget = startCell;
       this.simulation.selectAt(startCell);
     });
 
@@ -490,8 +497,10 @@ export class WorldScene extends Phaser.Scene {
       if (this.dragging && this.residentDragId !== null && pointer.isDown) {
         const dx = pointer.x - this.dragOrigin.x;
         const dy = pointer.y - this.dragOrigin.y;
-        if (Math.hypot(dx, dy) > 5) {
+        if (Math.hypot(dx, dy) > RESIDENT_DRAG_START_PX) {
           this.residentDragMoved = true;
+          this.residentDragTarget = this.pointerToCell(pointer);
+          this.drawIntent();
         }
       }
 
@@ -525,10 +534,12 @@ export class WorldScene extends Phaser.Scene {
       const wasDrag = this.dragMoved;
       const residentDragId = this.residentDragId;
       const residentWasDragged = residentDragId !== null && this.residentDragMoved;
+      const now = performance.now();
       this.dragging = false;
       this.dragMoved = false;
       this.residentDragId = null;
       this.residentDragMoved = false;
+      this.residentDragTarget = null;
       if (this.uiBlocksWorld() || wasDrag) return;
 
       const cell = this.pointerToCell(pointer);
@@ -545,6 +556,21 @@ export class WorldScene extends Phaser.Scene {
         this.renderNow();
         this.onStateChange();
         return;
+      }
+
+      if (!this.simulation.state.buildMode) {
+        const selected = this.simulation.getSelectedResident();
+        if (selected && this.lastQuickMoveAt > 0 && now - this.lastQuickMoveAt <= QUICK_MOVE_WINDOW_MS && this.isQuickMoveTarget(cell)) {
+          this.lastQuickMoveAt = 0;
+          this.lastQuickMoveCell = null;
+          this.simulation.commandResidentTo(selected.id, cell);
+          this.simulation.noteTutorial("select");
+          this.renderNow();
+          this.onStateChange();
+          return;
+        }
+        this.lastQuickMoveAt = now;
+        this.lastQuickMoveCell = cell;
       }
 
       const buildMode = this.simulation.state.buildMode;
@@ -581,6 +607,7 @@ export class WorldScene extends Phaser.Scene {
       this.dragging = false;
       this.residentDragId = null;
       this.residentDragMoved = false;
+      this.residentDragTarget = null;
       // An armed touch placement must survive the finger leaving the surface,
       // or the preview would vanish before it could be confirmed.
       if (this.armedCell) return;
@@ -1703,22 +1730,32 @@ export class WorldScene extends Phaser.Scene {
     this.intentLayer.clear();
     this.intentLabel.setVisible(false);
 
-    const resident = this.simulation.getSelectedResident();
-    if (!resident?.target) return;
+    const selectedResident = this.simulation.getSelectedResident();
+    const draggedResident = this.residentDragTarget && this.residentDragId !== null
+      ? this.simulation.state.residents.find((candidate) => candidate.id === this.residentDragId)
+      : null;
+    const resident = draggedResident ?? selectedResident;
+    const explicitTarget = this.residentDragTarget ?? resident?.target;
+    if (!resident || !explicitTarget) return;
 
     const start = this.cellCenter(resident.position);
-    const target = this.cellCenter(resident.target);
+    const target = this.cellCenter(explicitTarget);
     if (start.x === target.x && start.y === target.y) return;
 
-    const color = GOAL_COLORS[resident.goal];
+    const dragTarget = this.residentDragTarget !== null && this.residentDragId !== null;
+    const color = dragTarget ? 0xffd58b : GOAL_COLORS[resident.goal];
     this.intentLayer.lineStyle(2, color, 0.4);
-    let cursor = start;
-    for (const step of resident.path) {
-      const next = this.cellCenter(step);
-      this.drawDashedLine(this.intentLayer, cursor, next, 6, 5);
-      cursor = next;
+    if (dragTarget) {
+      this.drawDashedLine(this.intentLayer, start, target, 6, 5);
+    } else {
+      let cursor = start;
+      for (const step of resident.path) {
+        const next = this.cellCenter(step);
+        this.drawDashedLine(this.intentLayer, cursor, next, 6, 5);
+        cursor = next;
+      }
+      if (resident.path.length === 0) this.drawDashedLine(this.intentLayer, start, target, 6, 5);
     }
-    if (resident.path.length === 0) this.drawDashedLine(this.intentLayer, start, target, 6, 5);
 
     this.intentLayer.fillStyle(color, 0.13);
     this.intentLayer.fillCircle(target.x, target.y, 11);
@@ -1726,7 +1763,11 @@ export class WorldScene extends Phaser.Scene {
     this.intentLayer.strokeCircle(target.x, target.y, 8);
 
     this.intentLabel
-      .setText(`${GOAL_LABELS[resident.goal]} → ${this.targetLabel(resident.target)}`)
+      .setText(
+        draggedResident
+          ? `MOVE → ${this.targetLabel(explicitTarget)}`
+          : `${GOAL_LABELS[resident.goal]} → ${this.targetLabel(explicitTarget)}`,
+      )
       .setColor(Phaser.Display.Color.IntegerToColor(color).rgba)
       .setPosition(target.x, target.y - 12)
       .setVisible(true);
@@ -1855,6 +1896,10 @@ export class WorldScene extends Phaser.Scene {
     const y = Math.floor((worldPoint.y - OFFSET_Y) / TILE_SIZE);
     if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) return null;
     return { x, y };
+  }
+
+  private isQuickMoveTarget(cell: Vec2): boolean {
+    return !this.lastQuickMoveCell || !sameCell(this.lastQuickMoveCell, cell);
   }
 
   private residentIdAt(position: Vec2): string | null {
