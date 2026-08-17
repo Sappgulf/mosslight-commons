@@ -367,7 +367,7 @@ const GAME_BINDINGS: Binding[] = [
     preventDefault: true,
     run: () => { simulation.togglePause(); hud.render(); },
   },
-  ...([1, 2, 4] as const).map((speed) => ({
+  ...([1, 2, 4, 8] as const).map((speed) => ({
     id: `speed-${speed}`,
     chords: [String(speed)],
     display: String(speed),

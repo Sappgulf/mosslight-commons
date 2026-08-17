@@ -1,13 +1,14 @@
 /**
  * Wall time per simulation tick.
  *
- * This was 520ms, which put a whole day in 6.2 seconds and a season in 44. The
- * world moved faster than anyone could read it: residents teleported between
- * cells, the ledger scrolled past unread, and a forecast expired before the
- * player had finished the sentence. At 900ms a day takes about eleven seconds
- * and the 2x and 4x controls still exist for anyone who wants the old pace.
+ * This was 520ms, which put a whole day in 6.2 seconds and a season in 44.
+ * The world moved faster than anyone could read it: residents teleported
+ * between cells, the ledger scrolled past unread, and a forecast expired before
+ * the player had finished the sentence. At 1,050ms a day takes about 12.6
+ * seconds, while 2x, 4x, and the new 8x controls keep a fast lane for people
+ * who want it.
  */
-export const TICK_MS = 900;
+export const TICK_MS = 1050;
 
 /**
  * The maximum amount of wall time a single frame is allowed to convert into

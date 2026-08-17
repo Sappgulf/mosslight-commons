@@ -507,8 +507,22 @@ export class MosslightSimulation {
     );
   }
 
-  public setSpeed(speed: 1 | 2 | 4): void {
+  public setSpeed(speed: 1 | 2 | 4 | 8): void {
     this.state.speed = speed;
+  }
+
+  /** Directly assigns a temporary destination while preserving simulation rules. */
+  public commandResidentTo(residentId: string, target: Vec2): boolean {
+    const resident = this.state.residents.find((candidate) => candidate.id === residentId);
+    if (!resident) return false;
+
+    const destination = this.findWalkableNear(target);
+    this.setResidentTarget(resident, destination);
+    resident.goal = "explore";
+    resident.dwell = 0;
+    resident.lastDecisionExplanation = `I am moving to ${destination.x + 1}:${destination.y + 1} by hand.`;
+    resident.moveCredit = 0;
+    return true;
   }
 
   public setBuildMode(type: BuildTool | null): void {

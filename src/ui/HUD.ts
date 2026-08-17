@@ -1277,7 +1277,7 @@ export class HUD {
 
     const speedButton = target.closest<HTMLButtonElement>("[data-speed]");
     if (speedButton) {
-      this.simulation.setSpeed(Number(speedButton.dataset.speed) as 1 | 2 | 4);
+      this.simulation.setSpeed(Number(speedButton.dataset.speed) as 1 | 2 | 4 | 8);
       this.render();
       return;
     }
@@ -1889,7 +1889,7 @@ export class HUD {
         <button class="control-button control-button--step" type="button" data-action="step-day" disabled><span class="control-icon" aria-hidden="true">›|</span><span class="control-label">DAY +1</span></button>
         <button class="zoom-button mute-button" type="button" data-action="mute" aria-pressed="false" aria-keyshortcuts="M" title="Mute audio (M)">♪</button>
       </div>
-      <div class="speed-group" role="group" aria-label="Simulation speed"><button type="button" data-speed="1" class="is-active" aria-pressed="true" aria-keyshortcuts="1">1×</button><button type="button" data-speed="2" aria-pressed="false" aria-keyshortcuts="2">2×</button><button type="button" data-speed="4" aria-pressed="false" aria-keyshortcuts="4">4×</button></div>
+      <div class="speed-group" role="group" aria-label="Simulation speed"><button type="button" data-speed="1" class="is-active" aria-pressed="true" aria-keyshortcuts="1">1×</button><button type="button" data-speed="2" aria-pressed="false" aria-keyshortcuts="2">2×</button><button type="button" data-speed="4" aria-pressed="false" aria-keyshortcuts="4">4×</button><button type="button" data-speed="8" aria-pressed="false" aria-keyshortcuts="8">8×</button></div>
       <div class="zoom-group" role="group" aria-label="Map zoom">
         <span class="zoom-label">VIEW</span>
         <button class="zoom-button" type="button" data-zoom="out" aria-label="Zoom map out" title="Zoom map out (minus)">−</button>
@@ -1897,7 +1897,7 @@ export class HUD {
         <button class="zoom-button" type="button" data-zoom="in" aria-label="Zoom map in" title="Zoom map in (plus)">+</button>
         <button class="zoom-reset" type="button" data-zoom="reset" aria-label="Reset map zoom" title="Reset map zoom (0)">RESET</button>
       </div>
-      <span class="control-hint">SPACE pause · ALT+R recover while failing · DAY +1 while paused · 1/2/4 speed · U urgent · −/+ zoom · M mute</span>
+      <span class="control-hint">SPACE pause · ALT+R recover while failing · DAY +1 while paused · 1/2/4/8 speed · U urgent · −/+ zoom · M mute</span>
     </section>
 
     <section class="message-log panel" aria-labelledby="ledger-heading">

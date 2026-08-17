@@ -292,6 +292,8 @@ export class WorldScene extends Phaser.Scene {
   private dragMoved = false;
   private dragOrigin = { x: 0, y: 0 };
   private cameraOrigin = { x: 0, y: 0 };
+  private residentDragId: string | null = null;
+  private residentDragMoved = false;
 
   /**
    * Touch placement is two-stage. A mouse player sees a live preview under the
@@ -469,12 +471,31 @@ export class WorldScene extends Phaser.Scene {
       if (this.uiBlocksWorld()) return;
       this.dragging = true;
       this.dragMoved = false;
+      this.residentDragId = null;
+      this.residentDragMoved = false;
       this.dragOrigin = { x: pointer.x, y: pointer.y };
       this.cameraOrigin = { x: this.cameras.main.scrollX, y: this.cameras.main.scrollY };
+
+      if (this.simulation.state.buildMode) return;
+
+      const startCell = this.pointerToCell(pointer);
+      if (!startCell) return;
+      const residentId = this.residentIdAt(startCell);
+      if (!residentId) return;
+      this.residentDragId = residentId;
+      this.simulation.selectAt(startCell);
     });
 
     this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
-      if (this.dragging && pointer.isDown) {
+      if (this.dragging && this.residentDragId !== null && pointer.isDown) {
+        const dx = pointer.x - this.dragOrigin.x;
+        const dy = pointer.y - this.dragOrigin.y;
+        if (Math.hypot(dx, dy) > 5) {
+          this.residentDragMoved = true;
+        }
+      }
+
+      if (this.dragging && this.residentDragId === null && pointer.isDown) {
         const dx = pointer.x - this.dragOrigin.x;
         const dy = pointer.y - this.dragOrigin.y;
         // Only treat it as a pan once the pointer clears a small dead zone, so
@@ -502,13 +523,29 @@ export class WorldScene extends Phaser.Scene {
 
     this.input.on("pointerup", (pointer: Phaser.Input.Pointer) => {
       const wasDrag = this.dragMoved;
+      const residentDragId = this.residentDragId;
+      const residentWasDragged = residentDragId !== null && this.residentDragMoved;
       this.dragging = false;
       this.dragMoved = false;
+      this.residentDragId = null;
+      this.residentDragMoved = false;
       if (this.uiBlocksWorld() || wasDrag) return;
 
       const cell = this.pointerToCell(pointer);
       if (!cell) return;
       this.hoverCell = cell;
+
+      if (residentDragId) {
+        if (residentWasDragged) {
+          this.simulation.commandResidentTo(residentDragId, cell);
+        } else {
+          this.simulation.selectAt(cell);
+          this.simulation.noteTutorial("select");
+        }
+        this.renderNow();
+        this.onStateChange();
+        return;
+      }
 
       const buildMode = this.simulation.state.buildMode;
 
@@ -542,6 +579,8 @@ export class WorldScene extends Phaser.Scene {
 
     this.input.on("pointerout", () => {
       this.dragging = false;
+      this.residentDragId = null;
+      this.residentDragMoved = false;
       // An armed touch placement must survive the finger leaving the surface,
       // or the preview would vanish before it could be confirmed.
       if (this.armedCell) return;
@@ -1816,6 +1855,11 @@ export class WorldScene extends Phaser.Scene {
     const y = Math.floor((worldPoint.y - OFFSET_Y) / TILE_SIZE);
     if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) return null;
     return { x, y };
+  }
+
+  private residentIdAt(position: Vec2): string | null {
+    const resident = this.simulation.state.residents.find((candidate) => candidate.position.x === position.x && candidate.position.y === position.y);
+    return resident ? resident.id : null;
   }
 
   private cellCenter(position: Vec2): Vec2 {

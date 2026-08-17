@@ -505,7 +505,7 @@ export interface WorldState {
   selectedResidentId: string;
   buildMode: BuildTool | null;
   paused: boolean;
-  speed: 1 | 2 | 4;
+  speed: 1 | 2 | 4 | 8;
   status: SettlementStatus;
   /** Ticks spent in a failing state; at the limit the settlement collapses. */
   collapseTimer: number;

@@ -366,7 +366,7 @@ export const ONBOARDING_STEPS: Array<{ title: string; body: string; hint: string
   {
     title: "Watch the forecast",
     body: "The outlook panel reads the settlement's state and names what is coming. Warnings are worth acting on early.",
-    hint: "Space pauses, 1/2/4 change speed, and −/+ zoom the map. Have a good season.",
+    hint: "Space pauses, 1/2/4/8 change speed, and −/+ zoom the map. Have a good season.",
   },
 ];
 
